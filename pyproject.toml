@@ -1,0 +1,81 @@
+# Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
+
+[project]
+name = "corprag"
+version = "0.1.0"
+description = "Corporate RAG - multimodal document ingestion & retrieval service"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = "Apache-2.0"
+maintainers = [{ name = "HanlianLyu" }, { name = "hllyu" }]
+dependencies = [
+    # Core RAG
+    "raganything[all]>=1.2.9",
+    "mineru[core]>=2.7.6",
+    # LLM
+    "langchain-openai>=1.1.10",
+    "langchain-core>=1.2.16",
+    "openai>=2.24.0",
+    # PostgreSQL
+    "asyncpg>=0.31.0",
+    "pgvector>=0.3.0",
+    # Config
+    "pydantic>=2.11.0",
+    "pydantic-settings>=2.13.1",
+    "python-dotenv>=1.2.1",
+    # Utils
+    "httpx>=0.28.1",
+    "numpy>=1.26.0",
+    "Pillow>=11.3.0",
+    "pypdfium2>=4.30.0",
+    # Data sourcing
+    "azure-storage-blob>=12.28.0",
+    "snowflake-connector-python>=4.3.0",
+    # Document parsing
+    "docling>=2.75.0",
+    # MCP server
+    "mcp[cli]>=1.9.0",
+    # REST API server
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    "python-multipart>=0.0.20",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0.1",
+    "pytest-asyncio>=1.3.0",
+    "pytest-cov>=7.0.0",
+    "ruff>=0.11.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/hanlianlu/corprag"
+Repository = "https://github.com/hanlianlu/corprag"
+Issues = "https://github.com/hanlianlu/corprag/issues"
+
+[project.scripts]
+corprag-mcp = "corprag.mcp.server:main"
+corprag-api = "corprag.api.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/corprag"]
+
+[tool.uv.sources]
+raganything = { git = "https://github.com/HKUDS/RAG-Anything.git", rev = "main" }
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "TCH"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

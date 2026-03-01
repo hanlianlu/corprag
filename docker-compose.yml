@@ -1,0 +1,44 @@
+# Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
+
+services:
+  corprag-api:
+    build: .
+    ports:
+      - "8100:8100"
+    environment:
+      CORPRAG_MCP_TRANSPORT: streamable-http
+      CORPRAG_POSTGRES_HOST: postgres
+      CORPRAG_POSTGRES_PORT: "5432"
+      CORPRAG_POSTGRES_DATABASE: corprag
+      CORPRAG_POSTGRES_USER: rag
+      CORPRAG_POSTGRES_PASSWORD: rag
+      CORPRAG_WORKING_DIR: /app/corprag_storage
+      CORPRAG_API_HOST: "0.0.0.0"
+      CORPRAG_API_PORT: "8100"
+    volumes:
+      - corprag_data:/app/corprag_storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["corprag-api"]
+
+  postgres:
+    image: gzdaniel/postgres-for-rag
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: corprag
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD: rag
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag -d corprag"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  corprag_data:
+  pg_data:
