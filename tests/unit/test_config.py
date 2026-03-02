@@ -110,6 +110,30 @@ class TestCorpragConfig:
         config = CorpragConfig()  # type: ignore[call-arg]
         assert config._get_provider_api_key("minimax") == "mm-key"
 
+    def test_ollama_provider(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test Ollama provider config (no API key needed)."""
+        monkeypatch.setenv("CORPRAG_LLM_PROVIDER", "ollama")
+
+        config = CorpragConfig()  # type: ignore[call-arg]
+        assert config._get_provider_api_key("ollama") == "ollama"
+        assert "11434" in config._get_provider_base_url("ollama")
+
+    def test_openrouter_provider(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test OpenRouter provider config."""
+        monkeypatch.setenv("CORPRAG_LLM_PROVIDER", "openrouter")
+        monkeypatch.setenv("CORPRAG_OPENROUTER_API_KEY", "sk-or-key")
+
+        config = CorpragConfig()  # type: ignore[call-arg]
+        assert config._get_provider_api_key("openrouter") == "sk-or-key"
+        assert "openrouter" in config._get_provider_base_url("openrouter")
+
+    def test_openrouter_requires_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test OpenRouter provider requires API key."""
+        monkeypatch.setenv("CORPRAG_LLM_PROVIDER", "openrouter")
+
+        with pytest.raises(ValueError, match="openrouter_api_key"):
+            CorpragConfig()  # type: ignore[call-arg]
+
     def test_embedding_provider_defaults_to_llm_provider(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

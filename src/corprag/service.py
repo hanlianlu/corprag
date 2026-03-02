@@ -46,7 +46,7 @@ def _detect_mineru_backend(manual_override: str | None = None) -> str:
             and torch.backends.mps.is_available()
         ):
             logger.info("MinerU backend: Apple Silicon detected")
-            return "pipeline"
+            return "pipeline"  # Fallback to pipeline for now
 
     except ImportError:
         logger.debug("torch not available, skipping GPU detection")

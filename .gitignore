@@ -37,5 +37,3 @@ htmlcov/
 .coverage
 coverage.xml
 
-# uv
-uv.lock

@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 LLMFunc = Callable[..., Awaitable[str]]
 
 # OpenAI-compatible providers that can use ChatOpenAI with custom base_url
-_OPENAI_COMPATIBLE_PROVIDERS = {"openai", "azure_openai", "qwen", "minimax"}
+_OPENAI_COMPATIBLE_PROVIDERS = {"openai", "azure_openai", "qwen", "minimax", "ollama", "openrouter"}
 
 
 def _ensure_bytes(data: bytes | bytearray | str) -> bytes | None:

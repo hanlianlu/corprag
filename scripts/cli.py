@@ -1,10 +1,23 @@
 #!/usr/bin/env python3
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
-"""CLI client for the corprag REST API.
+"""CLI for corprag — ingestion runs locally, queries go through the REST API.
 
 Usage:
+    # Local ingestion (runs directly via RAGService, no API server needed)
     uv run scripts/cli.py ingest ./docs
     uv run scripts/cli.py ingest ./docs --replace
+    uv run scripts/cli.py ingest ./docs --replace --sync-hashes
+
+    # Azure Blob ingestion
+    uv run scripts/cli.py ingest --source azure_blob --container my-container
+    uv run scripts/cli.py ingest --source azure_blob --container c --blob-path docs/report.pdf
+    uv run scripts/cli.py ingest --source azure_blob --container c --prefix reports/
+
+    # Snowflake ingestion
+    uv run scripts/cli.py ingest --source snowflake --query "SELECT * FROM reports"
+    uv run scripts/cli.py ingest --source snowflake --query "SELECT * FROM t" --table reports
+
+    # Query & answer (requires API server: docker compose up corprag-api)
     uv run scripts/cli.py query "What are the key findings?"
     uv run scripts/cli.py query "Revenue trends" --mode mix --top-k 30
     uv run scripts/cli.py answer "What are the key findings?"
@@ -16,10 +29,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -55,22 +70,113 @@ def _print_json(data: dict) -> None:
     print(json.dumps(data, indent=2, default=str))
 
 
+# ── helpers ──────────────────────────────────────────────────────
+
+
+def _die(msg: str) -> None:
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(2)
+
+
+def _validate_ingest_args(args: argparse.Namespace) -> None:
+    """Validate ingest arguments based on source type."""
+    source = args.source_type
+
+    if source == "local":
+        if not args.path:
+            _die(
+                "local source requires a path argument.\n"
+                "Usage: corprag-cli ingest <path> [--replace] [--sync-hashes]"
+            )
+        if args.container_name or args.blob_path or args.prefix:
+            _die("--container, --blob-path, --prefix are only for azure_blob source")
+        if args.query or args.table:
+            _die("--query, --table are only for snowflake source")
+
+    elif source == "azure_blob":
+        if args.path:
+            _die(
+                "positional path is not used with azure_blob source.\n"
+                "Use --blob-path for a specific blob, or --prefix for batch."
+            )
+        if not args.container_name:
+            _die(
+                "azure_blob source requires --container.\n"
+                "Usage: corprag-cli ingest --source azure_blob --container <name> "
+                "[--blob-path <path> | --prefix <pfx>]"
+            )
+        if args.blob_path and args.prefix:
+            _die("--blob-path and --prefix are mutually exclusive")
+        if args.query or args.table:
+            _die("--query, --table are only for snowflake source")
+
+    elif source == "snowflake":
+        if args.path:
+            _die("positional path is not used with snowflake source")
+        if not args.query:
+            _die(
+                "snowflake source requires --query.\n"
+                "Usage: corprag-cli ingest --source snowflake --query '<SQL>'"
+            )
+        if args.container_name or args.blob_path or args.prefix:
+            _die("--container, --blob-path, --prefix are only for azure_blob source")
+        if args.replace:
+            _die("--replace is not supported for snowflake source")
+        if args.sync_hashes:
+            _die("--sync-hashes is not supported for snowflake source")
+
+
 # ── subcommands ──────────────────────────────────────────────────
 
 
-def cmd_ingest(args: argparse.Namespace) -> None:
-    url = f"{_get_api_url()}/ingest"
-    payload = {
-        "source_type": "local",
-        "path": args.path,
-        "replace": args.replace,
-    }
-    print(f"Ingesting: {args.path} (replace={args.replace})")
-    print(f"API: {url}\n")
+async def _run_ingest(args: argparse.Namespace) -> None:
+    """Run ingestion directly via RAGService (no API server needed)."""
+    from corprag import RAGService
 
-    resp = httpx.post(url, json=payload, headers=_headers(), timeout=600)
-    resp.raise_for_status()
-    _print_json(resp.json())
+    source = args.source_type
+    kwargs: dict[str, Any] = {}
+
+    if source == "local":
+        kwargs["path"] = args.path
+        kwargs["replace"] = args.replace
+        kwargs["sync_hashes"] = args.sync_hashes
+        print(f"Ingesting: {args.path} (replace={args.replace})")
+
+    elif source == "azure_blob":
+        kwargs["container_name"] = args.container_name
+        if args.blob_path:
+            kwargs["blob_path"] = args.blob_path
+        if args.prefix is not None:
+            kwargs["prefix"] = args.prefix
+        kwargs["replace"] = args.replace
+        kwargs["sync_hashes"] = args.sync_hashes
+        target = args.blob_path or (f"prefix={args.prefix}" if args.prefix else "entire container")
+        print(
+            f"Ingesting from Azure Blob: container={args.container_name}, target={target} "
+            f"(replace={args.replace})"
+        )
+
+    elif source == "snowflake":
+        kwargs["query"] = args.query
+        if args.table:
+            kwargs["table"] = args.table
+        print(f"Ingesting from Snowflake: query={args.query!r}")
+        if args.table:
+            print(f"  table metadata: {args.table}")
+
+    print("Running locally (direct RAGService)\n")
+
+    service = await RAGService.create()
+    try:
+        result = await service.aingest(source_type=source, **kwargs)
+        _print_json(result)
+    finally:
+        await service.close()
+
+
+def cmd_ingest(args: argparse.Namespace) -> None:
+    _validate_ingest_args(args)
+    asyncio.run(_run_ingest(args))
 
 
 def cmd_query(args: argparse.Namespace) -> None:
@@ -166,14 +272,59 @@ def cmd_chat(args: argparse.Namespace) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="corprag-cli",
-        description="CLI client for the corprag REST API",
+        description="corprag CLI — ingestion runs locally, queries go through the REST API",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
     # ingest
-    p_ingest = sub.add_parser("ingest", help="Ingest documents")
-    p_ingest.add_argument("path", help="Path inside the container or local filesystem")
+    p_ingest = sub.add_parser(
+        "ingest",
+        help="Ingest documents from local, Azure Blob, or Snowflake sources",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Ingest documents into the RAG knowledge base.\n\n"
+            "Source types:\n"
+            "  local (default)  Ingest from local filesystem (file or directory)\n"
+            "  azure_blob       Ingest from Azure Blob Storage container\n"
+            "  snowflake        Ingest from Snowflake via SQL query\n\n"
+            "Examples:\n"
+            "  %(prog)s ./docs                                          # local file/dir\n"
+            "  %(prog)s ./docs --replace                                # local with replace\n"
+            "  %(prog)s --source azure_blob --container my-container    # entire container\n"
+            "  %(prog)s --source azure_blob --container c --prefix rpt/ # by prefix\n"
+            '  %(prog)s --source snowflake --query "SELECT * FROM t"    # snowflake query'
+        ),
+    )
+    p_ingest.add_argument(
+        "path", nargs="?", default=None, help="Path to file or directory (local source only)"
+    )
+    p_ingest.add_argument(
+        "--source",
+        choices=["local", "azure_blob", "snowflake"],
+        default="local",
+        dest="source_type",
+        help="Data source type (default: local)",
+    )
+    p_ingest.add_argument(
+        "--container", dest="container_name", help="Azure Blob container name (azure_blob source)"
+    )
+    p_ingest.add_argument(
+        "--blob-path",
+        dest="blob_path",
+        help="Specific blob to ingest (azure_blob, mutually exclusive with --prefix)",
+    )
+    p_ingest.add_argument(
+        "--prefix", help="Blob prefix filter (azure_blob, mutually exclusive with --blob-path)"
+    )
+    p_ingest.add_argument("--query", help="SQL query (snowflake source)")
+    p_ingest.add_argument("--table", help="Table name metadata (snowflake source, optional)")
     p_ingest.add_argument("--replace", action="store_true", help="Replace existing documents")
+    p_ingest.add_argument(
+        "--sync-hashes",
+        action="store_true",
+        dest="sync_hashes",
+        help="Sync content hashes before deduplication",
+    )
 
     # query (retrieve only)
     p_query = sub.add_parser("query", help="Retrieve contexts and sources (no LLM answer)")

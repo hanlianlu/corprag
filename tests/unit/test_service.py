@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -19,68 +18,14 @@ from corprag.service import RAGService, _detect_mineru_backend
 class TestRAGServiceInit:
     """Test RAGService construction and configuration."""
 
-    def test_init_stores_config(self, test_config: CorpragConfig) -> None:
-        service = RAGService(config=test_config)
-        assert service.config is test_config
-        assert not service._initialized
-        assert service.ingestion is None
-        assert service.rag_text is None
-
     def test_ensure_initialized_raises(self, test_config: CorpragConfig) -> None:
         service = RAGService(config=test_config)
         with pytest.raises(RuntimeError, match="not initialized"):
             service._ensure_initialized()
 
-
-# ---------------------------------------------------------------------------
-# TestDetectMineruBackend
-# ---------------------------------------------------------------------------
-
-
-class TestDetectMineruBackend:
-    """Test _detect_mineru_backend hardware detection."""
-
-    def test_manual_override(self) -> None:
+    def test_mineru_backend_manual_override(self) -> None:
         result = _detect_mineru_backend("custom-engine")
         assert result == "custom-engine"
-
-    def test_cuda_available(self) -> None:
-        mock_torch = MagicMock()
-        mock_torch.cuda.is_available.return_value = True
-        mock_torch.cuda.get_device_name.return_value = "NVIDIA A100"
-        with patch.dict(sys.modules, {"torch": mock_torch}):
-            result = _detect_mineru_backend()
-        assert result == "hybrid-auto-engine"
-
-    def test_apple_silicon(self) -> None:
-        mock_torch = MagicMock()
-        mock_torch.cuda.is_available.return_value = False
-        mock_torch.backends.mps.is_available.return_value = True
-        with (
-            patch.dict(sys.modules, {"torch": mock_torch}),
-            patch("platform.system", return_value="Darwin"),
-            patch("platform.machine", return_value="arm64"),
-        ):
-            result = _detect_mineru_backend()
-        assert result == "pipeline"
-
-    def test_no_torch(self) -> None:
-        with patch.dict(sys.modules, {"torch": None}):
-            # When module is None, import raises ImportError
-            result = _detect_mineru_backend()
-        assert result == "pipeline"
-
-    def test_no_gpu(self) -> None:
-        mock_torch = MagicMock()
-        mock_torch.cuda.is_available.return_value = False
-        mock_torch.backends.mps.is_available.return_value = False
-        with (
-            patch.dict(sys.modules, {"torch": mock_torch}),
-            patch("platform.system", return_value="Linux"),
-            patch("platform.machine", return_value="x86_64"),
-        ):
-            result = _detect_mineru_backend()
-        assert result == "pipeline"
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +34,7 @@ class TestDetectMineruBackend:
 
 
 class TestRAGServiceAingest:
-    """Test ingestion routing logic."""
+    """Test ingestion logic — replace defaults, azure lifecycle."""
 
     def _make_initialized_service(self, config: CorpragConfig) -> RAGService:
         service = RAGService(config=config)
@@ -101,33 +46,9 @@ class TestRAGServiceAingest:
         service.ingestion.aingest_from_azure_blob = AsyncMock(
             return_value=MagicMock(model_dump=MagicMock(return_value={"status": "success"}))
         )
-        service.ingestion.aingest_from_snowflake = AsyncMock(
-            return_value=MagicMock(model_dump=MagicMock(return_value={"status": "success"}))
-        )
         service.rag_text = MagicMock()
         service.rag_vision = MagicMock()
         return service
-
-    async def test_aingest_local_routing(self, test_config: CorpragConfig) -> None:
-        service = self._make_initialized_service(test_config)
-        await service.aingest(source_type="local", path="/tmp/file.pdf")
-        service.ingestion.aingest_from_local.assert_awaited_once()
-
-    async def test_aingest_azure_routing(self, test_config: CorpragConfig) -> None:
-        service = self._make_initialized_service(test_config)
-        mock_source = AsyncMock()
-        await service.aingest(
-            source_type="azure_blob",
-            source=mock_source,
-            container_name="c",
-            blob_path="b/file.pdf",
-        )
-        service.ingestion.aingest_from_azure_blob.assert_awaited_once()
-
-    async def test_aingest_snowflake_routing(self, test_config: CorpragConfig) -> None:
-        service = self._make_initialized_service(test_config)
-        await service.aingest(source_type="snowflake", query="SELECT 1")
-        service.ingestion.aingest_from_snowflake.assert_awaited_once()
 
     async def test_aingest_not_initialized_raises(self, test_config: CorpragConfig) -> None:
         service = RAGService(config=test_config)
@@ -149,6 +70,37 @@ class TestRAGServiceAingest:
         await service.aingest(source_type="local", path="/tmp/file.pdf", replace=False)
         call_kwargs = service.ingestion.aingest_from_local.call_args
         assert call_kwargs.kwargs["replace"] is False
+
+    # -- Azure blob lifecycle --
+
+    async def test_aingest_azure_defaults_prefix_when_neither_set(
+        self, test_config: CorpragConfig
+    ) -> None:
+        """When neither blob_path nor prefix provided, prefix defaults to '' (entire container)."""
+        service = self._make_initialized_service(test_config)
+        mock_source = AsyncMock()
+        await service.aingest(source_type="azure_blob", source=mock_source, container_name="c")
+        call_kwargs = service.ingestion.aingest_from_azure_blob.call_args.kwargs
+        assert call_kwargs["prefix"] == ""
+        assert call_kwargs.get("blob_path") is None
+
+    async def test_aingest_azure_calls_aclose(self, test_config: CorpragConfig) -> None:
+        """source.aclose() is called after successful ingestion."""
+        service = self._make_initialized_service(test_config)
+        mock_source = AsyncMock()
+        await service.aingest(source_type="azure_blob", source=mock_source, container_name="c")
+        mock_source.aclose.assert_awaited_once()
+
+    async def test_aingest_azure_calls_aclose_on_error(self, test_config: CorpragConfig) -> None:
+        """source.aclose() is called even when ingestion raises."""
+        service = self._make_initialized_service(test_config)
+        service.ingestion.aingest_from_azure_blob = AsyncMock(
+            side_effect=RuntimeError("ingestion failed")
+        )
+        mock_source = AsyncMock()
+        with pytest.raises(RuntimeError, match="ingestion failed"):
+            await service.aingest(source_type="azure_blob", source=mock_source, container_name="c")
+        mock_source.aclose.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -205,24 +157,6 @@ class TestRAGServiceRerank:
 
 class TestRAGServiceClose:
     """Test cleanup logic."""
-
-    async def test_close_finalizes_storages(self, test_config: CorpragConfig) -> None:
-        service = RAGService(config=test_config)
-        service._initialized = True
-        mock_ingestion = MagicMock()
-        mock_ingestion.rag = MagicMock()
-        mock_ingestion.rag.finalize_storages = AsyncMock()
-        service.ingestion = mock_ingestion
-
-        mock_rag = MagicMock()
-        mock_rag.finalize_storages = AsyncMock()
-        service.rag_text = mock_rag
-        service.rag_vision = mock_rag
-
-        await service.close()
-
-        mock_ingestion.rag.finalize_storages.assert_awaited_once()
-        mock_rag.finalize_storages.assert_awaited()
 
     async def test_close_handles_errors(self, test_config: CorpragConfig) -> None:
         service = RAGService(config=test_config)

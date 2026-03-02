@@ -1,30 +1,3 @@
-# Scripts
-
-## CLI Client
-
-`cli.py` is a unified CLI client for the corprag REST API:
-
-```bash
-# Ingest documents
-uv run scripts/cli.py ingest ./docs
-uv run scripts/cli.py ingest ./docs --replace
-
-# Query (retrieve contexts + sources, no LLM answer)
-uv run scripts/cli.py query "What are the key findings?"
-
-# Answer (single-shot LLM-generated answer + contexts + sources)
-uv run scripts/cli.py answer "What are the key findings?"
-uv run scripts/cli.py answer "Summarize the report" --mode mix --top-k 30
-
-# Chat (interactive multi-turn conversation)
-uv run scripts/cli.py chat
-uv run scripts/cli.py chat --mode mix
-```
-
-Inside `chat`, type questions to ask follow-up questions with conversation context. Use `/clear` to reset history, `/quit` to exit.
-
-Set `CORPRAG_API_URL` (default `http://localhost:8100`) and `CORPRAG_API_AUTH_TOKEN` as needed, or place them in `.env`.
-
 ## Known Limitations
 
 ### Image Extraction Quality

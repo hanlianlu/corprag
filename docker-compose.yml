@@ -22,6 +22,7 @@ services:
     env_file: .env
     volumes:
       - corprag_data:/app/corprag_storage
+      - ./src:/app/src:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -39,6 +40,7 @@ services:
     env_file: .env
     volumes:
       - corprag_data:/app/corprag_storage
+      - ./src:/app/src:ro
     depends_on:
       postgres:
         condition: service_healthy

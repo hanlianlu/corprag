@@ -34,6 +34,9 @@ def mock_service():
     service.aretrieve = AsyncMock(
         return_value=RetrievalResult(answer="42", contexts={"chunks": []}, raw={})
     )
+    service.aanswer = AsyncMock(
+        return_value=RetrievalResult(answer="The answer is 42", contexts={"chunks": []}, raw={})
+    )
     service.list_ingested_files = MagicMock(return_value=[])
     service.adelete_files = AsyncMock(return_value=[{"status": "deleted"}])
     return service
@@ -114,6 +117,34 @@ class TestAuthMiddleware:
         )
         assert resp.status_code == 403
 
+    async def test_ingest_requires_auth(
+        self, client: AsyncClient, mock_config: CorpragConfig
+    ) -> None:
+        mock_config.api_auth_token = "secret-token"
+        resp = await client.post("/ingest", json={"source_type": "local", "path": "/tmp/f.pdf"})
+        assert resp.status_code == 401
+
+    async def test_retrieve_requires_auth(
+        self, client: AsyncClient, mock_config: CorpragConfig
+    ) -> None:
+        mock_config.api_auth_token = "secret-token"
+        resp = await client.post("/retrieve", json={"query": "hello"})
+        assert resp.status_code == 401
+
+    async def test_answer_requires_auth(
+        self, client: AsyncClient, mock_config: CorpragConfig
+    ) -> None:
+        mock_config.api_auth_token = "secret-token"
+        resp = await client.post("/answer", json={"query": "hello"})
+        assert resp.status_code == 401
+
+    async def test_delete_requires_auth(
+        self, client: AsyncClient, mock_config: CorpragConfig
+    ) -> None:
+        mock_config.api_auth_token = "secret-token"
+        resp = await client.request("DELETE", "/files", json={"filenames": ["f.pdf"]})
+        assert resp.status_code == 401
+
 
 # ---------------------------------------------------------------------------
 # TestIngestEndpoint
@@ -176,6 +207,21 @@ class TestIngestEndpoint:
             )
 
         assert resp.status_code == 200
+
+    @pytest.mark.usefixtures("_patch_service")
+    async def test_azure_blob_path_and_prefix_mutually_exclusive(
+        self, client: AsyncClient, mock_config: CorpragConfig
+    ) -> None:
+        resp = await client.post(
+            "/ingest",
+            json={
+                "source_type": "azure_blob",
+                "container_name": "c",
+                "blob_path": "docs/file.pdf",
+                "prefix": "docs/",
+            },
+        )
+        assert resp.status_code == 400
 
     async def test_rag_unavailable_503(
         self, client: AsyncClient, mock_config: CorpragConfig
@@ -289,3 +335,94 @@ class TestDeleteEndpoint:
             )
 
         assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# TestAnswerEndpoint
+# ---------------------------------------------------------------------------
+
+
+class TestAnswerEndpoint:
+    """Test /answer endpoint."""
+
+    async def test_answer_success(
+        self, client: AsyncClient, mock_config: CorpragConfig, mock_service
+    ) -> None:
+        async def _fake_get():
+            return mock_service
+
+        with patch("corprag.api.server._get_rag_service", new=_fake_get):
+            resp = await client.post("/answer", json={"query": "What is RAG?"})
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "answer" in body
+        assert "contexts" in body
+        assert "raw" in body
+        assert body["answer"] == "The answer is 42"
+
+    async def test_answer_with_conversation_history(
+        self, client: AsyncClient, mock_config: CorpragConfig, mock_service
+    ) -> None:
+        async def _fake_get():
+            return mock_service
+
+        history = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi there"},
+        ]
+        with patch("corprag.api.server._get_rag_service", new=_fake_get):
+            resp = await client.post(
+                "/answer",
+                json={"query": "Follow up", "conversation_history": history},
+            )
+
+        assert resp.status_code == 200
+        call_kwargs = mock_service.aanswer.call_args.kwargs
+        assert call_kwargs["conversation_history"] == history
+
+    async def test_answer_service_unavailable_503(
+        self, client: AsyncClient, mock_config: CorpragConfig
+    ) -> None:
+        async def _fail():
+            raise RAGServiceUnavailableError("RAG not ready")
+
+        with patch("corprag.api.server._get_rag_service", new=_fail):
+            resp = await client.post("/answer", json={"query": "hello"})
+
+        assert resp.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# TestFilesEndpoint
+# ---------------------------------------------------------------------------
+
+
+class TestFilesEndpoint:
+    """Test GET /files endpoint."""
+
+    @pytest.mark.usefixtures("_patch_service")
+    async def test_list_files_success(
+        self, client: AsyncClient, mock_config: CorpragConfig
+    ) -> None:
+        resp = await client.get("/files")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "files" in body
+        assert "count" in body
+
+    async def test_list_files_count_matches(
+        self, client: AsyncClient, mock_config: CorpragConfig, mock_service
+    ) -> None:
+        mock_service.list_ingested_files = MagicMock(return_value=["a.pdf", "b.pdf", "c.pdf"])
+
+        async def _fake_get():
+            return mock_service
+
+        with patch("corprag.api.server._get_rag_service", new=_fake_get):
+            resp = await client.get("/files")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["count"] == 3
+        assert len(body["files"]) == 3

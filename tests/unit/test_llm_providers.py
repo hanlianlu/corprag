@@ -77,6 +77,25 @@ class TestBuildChatModel:
 
         assert isinstance(model, ChatOpenAI)
 
+    def test_ollama_returns_chat_openai(self) -> None:
+        config = self._make_config(llm_provider="ollama")
+        model = _build_chat_model(config, "llama3.1")
+
+        from langchain_openai import ChatOpenAI
+
+        assert isinstance(model, ChatOpenAI)
+
+    def test_openrouter_returns_chat_openai(self) -> None:
+        config = self._make_config(
+            llm_provider="openrouter",
+            openrouter_api_key="sk-or-key",
+        )
+        model = _build_chat_model(config, "anthropic/claude-sonnet-4-6")
+
+        from langchain_openai import ChatOpenAI
+
+        assert isinstance(model, ChatOpenAI)
+
     def test_anthropic_returns_chat_anthropic(self) -> None:
         config = self._make_config(
             llm_provider="anthropic",

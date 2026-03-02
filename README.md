@@ -1,26 +1,28 @@
 # corprag
 
-Multimodal RAG service built on [RAGAnything](https://github.com/HKUDS/RAG-Anything) + [LightRAG](https://github.com/HKUDS/LightRAG) with PostgreSQL as the unified backend.
+[![PyPI](https://img.shields.io/pypi/v/corprag)](https://pypi.org/project/corprag/)
+[![CI](https://github.com/hanlianlu/corprag/actions/workflows/ci.yml/badge.svg)](https://github.com/hanlianlu/corprag/actions/workflows/ci.yml)
+
+Multimodal RAG service built upon [RAGAnything](https://github.com/HKUDS/RAG-Anything) + [LightRAG](https://github.com/HKUDS/LightRAG) with PostgreSQL and additional enhancements as the unified service.
 
 ## Features
 
-- **Multimodal ingestion** -- PDF, Word, Excel, PowerPoint, images, and more via MinerU / Docling parsing
-- **Knowledge graph + vector search** -- Dual retrieval with Apache AGE (graph) and pgvector (vector) in a single PostgreSQL instance
-- **Content deduplication** -- SHA-256 hash index prevents re-ingesting unchanged documents
-- **Multiple retrieval modes** -- local, global, hybrid, naive, and mix modes via LightRAG
-- **Multi-provider LLM** -- OpenAI, Azure OpenAI, Anthropic, Google Gemini, Qwen, MiniMax
-- **LLM reranking** -- Optional reranking with any LLM provider, Cohere, or Azure Cohere
-- **Three interfaces** -- Python SDK, REST API, and MCP server
-- **Pluggable storage** -- Default PostgreSQL, also supports Neo4j, Milvus, Redis, MongoDB, JSON (via LightRAG)
-- **Flexible data sourcing** -- Ingest from local filesystem, Azure Blob Storage, or Snowflake tables
+- 🗂️ **Multimodal ingestion** -- PDF, Word, Excel, PowerPoint, images, and more via parsing engine
+- 🔭 **Knowledge graph + vector search** -- Dual retrieval with Apache AGE (graph) and pgvector (vector) in a single PostgreSQL instance
+- ♻️ **Content deduplication** -- SHA-256 hash index prevents re-ingesting unchanged documents
+- 🎛️ **Multiple retrieval modes** -- local, global, hybrid, naive, and mix modes for flexible retrieval strategies
+- 🤖 **Multi-provider LLM** -- OpenAI, Azure OpenAI, Anthropic, Google Gemini, Qwen, MiniMax, Ollama, OpenRouter
+- ↕️ **LLM reranking** -- Optional reranking with any LLM provider, or specialized Cohere, or Azure Cohere
+- 🛠️ **Three interfaces** -- Python SDK, REST API, and MCP server
+- 🔌 **Pluggable storage** -- Default PostgreSQL, also supports Neo4j, Milvus, Redis, MongoDB, JSON (via LightRAG)
+- 🌐 **Flexible data sourcing** -- Ingest from local filesystem, Azure Blob Storage, or Snowflake tables
 
 ## Quick Start
 
 ### Option A: Python SDK
 
 ```bash
-# Install from GitHub
-uv add "corprag @ git+https://github.com/hanlianlu/corprag.git"
+pip install corprag   # requires Python 3.12
 ```
 
 ```python
@@ -63,7 +65,7 @@ cp .env.example .env
 docker compose up
 ```
 
-Everything is included: PostgreSQL (pgvector + AGE), REST API, and MCP server.
+Everything is included: PostgreSQL (pgvector + AGE), REST API (`:8100`), and MCP server (`:8101`).
 
 ```bash
 # Health check
@@ -88,7 +90,7 @@ curl -X POST http://localhost:8100/answer \
 ### Option C: MCP Server (for AI Agents)
 
 ```bash
-uv add "corprag @ git+https://github.com/hanlianlu/corprag.git"
+pip install corprag
 corprag-mcp  # stdio mode
 ```
 
@@ -105,6 +107,8 @@ Add to Claude Desktop (`claude_desktop_config.json`):
 ```
 
 Available MCP tools: `retrieve`, `answer`, `ingest`, `list_files`, `delete_files`.
+
+> **Note:** Like the SDK, the MCP server requires PostgreSQL with pgvector + AGE, or JSON fallback storage (see [Configuration](#configuration)).
 
 ## Local Development
 
@@ -126,8 +130,6 @@ docker compose up postgres -d        # via Docker
 
 ### Testing
 
-Coverage is enabled by default (`pyproject.toml` addopts).
-
 ```bash
 uv run pytest tests/unit                    # unit tests (no external services)
 uv run pytest tests/integration             # integration tests (requires PostgreSQL)
@@ -138,13 +140,11 @@ uv run pytest --cov-report=html             # + HTML report → htmlcov/index.ht
 ### Linting
 
 ```bash
-# Check only (for CI)
-uv run ruff check src/ tests/ scripts/ --select ALL
-uv run ruff format --check src/ tests/ scripts/ 
+uv run ruff check src/ tests/ scripts/              # lint check
+uv run ruff format --check src/ tests/ scripts/     # format check
 
-# Auto-fix (for local development)
-uv run ruff check --fix src/ tests/ scripts/
-uv run ruff format src/ tests/ scripts/
+uv run ruff check --fix src/ tests/ scripts/        
+uv run ruff format src/ tests/ scripts/             
 ```
 
 > **Tip:** To skip PostgreSQL entirely during development, set these in your `.env`:
@@ -171,47 +171,14 @@ All configuration is via `CORPRAG_` environment variables, a `.env` file, or con
 
 | Variable | Default | Description |
 |---|---|---|
-| `CORPRAG_LLM_PROVIDER` | `openai` | `openai`, `azure_openai`, `anthropic`, `google_gemini`, `qwen`, `minimax` |
+| `CORPRAG_LLM_PROVIDER` | `openai` | `openai`, `azure_openai`, `anthropic`, `google_gemini`, `qwen`, `minimax`, `ollama`, `openrouter` |
 | `CORPRAG_EMBEDDING_PROVIDER` | (follows `llm_provider`) | Override embedding provider (e.g., `openai` when using Anthropic) |
 | `CORPRAG_VISION_PROVIDER` | (follows `llm_provider`) | Override vision provider |
 | `CORPRAG_EMBEDDING_MODEL` | `text-embedding-3-large` | Embedding model |
 
-Each provider has its own API key. Model names are unified across providers:
-
-```bash
-# OpenAI (default)
-CORPRAG_OPENAI_API_KEY=sk-...
-CORPRAG_CHAT_MODEL=gpt-4.1-mini
-
-# Anthropic (set EMBEDDING_PROVIDER separately -- Anthropic has no embedding API)
-CORPRAG_LLM_PROVIDER=anthropic
-CORPRAG_ANTHROPIC_API_KEY=sk-ant-...
-CORPRAG_CHAT_MODEL=claude-sonnet-4-6
-CORPRAG_EMBEDDING_PROVIDER=openai
-CORPRAG_OPENAI_API_KEY=sk-...
-
-# Google Gemini
-CORPRAG_LLM_PROVIDER=google_gemini
-CORPRAG_GOOGLE_GEMINI_API_KEY=...
-CORPRAG_CHAT_MODEL=gemini-2.5-flash
-
-# Qwen / MiniMax (OpenAI-compatible, no extra deps)
-CORPRAG_LLM_PROVIDER=qwen
-CORPRAG_QWEN_API_KEY=...
-CORPRAG_CHAT_MODEL=qwen3.5-plus
-```
+Each provider has its own API key. Model names are unified across providers.
 
 See [.env.example](.env.example) for all provider-specific variables.
-
-### PostgreSQL
-
-| Variable | Default | Description |
-|---|---|---|
-| `CORPRAG_POSTGRES_HOST` | `localhost` | PostgreSQL host |
-| `CORPRAG_POSTGRES_PORT` | `5432` | PostgreSQL port |
-| `CORPRAG_POSTGRES_USER` | `corprag` | PostgreSQL user |
-| `CORPRAG_POSTGRES_PASSWORD` | `corprag` | PostgreSQL password |
-| `CORPRAG_POSTGRES_DATABASE` | `corprag` | Database name |
 
 ### Storage Backends
 
@@ -221,20 +188,6 @@ See [.env.example](.env.example) for all provider-specific variables.
 | `CORPRAG_GRAPH_STORAGE` | `PGGraphStorage` | PGGraphStorage, Neo4JStorage, NetworkXStorage, ... |
 | `CORPRAG_KV_STORAGE` | `PGKVStorage` | PGKVStorage, JsonKVStorage, RedisKVStorage, ... |
 | `CORPRAG_DOC_STATUS_STORAGE` | `PGDocStatusStorage` | PGDocStatusStorage, JsonDocStatusStorage, ... |
-
-### Development without PostgreSQL
-
-For local development without PostgreSQL, use JSON-based storage:
-
-```python
-config = CorpragConfig(
-    openai_api_key="sk-...",
-    kv_storage="JsonKVStorage",
-    vector_storage="NanoVectorDBStorage",
-    graph_storage="NetworkXStorage",
-    doc_status_storage="JsonDocStatusStorage",
-)
-```
 
 See [.env.example](.env.example) for all available configuration options.
 
@@ -254,51 +207,36 @@ Set `CORPRAG_API_AUTH_TOKEN` to enable bearer token authentication.
 ## Architecture
 
 ```
-CorpragConfig (pydantic-settings)
-       |
-   RAGService  ←── cancel_checker / url_transformer callbacks
-    /       \
-IngestionPipeline    EnhancedRAGAnything (retrieval)
-    |                       |
-DataSources              LightRAG + RAGAnything
-(local/azure/snowflake)     |
-                     PostgreSQL (pgvector + AGE)
-                     or any LightRAG backend
-```
-
-**Dual interface:**
-- REST API (`corprag-api`) -- for bulk ingestion, batch queries, ops
-- MCP server (`corprag-mcp`) -- for AI agent integration (Claude, DeerFlow, etc.)
-
-## Docker Reference
-
-The included `Dockerfile` and `docker-compose.yml` provide three services:
-
-| Service | Port | Description |
-|---------|------|-------------|
-| **corprag-api** | 8100 | REST API server |
-| **corprag-mcp** | 8101 | MCP server (streamable-http) |
-| **postgres** | 5432 | PostgreSQL with pgvector + AGE |
-
-Credentials and API keys come from `.env` (not tracked in git).
-
-```bash
-# Configure
-cp .env.example .env
-# Edit .env -- set CORPRAG_POSTGRES_PASSWORD and CORPRAG_OPENAI_API_KEY at minimum
-
-# Start all services
-docker compose up -d
-
-# Start only REST API (no MCP)
-docker compose up -d corprag-api postgres
-
-# View logs
-docker compose logs -f corprag-api
-docker compose logs -f corprag-mcp
-
-# Stop
-docker compose down
+┌──────────────────────────────────────────────────────┐
+│   Python SDK  ·  REST API (:8100)  ·  MCP (:8101)    │
+└─────────────────────────┬────────────────────────────┘
+                          │  CorpragConfig
+                 ┌────────▼────────┐
+                 │   RAGService    │
+                 └────┬───────┬────┘
+                      │       │
+          ┌───────────▼─┐  ┌──▼─────────────┐
+          │  Ingestion  │  │   Retrieval    │
+          │  Pipeline   │  │ (RAGAnything   │
+          │             │  │  + LightRAG)   │
+          │  local      │  │                │
+          │  azure blob │  │  retrieve()    │
+          │  snowflake  │  │  answer()      │
+          └──────┬──────┘  └───────┬────────┘
+                 └─────────┬───────┘
+                           │
+             ┌─────────────┴──────────────────┐
+             │                                │
+  ┌──────────▼────────┐      ┌────────────────▼─────┐
+  │   LLM Providers   │      │      Storage         │
+  │  Chat · Embed     │      │  PostgreSQL          │
+  │  Vision · Rerank  │      │  (pgvector + AGE)    │
+  │                   │      │                      │
+  │  OpenAI · Azure   │      │  Neo4j · Milvus      │
+  │  Anthropic ·      │      │  Redis · JSON · ...  │
+  │  Gemini · Qwen    │      └──────────────────────┘
+  │  Ollama · ...     │
+  └───────────────────┘
 ```
 
 ## License
@@ -307,4 +245,4 @@ Apache License 2.0. See [LICENSE](LICENSE) for details.
 
 ---
 
-Maintained by HanlianLyu and hllyu
+Built by HanlianLyu. Contributions welcome! Please open issues or pull requests on GitHub.

@@ -25,6 +25,8 @@ LLMProvider = Literal[
     "google_gemini",
     "qwen",
     "minimax",
+    "ollama",
+    "openrouter",
 ]
 
 
@@ -136,6 +138,10 @@ class CorpragConfig(BaseSettings):
     )
     minimax_api_key: str | None = Field(default=None)
     minimax_base_url: str = Field(default="https://api.minimax.chat/v1")
+    ollama_api_key: str | None = Field(default="ollama")  # dummy; Ollama ignores keys
+    ollama_base_url: str = Field(default="http://localhost:11434/v1")
+    openrouter_api_key: str | None = Field(default=None)
+    openrouter_base_url: str = Field(default="https://openrouter.ai/api/v1")
 
     # ===== Embedding =====
     embedding_model: str = Field(default="text-embedding-3-large")

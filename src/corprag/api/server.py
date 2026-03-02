@@ -137,6 +137,10 @@ async def ingest(body: IngestRequest) -> dict[str, Any]:
             raise HTTPException(
                 status_code=400, detail="'container_name' is required for azure_blob"
             )
+        if body.blob_path and body.prefix is not None:
+            raise HTTPException(
+                status_code=400, detail="'blob_path' and 'prefix' are mutually exclusive"
+            )
         kwargs["container_name"] = body.container_name
         if body.blob_path:
             kwargs["blob_path"] = body.blob_path

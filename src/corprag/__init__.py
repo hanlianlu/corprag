@@ -9,6 +9,16 @@ __version__ = "0.1.0"
 __maintainer__ = "HanlianLyu"
 __credits__ = ["hllyu"]
 
+# Fix macOS SSL: use homebrew CA bundle (includes corporate CAs from System Keychain)
+import os as _os
+import platform as _platform
+
+if _platform.system() == "Darwin" and "SSL_CERT_FILE" not in _os.environ:
+    _homebrew_ca = "/opt/homebrew/etc/ca-certificates/cert.pem"
+    if _os.path.exists(_homebrew_ca):
+        _os.environ["SSL_CERT_FILE"] = _homebrew_ca
+        _os.environ["REQUESTS_CA_BUNDLE"] = _homebrew_ca
+
 from corprag.config import CorpragConfig
 
 __all__ = [
