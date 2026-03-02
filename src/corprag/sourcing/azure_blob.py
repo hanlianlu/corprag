@@ -1,21 +1,9 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
-"""Azure Blob Storage data source.
-
-Requires: pip install corprag[azure]
-"""
+"""Azure Blob Storage data source."""
 
 from __future__ import annotations
 
 import os
-
-
-def _require_azure() -> None:
-    try:
-        from azure.storage.blob import BlobServiceClient  # noqa: F401
-    except ImportError as e:
-        raise ImportError(
-            "Azure support requires: pip install corprag[azure]"
-        ) from e
 
 
 class AzureBlobDataSource:
@@ -26,18 +14,12 @@ class AzureBlobDataSource:
         connection_string: str | None = None,
         container_name: str | None = None,
     ) -> None:
-        _require_azure()
-
         from azure.storage.blob import BlobServiceClient, ContainerClient
 
-        self.connection_string = connection_string or os.getenv(
-            "BLOB_CONNECTION_STRING", ""
-        )
+        self.connection_string = connection_string or os.getenv("BLOB_CONNECTION_STRING", "")
         self.container_name = container_name or os.getenv("BLOB_CONTAINER_NAME", "")
 
-        self.blob_service = BlobServiceClient.from_connection_string(
-            self.connection_string
-        )
+        self.blob_service = BlobServiceClient.from_connection_string(self.connection_string)
         self.container_client: ContainerClient = self.blob_service.get_container_client(
             self.container_name
         )
@@ -64,8 +46,8 @@ class AzureBlobDataSource:
             self._async_blob_service = AsyncBlobServiceClient.from_connection_string(
                 self.connection_string
             )
-            self._async_container_client = (
-                self._async_blob_service.get_container_client(self.container_name)
+            self._async_container_client = self._async_blob_service.get_container_client(
+                self.container_name
             )
         return self._async_container_client
 

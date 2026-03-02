@@ -10,11 +10,11 @@ Flow: parse_document() -> policy filter -> insert_content_list()
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
 import json
 import logging
-from pathlib import Path
 import shutil
+from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
@@ -166,14 +166,11 @@ class IngestionPipeline:
                 source_path=file_path,
                 output_dir=output_dir,
             )
-            logger.info(
-                f"Auto-converted Excel to PDF: {file_path.name} -> {pdf_path.name}"
-            )
+            logger.info(f"Auto-converted Excel to PDF: {file_path.name} -> {pdf_path.name}")
             return pdf_path
         except Exception as e:
             logger.warning(
-                f"Excel-to-PDF conversion failed for {file_path.name}, "
-                f"using original: {e}"
+                f"Excel-to-PDF conversion failed for {file_path.name}, using original: {e}"
             )
             return file_path
 
@@ -203,14 +200,11 @@ class IngestionPipeline:
                     source_path=dest_path,
                     output_dir=source_dir,
                 )
-                logger.info(
-                    f"Auto-converted Excel to PDF: {src_path.name} -> {pdf_path.name}"
-                )
+                logger.info(f"Auto-converted Excel to PDF: {src_path.name} -> {pdf_path.name}")
                 return pdf_path
             except Exception as e:
                 logger.warning(
-                    f"Excel-to-PDF conversion failed for {src_path.name}, "
-                    f"using original: {e}"
+                    f"Excel-to-PDF conversion failed for {src_path.name}, using original: {e}"
                 )
 
         return dest_path
@@ -242,7 +236,7 @@ class IngestionPipeline:
         sources_marker = "/sources/"
         idx = file_path.find(sources_marker)
         if idx != -1:
-            return file_path[idx + len(sources_marker):]
+            return file_path[idx + len(sources_marker) :]
         return None
 
     def _resolve_source_file(self, file_path: str) -> Path | None:
@@ -439,9 +433,7 @@ class IngestionPipeline:
                     continue
 
                 if replace:
-                    await self.adelete_files(
-                        filenames=[file_path.name], delete_source=False
-                    )
+                    await self.adelete_files(filenames=[file_path.name], delete_source=False)
 
                 copied_path = self._copy_to_sources_local(file_path)
                 files_to_process.append((copied_path, content_hash or ""))
@@ -485,9 +477,7 @@ class IngestionPipeline:
 
             # Count successes
             success_count = sum(
-                1
-                for r in results
-                if isinstance(r, IngestionResult) and r.status == "success"
+                1 for r in results if isinstance(r, IngestionResult) and r.status == "success"
             )
 
             # Invalidate hash index cache after batch ingestion
@@ -587,9 +577,7 @@ class IngestionPipeline:
         if prefix is not None:
             blob_ids = await source.alist_documents(prefix=prefix)
             if not blob_ids:
-                logger.warning(
-                    "No blobs found in %s with prefix %s", container_name, prefix
-                )
+                logger.warning("No blobs found in %s with prefix %s", container_name, prefix)
                 return IngestionResult(
                     status="success",
                     processed=0,
@@ -662,9 +650,7 @@ class IngestionPipeline:
                     continue
 
                 if replace:
-                    await self.adelete_files(
-                        filenames=[downloaded_path.name], delete_source=False
-                    )
+                    await self.adelete_files(filenames=[downloaded_path.name], delete_source=False)
 
                 files_to_process.append((downloaded_path, content_hash or ""))
 
@@ -707,9 +693,7 @@ class IngestionPipeline:
             results = await asyncio.gather(*ingest_tasks, return_exceptions=True)
 
             success_count = sum(
-                1
-                for r in results
-                if isinstance(r, IngestionResult) and r.status == "success"
+                1 for r in results if isinstance(r, IngestionResult) and r.status == "success"
             )
 
             # Invalidate hash index cache after batch ingestion
@@ -726,9 +710,7 @@ class IngestionPipeline:
                 skipped_files=skipped_files if skipped_files else None,
             )
 
-        raise ValueError(
-            "Must provide either blob_path or prefix for Azure Blob ingestion"
-        )
+        raise ValueError("Must provide either blob_path or prefix for Azure Blob ingestion")
 
     # ─────────────────────────────────────────────────────────────────
     # Public API: Content list ingestion
@@ -795,9 +777,7 @@ class IngestionPipeline:
         source = SnowflakeDataSource(
             account=snowflake_kwargs.get("account") or config.snowflake_account or "",
             user=snowflake_kwargs.get("user") or config.snowflake_user or "",
-            password=snowflake_kwargs.get("password")
-            or config.snowflake_password
-            or "",
+            password=snowflake_kwargs.get("password") or config.snowflake_password or "",
             warehouse=snowflake_kwargs.get("warehouse") or config.snowflake_warehouse,
             database=snowflake_kwargs.get("database") or config.snowflake_database,
             schema=snowflake_kwargs.get("schema") or config.snowflake_schema,
@@ -959,18 +939,14 @@ class IngestionPipeline:
             for doc_id in ctx.doc_ids:
                 if lightrag and hasattr(lightrag, "adelete_by_doc_id"):
                     try:
-                        result = await lightrag.adelete_by_doc_id(
-                            doc_id, delete_llm_cache=True
-                        )
+                        result = await lightrag.adelete_by_doc_id(doc_id, delete_llm_cache=True)
                         deletion_result["cleanup_results"][f"lightrag_{doc_id}"] = (
                             result.status if hasattr(result, "status") else "completed"
                         )
                         logger.info(f"LightRAG deletion for {doc_id}: completed")
                     except Exception as exc:
                         logger.warning(f"LightRAG deletion failed for {doc_id}: {exc}")
-                        deletion_result["cleanup_results"][f"lightrag_{doc_id}"] = (
-                            f"error: {exc}"
-                        )
+                        deletion_result["cleanup_results"][f"lightrag_{doc_id}"] = f"error: {exc}"
 
             # Phase 3a: Remove from hash index
             for content_hash in ctx.content_hashes:
@@ -992,9 +968,7 @@ class IngestionPipeline:
                             logger.info(f"Deleted source file: {resolved}")
                             source_deleted = True
                         except Exception as exc:
-                            logger.warning(
-                                f"Failed to delete source file {resolved}: {exc}"
-                            )
+                            logger.warning(f"Failed to delete source file {resolved}: {exc}")
 
                     # Delete artifacts
                     rel = self._extract_relative_source_path(fp)
@@ -1007,25 +981,19 @@ class IngestionPipeline:
                         artifact_dir = artifact_base / file_stem
                         if artifact_dir.exists() and artifact_dir.is_dir():
                             shutil.rmtree(artifact_dir)
-                            logger.info(
-                                f"Deleted artifacts directory: {artifact_dir}"
-                            )
+                            logger.info(f"Deleted artifacts directory: {artifact_dir}")
 
                         # Delete artifact files
                         for artifact_file in artifact_base.glob(f"{file_stem}.*"):
                             if artifact_file.is_file():
                                 artifact_file.unlink()
-                                logger.info(
-                                    f"Deleted artifact file: {artifact_file}"
-                                )
+                                logger.info(f"Deleted artifact file: {artifact_file}")
 
                 if source_deleted:
                     deletion_result["cleanup_results"]["source_files"] = "deleted"
 
             # Set file_path and doc_id for backward compatibility
-            deletion_result["file_path"] = (
-                list(ctx.file_paths)[0] if ctx.file_paths else identifier
-            )
+            deletion_result["file_path"] = list(ctx.file_paths)[0] if ctx.file_paths else identifier
             deletion_result["doc_id"] = list(ctx.doc_ids)[0] if ctx.doc_ids else None
 
             results.append(deletion_result)

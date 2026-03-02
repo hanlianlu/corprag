@@ -6,11 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from corprag.config import CorpragConfig
-from corprag.converters.office import (
-    EXCEL_EXTENSIONS,
-    SKIP_CONVERSION_EXTENSIONS,
-    LibreOfficeConverter,
-)
+from corprag.converters.office import LibreOfficeConverter
 
 
 class TestLibreOfficeConverter:
@@ -74,9 +70,3 @@ class TestLibreOfficeConverter:
 
         # File outside storage is not safe
         assert not converter._is_safe_to_delete(Path("/tmp/outside.xlsx"))
-
-    def test_constants(self) -> None:
-        """Test module constants."""
-        assert ".xlsx" in EXCEL_EXTENSIONS
-        assert ".xls" in EXCEL_EXTENSIONS
-        assert ".csv" in SKIP_CONVERSION_EXTENSIONS

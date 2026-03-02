@@ -21,15 +21,16 @@ WORKDIR /app
 
 # LibreOffice + MinerU system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    git ca-certificates \
     libreoffice-writer libreoffice-calc libreoffice-impress \
-    fonts-dejavu-core ca-certificates \
+    fonts-dejavu-core \
     libgl1-mesa-glx libglib2.0-0 libsm6 libxext6 libxrender1 \
     fonts-noto-core fonts-noto-cjk fontconfig \
     && fc-cache -fv \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/.venv /app/.venv
-COPY pyproject.toml ./
+COPY pyproject.toml README.md ./
 COPY src/ src/
 
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -42,7 +43,7 @@ ENV PATH="/app/.venv/bin:$PATH"
 RUN mkdir -p /app/corprag_storage
 VOLUME /app/corprag_storage
 
-EXPOSE 8100
+EXPOSE 8100 8101
 
 # Default: start the REST API server
 CMD ["corprag-api"]

@@ -8,7 +8,8 @@ Multimodal RAG service built on [RAGAnything](https://github.com/HKUDS/RAG-Anyth
 - **Knowledge graph + vector search** -- Dual retrieval with Apache AGE (graph) and pgvector (vector) in a single PostgreSQL instance
 - **Content deduplication** -- SHA-256 hash index prevents re-ingesting unchanged documents
 - **Multiple retrieval modes** -- local, global, hybrid, naive, and mix modes via LightRAG
-- **LLM reranking** -- Optional reranking with OpenAI, Cohere, or Azure Cohere
+- **Multi-provider LLM** -- OpenAI, Azure OpenAI, Anthropic, Google Gemini, Qwen, MiniMax
+- **LLM reranking** -- Optional reranking with any LLM provider, Cohere, or Azure Cohere
 - **Three interfaces** -- Python SDK, REST API, and MCP server
 - **Pluggable storage** -- Default PostgreSQL, also supports Neo4j, Milvus, Redis, MongoDB, JSON (via LightRAG)
 - **Flexible data sourcing** -- Ingest from local filesystem, Azure Blob Storage, or Snowflake tables
@@ -20,8 +21,6 @@ Multimodal RAG service built on [RAGAnything](https://github.com/HKUDS/RAG-Anyth
 ```bash
 # Install from GitHub
 uv add "corprag @ git+https://github.com/hanlianlu/corprag.git"
-# or with pip:
-pip install "corprag @ git+https://github.com/hanlianlu/corprag.git"
 ```
 
 ```python
@@ -39,9 +38,13 @@ async def main():
     result = await service.aingest(source_type="local", path="./docs")
     print(f"Ingested {result['ingested']} documents")
 
-    # Query
-    answer = await service.aretrieve(query="What are the key findings?")
-    print(answer.answer)
+    # Retrieve (structured contexts + sources, no LLM answer)
+    result = await service.aretrieve(query="What are the key findings?")
+    print(result.contexts)
+
+    # Answer (LLM-generated answer + structured contexts + sources)
+    result = await service.aanswer(query="What are the key findings?")
+    print(result.answer)
 
     await service.close()
 
@@ -60,7 +63,7 @@ cp .env.example .env
 docker compose up
 ```
 
-Everything is included: PostgreSQL (pgvector + AGE), corprag REST API server.
+Everything is included: PostgreSQL (pgvector + AGE), REST API, and MCP server.
 
 ```bash
 # Health check
@@ -71,8 +74,13 @@ curl -X POST http://localhost:8100/ingest \
   -H "Content-Type: application/json" \
   -d '{"source_type": "local", "path": "/app/corprag_storage/sources"}'
 
-# Query
-curl -X POST http://localhost:8100/query \
+# Retrieve (contexts + sources, no LLM answer)
+curl -X POST http://localhost:8100/retrieve \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What are the key findings?"}'
+
+# Answer (LLM-generated answer + contexts + sources)
+curl -X POST http://localhost:8100/answer \
   -H "Content-Type: application/json" \
   -d '{"query": "What are the key findings?"}'
 ```
@@ -96,7 +104,7 @@ Add to Claude Desktop (`claude_desktop_config.json`):
 }
 ```
 
-Available MCP tools: `retrieve`, `ingest`, `list_files`, `delete_files`.
+Available MCP tools: `retrieve`, `answer`, `ingest`, `list_files`, `delete_files`.
 
 ## Local Development
 
@@ -109,14 +117,34 @@ cp .env.example .env
 # Edit .env -- at minimum set CORPRAG_OPENAI_API_KEY
 
 # Install dependencies
-uv sync          # or: pip install -e ".[dev]"
+uv sync
 
 # Start PostgreSQL (pick one)
 docker compose up postgres -d        # via Docker
 # or use an existing PostgreSQL with pgvector + AGE extensions
+```
 
-# Run tests
-pytest tests/unit
+### Testing
+
+Coverage is enabled by default (`pyproject.toml` addopts).
+
+```bash
+uv run pytest tests/unit                    # unit tests (no external services)
+uv run pytest tests/integration             # integration tests (requires PostgreSQL)
+uv run pytest                               # all tests
+uv run pytest --cov-report=html             # + HTML report → htmlcov/index.html
+```
+
+### Linting
+
+```bash
+# Check only (for CI)
+uv run ruff check src/ tests/ scripts/ --select ALL
+uv run ruff format --check src/ tests/ scripts/ 
+
+# Auto-fix (for local development)
+uv run ruff check --fix src/ tests/ scripts/
+uv run ruff format src/ tests/ scripts/
 ```
 
 > **Tip:** To skip PostgreSQL entirely during development, set these in your `.env`:
@@ -139,21 +167,41 @@ All configuration is via `CORPRAG_` environment variables, a `.env` file, or con
 3. `.env` file
 4. Defaults
 
-### Required
-
-| Variable | Description |
-|---|---|
-| `CORPRAG_OPENAI_API_KEY` | OpenAI API key (or use Azure below) |
-
 ### LLM Provider
 
 | Variable | Default | Description |
 |---|---|---|
-| `CORPRAG_LLM_PROVIDER` | `openai` | `openai` or `azure_openai` |
-| `CORPRAG_OPENAI_CHAT_MODEL` | `gpt-4.1-mini` | Chat model |
-| `CORPRAG_OPENAI_INGESTION_MODEL` | `gpt-4.1-mini` | Ingestion model |
-| `CORPRAG_OPENAI_VISION_MODEL` | `gpt-4.1-mini` | Vision model |
+| `CORPRAG_LLM_PROVIDER` | `openai` | `openai`, `azure_openai`, `anthropic`, `google_gemini`, `qwen`, `minimax` |
+| `CORPRAG_EMBEDDING_PROVIDER` | (follows `llm_provider`) | Override embedding provider (e.g., `openai` when using Anthropic) |
+| `CORPRAG_VISION_PROVIDER` | (follows `llm_provider`) | Override vision provider |
 | `CORPRAG_EMBEDDING_MODEL` | `text-embedding-3-large` | Embedding model |
+
+Each provider has its own API key. Model names are unified across providers:
+
+```bash
+# OpenAI (default)
+CORPRAG_OPENAI_API_KEY=sk-...
+CORPRAG_CHAT_MODEL=gpt-4.1-mini
+
+# Anthropic (set EMBEDDING_PROVIDER separately -- Anthropic has no embedding API)
+CORPRAG_LLM_PROVIDER=anthropic
+CORPRAG_ANTHROPIC_API_KEY=sk-ant-...
+CORPRAG_CHAT_MODEL=claude-sonnet-4-6
+CORPRAG_EMBEDDING_PROVIDER=openai
+CORPRAG_OPENAI_API_KEY=sk-...
+
+# Google Gemini
+CORPRAG_LLM_PROVIDER=google_gemini
+CORPRAG_GOOGLE_GEMINI_API_KEY=...
+CORPRAG_CHAT_MODEL=gemini-2.5-flash
+
+# Qwen / MiniMax (OpenAI-compatible, no extra deps)
+CORPRAG_LLM_PROVIDER=qwen
+CORPRAG_QWEN_API_KEY=...
+CORPRAG_CHAT_MODEL=qwen3.5-plus
+```
+
+See [.env.example](.env.example) for all provider-specific variables.
 
 ### PostgreSQL
 
@@ -161,8 +209,8 @@ All configuration is via `CORPRAG_` environment variables, a `.env` file, or con
 |---|---|---|
 | `CORPRAG_POSTGRES_HOST` | `localhost` | PostgreSQL host |
 | `CORPRAG_POSTGRES_PORT` | `5432` | PostgreSQL port |
-| `CORPRAG_POSTGRES_USER` | `rag` | PostgreSQL user |
-| `CORPRAG_POSTGRES_PASSWORD` | `rag` | PostgreSQL password |
+| `CORPRAG_POSTGRES_USER` | `corprag` | PostgreSQL user |
+| `CORPRAG_POSTGRES_PASSWORD` | `corprag` | PostgreSQL password |
 | `CORPRAG_POSTGRES_DATABASE` | `corprag` | Database name |
 
 ### Storage Backends
@@ -195,7 +243,8 @@ See [.env.example](.env.example) for all available configuration options.
 | Method | Endpoint | Description |
 |---|---|---|
 | `POST` | `/ingest` | Ingest documents from local, Azure Blob, or Snowflake |
-| `POST` | `/query` | Query the knowledge base |
+| `POST` | `/retrieve` | Retrieve contexts and sources (no LLM answer) |
+| `POST` | `/answer` | LLM-generated answer with contexts and sources |
 | `GET` | `/files` | List ingested documents |
 | `DELETE` | `/files` | Delete documents |
 | `GET` | `/health` | Health check with storage status |
@@ -223,19 +272,30 @@ DataSources              LightRAG + RAGAnything
 
 ## Docker Reference
 
-The included `Dockerfile` and `docker-compose.yml` provide:
+The included `Dockerfile` and `docker-compose.yml` provide three services:
 
-- **corprag-api** service: REST API server on port 8100
-- **postgres** service: PostgreSQL with pgvector + AGE (`gzdaniel/postgres-for-rag` image)
-- Persistent volumes for data and PostgreSQL storage
-- Health checks for PostgreSQL readiness
+| Service | Port | Description |
+|---------|------|-------------|
+| **corprag-api** | 8100 | REST API server |
+| **corprag-mcp** | 8101 | MCP server (streamable-http) |
+| **postgres** | 5432 | PostgreSQL with pgvector + AGE |
+
+Credentials and API keys come from `.env` (not tracked in git).
 
 ```bash
-# Build and start
+# Configure
+cp .env.example .env
+# Edit .env -- set CORPRAG_POSTGRES_PASSWORD and CORPRAG_OPENAI_API_KEY at minimum
+
+# Start all services
 docker compose up -d
+
+# Start only REST API (no MCP)
+docker compose up -d corprag-api postgres
 
 # View logs
 docker compose logs -f corprag-api
+docker compose logs -f corprag-mcp
 
 # Stop
 docker compose down

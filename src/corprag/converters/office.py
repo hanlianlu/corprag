@@ -12,12 +12,12 @@ Strategy: Excel -> ODS (modify styles.xml only) -> PDF
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 import subprocess
 import tempfile
-from typing import TYPE_CHECKING
 import xml.etree.ElementTree as ET
 import zipfile
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from corprag.config import CorpragConfig
@@ -91,9 +91,7 @@ class LibreOfficeConverter:
         logger.info(f"Converting {source_path.name} to PDF using LibreOffice")
 
         try:
-            final_pdf_path = self._convert_excel_to_pdf(
-                source_path, output_dir, expected_pdf_path
-            )
+            final_pdf_path = self._convert_excel_to_pdf(source_path, output_dir, expected_pdf_path)
             logger.info(f"Successfully converted {source_path.name} -> {final_pdf_path.name}")
 
             if self.delete_original and source_path.exists():
@@ -134,14 +132,19 @@ class LibreOfficeConverter:
             ods_path = temp_path / (source_path.stem + ".ods")
             result = subprocess.run(
                 [
-                    "libreoffice", "--headless",
-                    "--convert-to", "ods",
-                    "--outdir", str(temp_path),
+                    "libreoffice",
+                    "--headless",
+                    "--convert-to",
+                    "ods",
+                    "--outdir",
+                    str(temp_path),
                     str(source_path),
                 ],
-                capture_output=True, text=True,
+                capture_output=True,
+                text=True,
                 timeout=self.timeout,
-                encoding="utf-8", errors="ignore",
+                encoding="utf-8",
+                errors="ignore",
             )
             if result.returncode != 0 or not ods_path.exists():
                 raise OfficeConverterError(f"Excel->ODS conversion failed: {result.stderr}")
@@ -152,14 +155,19 @@ class LibreOfficeConverter:
             # Step 3: ODS -> PDF
             result = subprocess.run(
                 [
-                    "libreoffice", "--headless",
-                    "--convert-to", "pdf:calc_pdf_Export",
-                    "--outdir", str(output_dir),
+                    "libreoffice",
+                    "--headless",
+                    "--convert-to",
+                    "pdf:calc_pdf_Export",
+                    "--outdir",
+                    str(output_dir),
                     str(ods_path),
                 ],
-                capture_output=True, text=True,
+                capture_output=True,
+                text=True,
                 timeout=self.timeout,
-                encoding="utf-8", errors="ignore",
+                encoding="utf-8",
+                errors="ignore",
             )
             if result.returncode != 0:
                 raise OfficeConverterError(f"ODS->PDF conversion failed: {result.stderr}")
@@ -190,7 +198,9 @@ class LibreOfficeConverter:
 
             ET.register_namespace("", "urn:oasis:names:tc:opendocument:xmlns:office:1.0")
             ET.register_namespace("style", "urn:oasis:names:tc:opendocument:xmlns:style:1.0")
-            ET.register_namespace("fo", "urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0")
+            ET.register_namespace(
+                "fo", "urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0"
+            )
             ET.register_namespace("table", "urn:oasis:names:tc:opendocument:xmlns:table:1.0")
 
             tree = ET.parse(styles_xml)
@@ -204,10 +214,21 @@ class LibreOfficeConverter:
             for page_layout in root.findall(".//style:page-layout", ns):
                 props = page_layout.find("style:page-layout-properties", ns)
                 if props is not None:
-                    props.set("{urn:oasis:names:tc:opendocument:xmlns:style:1.0}print-orientation", "landscape")
-                    props.set("{urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0}page-width", "29.7cm")
-                    props.set("{urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0}page-height", "21cm")
-                    props.set("{urn:oasis:names:tc:opendocument:xmlns:style:1.0}scale-to-pages", "1")
+                    props.set(
+                        "{urn:oasis:names:tc:opendocument:xmlns:style:1.0}print-orientation",
+                        "landscape",
+                    )
+                    props.set(
+                        "{urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0}page-width",
+                        "29.7cm",
+                    )
+                    props.set(
+                        "{urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0}page-height",
+                        "21cm",
+                    )
+                    props.set(
+                        "{urn:oasis:names:tc:opendocument:xmlns:style:1.0}scale-to-pages", "1"
+                    )
                     props.set("{urn:oasis:names:tc:opendocument:xmlns:style:1.0}scale-to-X", "1")
                     props.set("{urn:oasis:names:tc:opendocument:xmlns:style:1.0}scale-to-Y", "0")
 
@@ -231,7 +252,11 @@ class LibreOfficeConverter:
                     zip_ref.write(file_path, arcname, compress_type=zipfile.ZIP_DEFLATED)
 
     def convert_bytes_to_pdf(
-        self, file_data: bytes, mime_type: str, *, apply_page_setup: bool = False,
+        self,
+        file_data: bytes,
+        mime_type: str,
+        *,
+        apply_page_setup: bool = False,
     ) -> bytes | None:
         """Convert Office document bytes to PDF bytes (in-memory)."""
         ext_map = {
@@ -258,13 +283,18 @@ class LibreOfficeConverter:
                 else:
                     result = subprocess.run(
                         [
-                            "libreoffice", "--headless",
-                            "--convert-to", "pdf",
-                            "--outdir", str(tmp_path),
+                            "libreoffice",
+                            "--headless",
+                            "--convert-to",
+                            "pdf",
+                            "--outdir",
+                            str(tmp_path),
                             str(input_file),
                         ],
-                        capture_output=True, timeout=self.timeout,
-                        encoding="utf-8", errors="ignore",
+                        capture_output=True,
+                        timeout=self.timeout,
+                        encoding="utf-8",
+                        errors="ignore",
                     )
                     pdf_path = tmp_path / "input.pdf"
                     if result.returncode != 0 or not pdf_path.exists():
@@ -288,9 +318,7 @@ class LibreOfficeConverter:
         try:
             return self.convert_to_pdf(source_path, output_dir)
         except (OfficeConverterError, Exception) as e:
-            logger.warning(
-                f"Conversion failed for {source_path.name}, using original: {e}"
-            )
+            logger.warning(f"Conversion failed for {source_path.name}, using original: {e}")
             return source_path
 
 
@@ -304,7 +332,9 @@ def create_converter(config: CorpragConfig | None = None) -> LibreOfficeConverte
 
 
 def convert_office_bytes_to_pdf(
-    file_data: bytes, mime_type: str, config: CorpragConfig | None = None,
+    file_data: bytes,
+    mime_type: str,
+    config: CorpragConfig | None = None,
 ) -> bytes | None:
     """Convenience function to convert Office document bytes to PDF."""
     converter = create_converter(config)

@@ -127,9 +127,7 @@ class TestHashIndex:
         test_file.write_text("new content")
 
         index = HashIndex(tmp_path, sources_dir)
-        should_skip, content_hash, reason = await index.should_skip_file(
-            test_file, replace=False
-        )
+        should_skip, content_hash, reason = await index.should_skip_file(test_file, replace=False)
 
         assert not should_skip
         assert content_hash is not None
@@ -151,8 +149,6 @@ class TestHashIndex:
         index.register(content_hash, "doc-001", str(test_file))
 
         # Now check — should skip
-        should_skip, _, reason = await index.should_skip_file(
-            test_file, replace=False
-        )
+        should_skip, _, reason = await index.should_skip_file(test_file, replace=False)
         assert should_skip
         assert reason is not None

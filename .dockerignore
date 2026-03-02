@@ -1,0 +1,40 @@
+# Version control
+.git
+.gitignore
+
+# Python
+.venv
+__pycache__
+*.pyc
+*.egg-info
+dist/
+build/
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.claude/
+# Docker
+docker-compose.yml
+Dockerfile
+postgres/
+
+# Dev/test files
+tests/
+docs/
+*.md
+!README.md
+
+# Storage
+corprag_storage/
+*.log

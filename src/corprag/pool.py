@@ -1,9 +1,16 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
-"""Shared RAG Service Pool - Per-worker singleton with async lazy initialization.
+"""Shared RAG Service Pool - Per-process singleton with async lazy initialization.
 
 Provides a shared RAGService instance per process, avoiding the overhead of
 creating new instances per task. The service is stateless (connects to PG/storage),
-so it can safely be shared across concurrent async tasks.
+so it can safely be shared across concurrent async tasks within one event loop.
+
+Thread-safety note:
+    This module uses ``asyncio.Lock`` and module-level globals. It is safe for
+    **multi-process** deployments (e.g. ``gunicorn --workers N``) but is NOT
+    thread-safe for **multi-threaded** deployments (``gunicorn --threads M``).
+    Deploy with async workers (uvicorn / UvicornWorker) and scale via processes
+    or Kubernetes horizontal pod autoscaling, not via threads.
 
 Usage:
     from corprag.pool import get_shared_rag_service
@@ -15,9 +22,9 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -66,8 +73,8 @@ async def get_shared_rag_service(
 ) -> RAGService:
     """Get or initialize the shared RAG service for this worker.
 
-    Thread-safe via asyncio.Lock. First caller initializes, subsequent
-    calls return the cached instance immediately.
+    Async-task-safe via asyncio.Lock (NOT thread-safe). First caller
+    initializes; subsequent calls return the cached instance immediately.
 
     If initialization previously failed, attempts reinitialize with
     exponential backoff (30s -> 60s -> 120s -> 300s max).
@@ -81,12 +88,7 @@ async def get_shared_rag_service(
     Returns:
         Initialized RAGService instance shared across all tasks.
     """
-    global \
-        _shared_rag_service, \
-        _rag_ready, \
-        _rag_last_error, \
-        _rag_last_error_ts, \
-        _rag_retry_after
+    global _shared_rag_service, _rag_ready, _rag_last_error, _rag_last_error_ts, _rag_retry_after
 
     # Fast path: already initialized and ready
     if _shared_rag_service is not None and _rag_ready:
@@ -138,8 +140,7 @@ async def get_shared_rag_service(
             _rag_retry_after = min(_rag_retry_after * 2, _RAG_MAX_RETRY_INTERVAL)
 
             logger.error(
-                f"RAG service initialization failed: {error_msg}. "
-                f"Next retry in {_rag_retry_after}s"
+                f"RAG service initialization failed: {error_msg}. Next retry in {_rag_retry_after}s"
             )
             raise RAGServiceUnavailableError(detail=error_msg) from e
 

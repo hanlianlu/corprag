@@ -1,4 +1,14 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
+# Credentials come from .env (not tracked in git).
+
+x-common-env: &common-env
+  CORPRAG_POSTGRES_HOST: postgres
+  CORPRAG_POSTGRES_PORT: "5432"
+  CORPRAG_POSTGRES_DATABASE: ${CORPRAG_POSTGRES_DATABASE:-corprag}
+  CORPRAG_POSTGRES_USER: ${CORPRAG_POSTGRES_USER:-corprag}
+  CORPRAG_POSTGRES_PASSWORD: ${CORPRAG_POSTGRES_PASSWORD:-corprag}
+  CORPRAG_POSTGRES_WORKSPACE: ${CORPRAG_POSTGRES_WORKSPACE:-default}
+  CORPRAG_WORKING_DIR: /app/corprag_storage
 
 services:
   corprag-api:
@@ -6,15 +16,10 @@ services:
     ports:
       - "8100:8100"
     environment:
-      CORPRAG_MCP_TRANSPORT: streamable-http
-      CORPRAG_POSTGRES_HOST: postgres
-      CORPRAG_POSTGRES_PORT: "5432"
-      CORPRAG_POSTGRES_DATABASE: corprag
-      CORPRAG_POSTGRES_USER: rag
-      CORPRAG_POSTGRES_PASSWORD: rag
-      CORPRAG_WORKING_DIR: /app/corprag_storage
+      <<: *common-env
       CORPRAG_API_HOST: "0.0.0.0"
       CORPRAG_API_PORT: "8100"
+    env_file: .env
     volumes:
       - corprag_data:/app/corprag_storage
     depends_on:
@@ -22,19 +27,35 @@ services:
         condition: service_healthy
     command: ["corprag-api"]
 
+  corprag-mcp:
+    build: .
+    ports:
+      - "8101:8101"
+    environment:
+      <<: *common-env
+      CORPRAG_MCP_TRANSPORT: streamable-http
+      CORPRAG_MCP_HOST: "0.0.0.0"
+      CORPRAG_MCP_PORT: "8101"
+    env_file: .env
+    volumes:
+      - corprag_data:/app/corprag_storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["corprag-mcp"]
+
   postgres:
-    image: gzdaniel/postgres-for-rag
+    build: postgres/
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_DB: corprag
-      POSTGRES_USER: rag
-      POSTGRES_PASSWORD: rag
+      POSTGRES_DB: ${CORPRAG_POSTGRES_DATABASE:-corprag}
+      POSTGRES_USER: ${CORPRAG_POSTGRES_USER:-corprag}
+      POSTGRES_PASSWORD: ${CORPRAG_POSTGRES_PASSWORD}
     volumes:
       - pg_data:/var/lib/postgresql/data
-      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U rag -d corprag"]
+      test: ["CMD-SHELL", "pg_isready -U ${CORPRAG_POSTGRES_USER:-corprag} -d ${CORPRAG_POSTGRES_DATABASE:-corprag}"]
       interval: 5s
       timeout: 3s
       retries: 10

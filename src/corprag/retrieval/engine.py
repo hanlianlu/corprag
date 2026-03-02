@@ -7,13 +7,13 @@ Provides EnhancedRAGAnything (data-only retrieval) and augment_retrieval_result
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass, field
 import hashlib
 import json
 import logging
-from pathlib import Path
 import re
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 from lightrag import QueryParam
@@ -33,7 +33,7 @@ def _extract_rag_relative(file_path: str, working_dir: str | None = None) -> str
         wd = working_dir.rstrip("/")
         idx = file_path.find(wd)
         if idx != -1:
-            return file_path[idx + len(wd):].lstrip("/")
+            return file_path[idx + len(wd) :].lstrip("/")
 
     # Fallback: look for sources/ marker
     for marker in ("sources/", "artifacts/"):
@@ -172,9 +172,7 @@ def build_sources_and_media_from_contexts(
                     url_transformer=url_transformer,
                     working_dir=rag_working_dir,
                 ),
-                "caption": match_caption.group(1).strip()
-                if match_caption is not None
-                else None,
+                "caption": match_caption.group(1).strip() if match_caption is not None else None,
             }
 
     return list(sources.values()), list(media.values())
@@ -225,7 +223,7 @@ def augment_retrieval_result(
 
 
 class EnhancedRAGAnything(RAGAnything):
-    """Extended RAGAnything with data-only retrieval.
+    """Extended RAGAnything with data-only and answer-generating retrieval.
 
     ONLY FOR RETRIEVAL - NOT FOR INGESTION.
     Unifies results to RetrievalResult(answer, contexts, raw).
@@ -276,6 +274,52 @@ class EnhancedRAGAnything(RAGAnything):
 
         return RetrievalResult(
             answer=None,
+            contexts=contexts,
+            raw=raw,
+        )
+
+    async def aquery_llm_with_multimodal(
+        self,
+        query: str,
+        multimodal_content: list[dict[str, Any]] | None = None,
+        *,
+        mode: Literal["local", "global", "hybrid", "naive", "mix", "bypass"] = "mix",
+        **kwargs: Any,
+    ) -> RetrievalResult:
+        """Multimodal query that returns both retrieval data and LLM-generated answer."""
+        if not getattr(self, "lightrag", None):
+            self.logger.warning("LightRAG not initialized - no documents ingested yet")
+            return RetrievalResult(
+                answer=None,
+                contexts={},
+                raw={"warning": "No documents ingested yet"},
+            )
+
+        enhanced_query = query
+        if multimodal_content:
+            enhanced_query = await self._process_multimodal_query_content(
+                query,
+                multimodal_content,
+            )
+            self.logger.info(
+                "Enhanced query with multimodal content: %d chars",
+                len(enhanced_query),
+            )
+
+        query_param = QueryParam(mode=mode, **kwargs)  # type: ignore
+        result_data = await self.lightrag.aquery_llm(  # type: ignore[func-returns-value]
+            enhanced_query,
+            param=query_param,
+        )
+
+        llm_response = result_data.get("llm_response", {})
+        answer = llm_response.get("content")
+
+        contexts = result_data.get("data", {})
+        raw: dict[str, Any] = result_data if isinstance(result_data, dict) else {}
+
+        return RetrievalResult(
+            answer=answer,
             contexts=contexts,
             raw=raw,
         )

@@ -12,10 +12,10 @@ import asyncio
 import atexit
 import logging
 import os
-from collections.abc import Awaitable, Callable
-from pathlib import Path
 import platform
 import sys
+from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any, Literal
 
 from corprag.config import CorpragConfig, get_config
@@ -37,9 +37,7 @@ def _detect_mineru_backend(manual_override: str | None = None) -> str:
 
         if torch.cuda.is_available():
             device_name = torch.cuda.get_device_name(0)
-            logger.info(
-                f"MinerU backend: hybrid-auto-engine (CUDA GPU detected: {device_name})"
-            )
+            logger.info(f"MinerU backend: hybrid-auto-engine (CUDA GPU detected: {device_name})")
             return "hybrid-auto-engine"
 
         if (
@@ -47,7 +45,7 @@ def _detect_mineru_backend(manual_override: str | None = None) -> str:
             and platform.machine() == "arm64"
             and torch.backends.mps.is_available()
         ):
-            logger.info("MinerU backend: pipeline (Apple Silicon detected)")
+            logger.info("MinerU backend: Apple Silicon detected")
             return "pipeline"
 
     except ImportError:
@@ -64,9 +62,7 @@ def _ensure_venv_in_path() -> None:
     venv_bin = Path(sys.executable).parent
     current_path = os.environ.get("PATH", "")
     if str(venv_bin) not in current_path.split(":"):
-        os.environ["PATH"] = (
-            f"{venv_bin}:{current_path}" if current_path else str(venv_bin)
-        )
+        os.environ["PATH"] = f"{venv_bin}:{current_path}" if current_path else str(venv_bin)
 
 
 _ensure_venv_in_path()
@@ -200,34 +196,73 @@ class RAGService:
             return
 
         try:
-            acquired = await conn.fetchval(
-                "SELECT pg_try_advisory_lock($1)", _PG_INIT_LOCK_KEY
-            )
+            acquired = await conn.fetchval("SELECT pg_try_advisory_lock($1)", _PG_INIT_LOCK_KEY)
 
             if acquired:
                 logger.info("Acquired PG advisory lock, initializing RAG pipelines...")
                 try:
+                    await self._ensure_pg_schema(conn)
                     await self._do_initialize()
                     logger.info("RAG pipelines initialized successfully")
                 finally:
-                    await conn.execute(
-                        "SELECT pg_advisory_unlock($1)", _PG_INIT_LOCK_KEY
-                    )
+                    await conn.execute("SELECT pg_advisory_unlock($1)", _PG_INIT_LOCK_KEY)
             else:
                 logger.info("Another worker is initializing, waiting for lock...")
                 for _ in range(180):
                     await asyncio.sleep(1)
-                    if await conn.fetchval(
-                        "SELECT pg_try_advisory_lock($1)", _PG_INIT_LOCK_KEY
-                    ):
-                        await conn.execute(
-                            "SELECT pg_advisory_unlock($1)", _PG_INIT_LOCK_KEY
-                        )
+                    if await conn.fetchval("SELECT pg_try_advisory_lock($1)", _PG_INIT_LOCK_KEY):
+                        await conn.execute("SELECT pg_advisory_unlock($1)", _PG_INIT_LOCK_KEY)
                         break
                 logger.info("Lock released, connecting to existing storages...")
                 await self._do_initialize()
         finally:
             await conn.close()
+
+    async def _ensure_pg_schema(self, conn) -> None:
+        """Ensure required PostgreSQL extensions and tables exist (idempotent).
+
+        All statements use IF NOT EXISTS so this is safe to run on every startup.
+        Extensions are best-effort (may need superuser — Docker init.sql handles
+        this; remote PG may have them pre-installed). Table creation is critical.
+        """
+        # Best-effort: extensions need superuser; Docker init.sql handles this,
+        # remote PG users with limited privileges must pre-install them.
+        for sql in [
+            "CREATE EXTENSION IF NOT EXISTS vector",
+            "CREATE EXTENSION IF NOT EXISTS age",
+            "LOAD 'age'",
+            'SET search_path = ag_catalog, "$user", public',
+        ]:
+            try:
+                await conn.execute(sql)
+            except Exception as e:
+                logger.warning(f"Extension setup skipped (may need superuser): {sql[:50]}… — {e}")
+
+        # Verify extensions are actually available (regardless of who installed them)
+        installed = {r["extname"] for r in await conn.fetch("SELECT extname FROM pg_extension")}
+        missing = {"vector", "age"} - installed
+        if missing:
+            raise RuntimeError(
+                f"Required PostgreSQL extensions not installed: {missing}. "
+                "Ask your DBA to run: "
+                + "; ".join(f"CREATE EXTENSION {ext}" for ext in sorted(missing))
+            )
+
+        # Critical: table must exist for hash-based deduplication
+        await conn.execute("""CREATE TABLE IF NOT EXISTS corprag_file_hashes (
+            content_hash TEXT PRIMARY KEY,
+            doc_id TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            workspace TEXT NOT NULL DEFAULT 'default',
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )""")
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_file_hashes_doc_id ON corprag_file_hashes(doc_id)"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_file_hashes_workspace ON corprag_file_hashes(workspace)"
+        )
+        logger.info("PostgreSQL schema ensured")
 
     async def _do_initialize(self) -> None:
         """Create RAGAnything objects and initialize storages."""
@@ -238,9 +273,7 @@ class RAGService:
         if config.parser == "mineru":
             mineru_backend = _detect_mineru_backend(config.mineru_backend)
         else:
-            logger.info(
-                f"Using {config.parser} parser, MinerU backend detection skipped"
-            )
+            logger.info(f"Using {config.parser} parser, MinerU backend detection skipped")
 
         # Configure RAGAnything
         rag_config = RAGAnythingConfig(
@@ -341,8 +374,7 @@ class RAGService:
             self.rag_vision = self.rag_text
             if self.enable_vlm and not vision_func:
                 logger.warning(
-                    "enable_vlm=True but no vision model configured; "
-                    "using text-only retrieval."
+                    "enable_vlm=True but no vision model configured; using text-only retrieval."
                 )
 
         logger.info("All RAG pipelines initialized successfully")
@@ -528,14 +560,20 @@ class RAGService:
             url_transformer=self._url_transformer,
         )
 
-    async def aquery(
+    async def aanswer(
         self,
         query: str,
         multimodal_content: list[dict[str, Any]] | None = None,
         mode: Literal["local", "global", "hybrid", "naive", "mix"] | None = "mix",
+        top_k: int | None = None,
+        chunk_top_k: int | None = None,
         **kwargs: Any,
-    ) -> str:
-        """Retrieve contexts and generate answer (for end-to-end evaluation)."""
+    ) -> RetrievalResult:
+        """Retrieve contexts and generate an LLM answer.
+
+        Returns the same structured data as aretrieve() but with the
+        ``answer`` field populated by the LLM.
+        """
         self._ensure_initialized()
 
         if not self.rag_text or not self.rag_vision:
@@ -543,14 +581,62 @@ class RAGService:
 
         rag = self.rag_vision if multimodal_content else self.rag_text
 
-        result = await rag.aquery_with_multimodal(
-            query=query,
-            multimodal_content=multimodal_content or [],
-            mode=mode or self.config.default_mode,
+        adjusted_top_k = top_k or self.config.top_k
+        adjusted_chunk_top_k = chunk_top_k or self.config.chunk_top_k
+        enable_rerank = kwargs.pop("enable_rerank", self.enable_rerank)
+
+        # Truncate conversation history: first by turns, then by token budget
+        history = kwargs.pop("conversation_history", None)
+        if history:
+            max_msgs = self.config.max_conversation_turns * 2
+            if len(history) > max_msgs:
+                history = history[-max_msgs:]
+
+            token_budget = self.config.max_conversation_tokens
+            total = 0
+            cutoff = 0
+            for i in range(len(history) - 1, -1, -1):
+                # ~4 chars per token is a safe approximation
+                total += len(history[i].get("content", "")) // 4
+                if total > token_budget:
+                    cutoff = i + 1
+                    break
+            if cutoff:
+                history = history[cutoff:]
+
+            kwargs["conversation_history"] = history
+
+        query_kwargs = {
+            "top_k": adjusted_top_k,
+            "chunk_top_k": adjusted_chunk_top_k,
+            "enable_rerank": enable_rerank,
+            "max_entity_tokens": kwargs.pop(
+                "max_entity_tokens",
+                self.config.max_entity_tokens,
+            ),
+            "max_relation_tokens": kwargs.pop(
+                "max_relation_tokens",
+                self.config.max_relation_tokens,
+            ),
+            "max_total_tokens": kwargs.pop(
+                "max_total_tokens",
+                self.config.max_total_tokens,
+            ),
             **kwargs,
+        }
+
+        result = await rag.aquery_llm_with_multimodal(
+            query=query,
+            multimodal_content=multimodal_content,
+            mode=mode or self.config.default_mode,
+            **query_kwargs,
         )
 
-        return result
+        return augment_retrieval_result(
+            result,
+            str(self.config.working_dir_path),
+            url_transformer=self._url_transformer,
+        )
 
     async def _rerank_chunks(
         self,
@@ -572,9 +658,7 @@ class RAGService:
             )
 
             reranked = [
-                chunks[item["index"]]
-                for item in rerank_results
-                if item["index"] < len(chunks)
+                chunks[item["index"]] for item in rerank_results if item["index"] < len(chunks)
             ]
 
             logger.info(f"[Rerank] Sorted {len(reranked)} chunks by relevance")

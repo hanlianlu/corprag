@@ -3,8 +3,6 @@
 
 Exports query results as structured documents for ingestion.
 Cortex Analyst is NOT included here (not a RAG concern).
-
-Requires: pip install corprag[snowflake]
 """
 
 from __future__ import annotations
@@ -12,19 +10,10 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any
 import uuid
+from typing import Any
 
 logger = logging.getLogger(__name__)
-
-
-def _require_snowflake() -> None:
-    try:
-        import snowflake.connector  # noqa: F401
-    except ImportError as e:
-        raise ImportError(
-            "Snowflake support requires: pip install corprag[snowflake]"
-        ) from e
 
 
 class SnowflakeDataSource:
@@ -44,8 +33,6 @@ class SnowflakeDataSource:
         database: str | None = None,
         schema: str | None = None,
     ) -> None:
-        _require_snowflake()
-
         import snowflake.connector
 
         self._snowflake_connector = snowflake.connector

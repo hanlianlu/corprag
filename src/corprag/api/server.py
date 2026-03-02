@@ -8,11 +8,13 @@ Primary interface for offline/batch data ingestion operations.
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from corprag.config import CorpragConfig, get_config
 from corprag.pool import (
@@ -25,10 +27,18 @@ from corprag.service import RAGService
 
 logger = logging.getLogger(__name__)
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    yield
+    await close_shared_rag_service()
+
+
 app = FastAPI(
     title="corprag",
     description="Corporate RAG - multimodal document ingestion & retrieval service",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 
@@ -81,11 +91,19 @@ class IngestRequest(BaseModel):
     sync_hashes: bool = False
 
 
-class QueryRequest(BaseModel):
+class RetrieveRequest(BaseModel):
     query: str
     mode: Literal["local", "global", "hybrid", "naive", "mix"] = "mix"
     top_k: int | None = None
     chunk_top_k: int | None = None
+
+
+class AnswerRequest(BaseModel):
+    query: str
+    mode: Literal["local", "global", "hybrid", "naive", "mix"] = "mix"
+    top_k: int | None = None
+    chunk_top_k: int | None = None
+    conversation_history: list[dict[str, str]] | None = None
 
 
 class DeleteRequest(BaseModel):
@@ -136,9 +154,9 @@ async def ingest(body: IngestRequest) -> dict[str, Any]:
     return result
 
 
-@app.post("/query", dependencies=[Depends(_verify_auth)])
-async def query(body: QueryRequest) -> dict[str, Any]:
-    """RAG query with structured results."""
+@app.post("/retrieve", dependencies=[Depends(_verify_auth)])
+async def retrieve(body: RetrieveRequest) -> dict[str, Any]:
+    """Retrieve contexts and sources without LLM answer generation."""
     service = await _get_rag_service()
 
     result = await service.aretrieve(
@@ -146,6 +164,30 @@ async def query(body: QueryRequest) -> dict[str, Any]:
         mode=body.mode,
         top_k=body.top_k,
         chunk_top_k=body.chunk_top_k,
+    )
+
+    return {
+        "answer": result.answer,
+        "contexts": result.contexts,
+        "raw": result.raw,
+    }
+
+
+@app.post("/answer", dependencies=[Depends(_verify_auth)])
+async def answer(body: AnswerRequest) -> dict[str, Any]:
+    """RAG query with LLM-generated answer and structured results."""
+    service = await _get_rag_service()
+
+    kwargs: dict[str, Any] = {}
+    if body.conversation_history:
+        kwargs["conversation_history"] = body.conversation_history
+
+    result = await service.aanswer(
+        query=body.query,
+        mode=body.mode,
+        top_k=body.top_k,
+        chunk_top_k=body.chunk_top_k,
+        **kwargs,
     )
 
     return {
@@ -211,12 +253,6 @@ async def health() -> dict[str, Any]:
             status["status"] = "degraded"
 
     return status
-
-
-@app.on_event("shutdown")
-async def shutdown_event() -> None:
-    """Clean up on shutdown."""
-    await close_shared_rag_service()
 
 
 @app.exception_handler(RAGServiceUnavailableError)

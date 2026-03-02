@@ -24,8 +24,8 @@ async def _pg_available() -> bool:
         conn = await asyncpg.connect(
             host="localhost",
             port=5432,
-            user="rag",
-            password="rag",
+            user="corprag",
+            password="corprag",
             database="corprag",
         )
         await conn.fetchval("SELECT 1")
@@ -47,43 +47,32 @@ class TestPGHashIndex:
 
     async def test_register_and_lookup(self, pg_check) -> None:
         """Test register and lookup with real PostgreSQL."""
+        import asyncpg
+
         from corprag.ingestion.hash_index import PGHashIndex
 
-        index = PGHashIndex(
-            dsn="postgresql://rag:rag@localhost:5432/corprag",
-            workspace="test",
+        pool = await asyncpg.create_pool(
+            host="localhost",
+            port=5432,
+            user="corprag",
+            password="corprag",
+            database="corprag",
         )
-        await index.initialize()
-
         try:
+            index = PGHashIndex(pool=pool, workspace="test")
+            await index.initialize()
+
             content_hash = "sha256:test_integration_hash"
             await index.register(content_hash, "doc-int-001", "/test/file.pdf")
 
-            entry = await index.lookup(content_hash)
-            assert entry is not None
-            assert entry["doc_id"] == "doc-int-001"
+            exists, doc_id = await index.check_exists(content_hash)
+            assert exists
+            assert doc_id == "doc-int-001"
 
             # Cleanup
-            await index.remove(content_hash)
-            assert await index.lookup(content_hash) is None
+            removed = await index.remove(content_hash)
+            assert removed
+            exists2, _ = await index.check_exists(content_hash)
+            assert not exists2
         finally:
-            await index.close()
-
-
-class TestPGStorageE2E:
-    """End-to-end tests with PostgreSQL storage backends."""
-
-    async def test_health_check(self, pg_check) -> None:
-        """Test PostgreSQL health check connectivity."""
-        import asyncpg
-
-        conn = await asyncpg.connect(
-            host="localhost",
-            port=5432,
-            user="rag",
-            password="rag",
-            database="corprag",
-        )
-        version = await conn.fetchval("SELECT version()")
-        assert "PostgreSQL" in version
-        await conn.close()
+            await pool.close()

@@ -17,6 +17,16 @@ from typing import Literal
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Supported LLM providers
+LLMProvider = Literal[
+    "openai",
+    "azure_openai",
+    "anthropic",
+    "google_gemini",
+    "qwen",
+    "minimax",
+]
+
 
 class CorpragConfig(BaseSettings):
     """Corporate RAG configuration.
@@ -39,8 +49,8 @@ class CorpragConfig(BaseSettings):
     # ===== PostgreSQL (Default Storage Backend) =====
     postgres_host: str = Field(default="localhost")
     postgres_port: int = Field(default=5432)
-    postgres_user: str = Field(default="rag")
-    postgres_password: str = Field(default="rag")
+    postgres_user: str = Field(default="corprag")
+    postgres_password: str = Field(default="corprag")
     postgres_database: str = Field(default="corprag")
     postgres_workspace: str = Field(default="default")
 
@@ -50,7 +60,12 @@ class CorpragConfig(BaseSettings):
         description="pgvector index type (HNSW, IVFFlat, VCHORDRQ)",
     )
     pg_hnsw_m: int = Field(default=32, description="HNSW M parameter (connections per node)")
-    pg_hnsw_ef: int = Field(default=300, description="HNSW ef parameter (search exploration)")
+    pg_hnsw_ef_construction: int = Field(
+        default=300, description="HNSW ef_construction (index build quality)"
+    )
+    pg_hnsw_ef_search: int = Field(
+        default=300, description="HNSW ef_search (query exploration, pgvector default is 40)"
+    )
 
     # ===== Storage Backends (configurable, default PostgreSQL) =====
     vector_storage: str = Field(
@@ -91,31 +106,46 @@ class CorpragConfig(BaseSettings):
     milvus_hnsw_ef_construction: int = Field(default=300)
 
     # ===== LLM Provider Configuration =====
-    llm_provider: Literal["azure_openai", "openai"] = Field(default="openai")
+    llm_provider: LLMProvider = Field(default="openai")
 
-    # OpenAI
+    # Optional: separate providers for embedding and vision (default to llm_provider)
+    embedding_provider: LLMProvider | None = Field(
+        default=None,
+        description="Embedding provider. Defaults to llm_provider.",
+    )
+    vision_provider: LLMProvider | None = Field(
+        default=None,
+        description="Vision provider. Defaults to llm_provider.",
+    )
+
+    # ----- Unified Model Fields -----
+    chat_model: str = Field(default="gpt-4.1-mini")
+    ingestion_model: str = Field(default="gpt-4.1-mini")
+    vision_model: str | None = Field(default="gpt-4.1-mini")
+
+    # ----- Provider API Keys & Endpoints -----
     openai_api_key: str | None = Field(default=None)
     openai_base_url: str | None = Field(default=None)
-    openai_chat_model: str = Field(default="gpt-4.1-mini")
-    openai_ingestion_model: str = Field(default="gpt-4.1-mini")
-    openai_vision_model: str | None = Field(default="gpt-4.1-mini")
-
-    # Azure OpenAI
-    azure_openai_endpoint: str | None = Field(default=None)
+    azure_openai_base_url: str | None = Field(default=None)
     azure_openai_api_key: str | None = Field(default=None)
-    azure_openai_deployment_name: str = Field(default="gpt-4.1-mini")
-    azure_openai_ingestion_deployment_name: str = Field(default="gpt-4.1-mini")
-    azure_openai_vision_deployment_name: str | None = Field(default="gpt-4.1-mini")
+    anthropic_api_key: str | None = Field(default=None)
+    google_gemini_api_key: str | None = Field(default=None)
+    qwen_api_key: str | None = Field(default=None)
+    qwen_base_url: str = Field(
+        default="https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+    minimax_api_key: str | None = Field(default=None)
+    minimax_base_url: str = Field(default="https://api.minimax.chat/v1")
 
     # ===== Embedding =====
     embedding_model: str = Field(default="text-embedding-3-large")
-    embedding_dim: int = Field(default=3072)
+    embedding_dim: int = Field(default=1024)
 
     # ===== Temperatures =====
-    llm_temperature: float = Field(default=0.4)
+    llm_temperature: float = Field(default=0.5)
     vision_temperature: float = Field(default=0.1)
     ingestion_temperature: float = Field(default=0.1)
-    rerank_temperature: float = Field(default=0.0)
+    rerank_temperature: float = Field(default=0.1)
 
     # ===== LLM Request =====
     llm_request_timeout: int = Field(default=120)
@@ -123,8 +153,16 @@ class CorpragConfig(BaseSettings):
 
     # ===== Reranking =====
     enable_rerank: bool = Field(default=True)
-    rerank_provider: Literal["llm", "cohere", "azure_cohere"] = Field(default="llm")
-    rerank_model: str = Field(default="gpt-4.1-mini")
+    rerank_backend: Literal["llm", "cohere", "azure_cohere"] = Field(default="llm")
+    rerank_llm_provider: LLMProvider | None = Field(
+        default=None,
+        description="LLM provider for reranking when rerank_backend='llm'. "
+        "Defaults to llm_provider.",
+    )
+    rerank_model: str | None = Field(
+        default=None,
+        description="Model for LLM reranking. Defaults to ingestion_model.",
+    )
     cohere_api_key: str | None = Field(default=None)
     cohere_rerank_model: str = Field(default="rerank-v4.0-pro")
     azure_cohere_endpoint: str | None = Field(default=None)
@@ -135,7 +173,12 @@ class CorpragConfig(BaseSettings):
     working_dir: str = Field(default="./corprag_storage")
     parser: Literal["mineru", "docling"] = Field(default="mineru")
     parse_method: Literal["auto", "ocr", "txt"] = Field(default="auto")
-    mineru_backend: str | None = Field(default=None)
+    mineru_backend: str | None = Field(
+        default=None,
+        description="MinerU parsing backend. If None, auto-detects: CUDA GPU → hybrid-auto-engine, "
+        "otherwise → pipeline. "
+        "Valid values: pipeline, vlm-auto-engine, vlm-http-client, hybrid-auto-engine, hybrid-http-client.",
+    )
     enable_image_processing: bool = Field(default=True)
     enable_table_processing: bool = Field(default=True)
     enable_equation_processing: bool = Field(default=False)
@@ -162,6 +205,8 @@ class CorpragConfig(BaseSettings):
     max_relation_tokens: int = Field(default=10000)
     max_total_tokens: int = Field(default=40000)
     default_mode: Literal["local", "global", "hybrid", "naive", "mix"] = Field(default="mix")
+    max_conversation_turns: int = Field(default=20)
+    max_conversation_tokens: int = Field(default=50000)
 
     # ===== Knowledge Graph =====
     kg_entity_types: list[str] = Field(
@@ -169,10 +214,13 @@ class CorpragConfig(BaseSettings):
             "Product",
             "Component",
             "Technology",
+            "Design",
+            "Genre",
             "Organization",
             "Standard",
-            "Metric",
-            "Design",
+            "Biography",
+            "Location",
+            "Event",
         ],
     )
 
@@ -194,8 +242,7 @@ class CorpragConfig(BaseSettings):
     # ===== Domain Knowledge (injected by caller) =====
     domain_knowledge_hints: str = Field(
         default="",
-        description="Domain-specific hints for reranking. "
-        "Injected by the calling application.",
+        description="Domain-specific hints for reranking. Injected by the calling application.",
     )
 
     # ===== MCP Server =====
@@ -227,33 +274,43 @@ class CorpragConfig(BaseSettings):
 
     @property
     def chat_model_name(self) -> str:
-        if self.llm_provider == "openai":
-            return self.openai_chat_model
-        return self.azure_openai_deployment_name
+        return self.chat_model
 
     @property
     def ingestion_model_name(self) -> str:
-        if self.llm_provider == "openai":
-            return self.openai_ingestion_model
-        return self.azure_openai_ingestion_deployment_name
+        return self.ingestion_model
 
     @property
     def vision_model_name(self) -> str | None:
-        if self.llm_provider == "openai":
-            return self.openai_vision_model
-        return self.azure_openai_vision_deployment_name
+        return self.vision_model
 
     @property
-    def unified_api_key(self) -> str:
-        if self.llm_provider == "openai":
-            return self.openai_api_key or ""
-        return self.azure_openai_api_key or ""
+    def effective_embedding_provider(self) -> str:
+        """Resolve embedding provider. Defaults to llm_provider."""
+        return self.embedding_provider or self.llm_provider
 
     @property
-    def unified_base_url(self) -> str | None:
-        if self.llm_provider == "openai":
-            return self.openai_base_url
-        return self.azure_openai_endpoint
+    def effective_vision_provider(self) -> str:
+        """Resolve vision provider. Defaults to llm_provider (all providers support vision)."""
+        return self.vision_provider or self.llm_provider
+
+    @property
+    def effective_rerank_llm_provider(self) -> str:
+        """Resolve LLM provider for reranking. Falls back to llm_provider."""
+        return self.rerank_llm_provider or self.llm_provider
+
+    @property
+    def effective_rerank_model(self) -> str:
+        """Resolve rerank model. Falls back to ingestion_model."""
+        return self.rerank_model or self.ingestion_model
+
+    def _get_provider_api_key(self, provider: str) -> str:
+        """Get API key for a specific provider."""
+        return getattr(self, f"{provider}_api_key", "") or ""
+
+    def _get_provider_base_url(self, provider: str) -> str | None:
+        """Get base URL for a specific provider."""
+        return getattr(self, f"{provider}_base_url", None)
 
     def model_post_init(self, __context) -> None:
         """Bridge CORPRAG_POSTGRES_* to POSTGRES_* env vars for LightRAG.
@@ -270,11 +327,16 @@ class CorpragConfig(BaseSettings):
             "POSTGRES_WORKSPACE": self.postgres_workspace,
             "POSTGRES_VECTOR_INDEX_TYPE": self.pg_vector_index_type,
             "POSTGRES_HNSW_M": str(self.pg_hnsw_m),
-            "POSTGRES_HNSW_EF": str(self.pg_hnsw_ef),
+            "POSTGRES_HNSW_EF": str(self.pg_hnsw_ef_construction),
         }
         for key, value in pg_env_map.items():
             if key not in os.environ:
                 os.environ[key] = value
+
+        # Inject hnsw.ef_search via POSTGRES_SERVER_SETTINGS
+        # (LightRAG doesn't expose this; pgvector default is 40 which is too low)
+        if "POSTGRES_SERVER_SETTINGS" not in os.environ:
+            os.environ["POSTGRES_SERVER_SETTINGS"] = f"hnsw.ef_search={self.pg_hnsw_ef_search}"
 
         # Bridge Neo4j env vars if using Neo4JStorage
         if self.graph_storage == "Neo4JStorage":
@@ -297,18 +359,38 @@ class CorpragConfig(BaseSettings):
         if not path.is_absolute():
             self.working_dir = str(path.resolve())
 
+    def _check_provider_key(self, provider: str, context: str) -> None:
+        """Raise ValueError if the provider's API key is missing."""
+        field = f"{provider}_api_key"
+        if hasattr(self, field) and not getattr(self, field):
+            raise ValueError(f"{field} is required for {context}")
+
     @model_validator(mode="after")
     def _validate_provider_fields(self) -> CorpragConfig:
         """Ensure provider-specific required fields are present."""
-        if self.llm_provider == "azure_openai":
-            if not self.azure_openai_endpoint or not self.azure_openai_api_key:
-                raise ValueError(
-                    "azure_openai_endpoint and azure_openai_api_key are required "
-                    "for azure_openai provider"
-                )
-        elif self.llm_provider == "openai":
-            if not self.openai_api_key:
-                raise ValueError("openai_api_key is required for openai provider")
+        # Validate primary LLM provider
+        self._check_provider_key(self.llm_provider, f"{self.llm_provider} provider")
+
+        # Azure OpenAI also requires endpoint
+        if self.llm_provider == "azure_openai" and not self.azure_openai_base_url:
+            raise ValueError("azure_openai_base_url is required for azure_openai provider")
+
+        # Validate embedding provider if it differs from llm_provider
+        eff_emb = self.effective_embedding_provider
+        if eff_emb != self.llm_provider:
+            self._check_provider_key(eff_emb, f"embedding_provider={eff_emb}")
+
+        # Validate vision provider if it differs from llm_provider
+        eff_vis = self.effective_vision_provider
+        if eff_vis != self.llm_provider:
+            self._check_provider_key(eff_vis, f"vision_provider={eff_vis}")
+
+        # Validate rerank LLM provider if it differs from llm_provider
+        if self.rerank_backend == "llm":
+            eff_rerank = self.effective_rerank_llm_provider
+            if eff_rerank != self.llm_provider:
+                self._check_provider_key(eff_rerank, f"rerank_llm_provider={eff_rerank}")
+
         return self
 
 

@@ -26,9 +26,7 @@ class LocalDataSource:
         """
         pattern = prefix or "**/*"
         return [
-            str(p.relative_to(self.base_dir))
-            for p in self.base_dir.glob(pattern)
-            if p.is_file()
+            str(p.relative_to(self.base_dir)) for p in self.base_dir.glob(pattern) if p.is_file()
         ]
 
     def load_document(self, doc_id: str) -> bytes:

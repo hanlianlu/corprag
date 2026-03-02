@@ -21,7 +21,7 @@ class TestCorpragConfig:
 
         assert config.postgres_host == "localhost"
         assert config.postgres_port == 5432
-        assert config.postgres_user == "rag"
+        assert config.postgres_user == "corprag"
         assert config.postgres_database == "corprag"
         assert config.postgres_workspace == "default"
         assert config.vector_storage == "PGVectorStorage"
@@ -29,7 +29,8 @@ class TestCorpragConfig:
         assert config.kv_storage == "PGKVStorage"
         assert config.doc_status_storage == "PGDocStatusStorage"
         assert config.pg_hnsw_m == 32
-        assert config.pg_hnsw_ef == 300
+        assert config.pg_hnsw_ef_construction == 300
+        assert config.pg_hnsw_ef_search == 300
         assert config.parser == "mineru"
         assert config.default_mode == "mix"
 
@@ -50,22 +51,131 @@ class TestCorpragConfig:
         assert test_config.sources_dir == test_config.working_dir_path / "sources"
         assert test_config.artifacts_dir == test_config.working_dir_path / "artifacts"
 
-    def test_model_names_openai(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Test model name resolution for OpenAI provider."""
+    def test_model_names(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test unified model name resolution."""
         monkeypatch.setenv("CORPRAG_OPENAI_API_KEY", "test-key")
-        monkeypatch.setenv("CORPRAG_OPENAI_CHAT_MODEL", "gpt-4o")
-        monkeypatch.setenv("CORPRAG_OPENAI_VISION_MODEL", "gpt-4o-vision")
+        monkeypatch.setenv("CORPRAG_CHAT_MODEL", "gpt-4o")
+        monkeypatch.setenv("CORPRAG_VISION_MODEL", "gpt-4o-vision")
 
         config = CorpragConfig()  # type: ignore[call-arg]
         assert config.chat_model_name == "gpt-4o"
         assert config.vision_model_name == "gpt-4o-vision"
-        assert config.unified_api_key == "test-key"
+        assert config._get_provider_api_key("openai") == "test-key"
 
-    def test_azure_provider_validation(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Test Azure provider requires endpoint and key."""
+    def test_azure_provider_requires_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test Azure provider requires API key."""
         monkeypatch.setenv("CORPRAG_LLM_PROVIDER", "azure_openai")
+        monkeypatch.setenv("CORPRAG_AZURE_OPENAI_API_KEY", "")
 
-        with pytest.raises(ValueError, match="azure_openai_endpoint"):
+        with pytest.raises(ValueError, match="azure_openai_api_key"):
+            CorpragConfig()  # type: ignore[call-arg]
+
+    def test_azure_provider_requires_endpoint(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test Azure provider requires endpoint."""
+        monkeypatch.setenv("CORPRAG_LLM_PROVIDER", "azure_openai")
+        monkeypatch.setenv("CORPRAG_AZURE_OPENAI_API_KEY", "azure-key")
+        monkeypatch.setenv("CORPRAG_AZURE_OPENAI_BASE_URL", "")
+
+        with pytest.raises(ValueError, match="azure_openai_base_url"):
+            CorpragConfig()  # type: ignore[call-arg]
+
+    def test_anthropic_provider_requires_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test Anthropic provider requires API key."""
+        monkeypatch.setenv("CORPRAG_LLM_PROVIDER", "anthropic")
+
+        with pytest.raises(ValueError, match="anthropic_api_key"):
+            CorpragConfig()  # type: ignore[call-arg]
+
+    def test_google_provider_requires_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test Google Gemini provider requires API key."""
+        monkeypatch.setenv("CORPRAG_LLM_PROVIDER", "google_gemini")
+
+        with pytest.raises(ValueError, match="google_gemini_api_key"):
+            CorpragConfig()  # type: ignore[call-arg]
+
+    def test_qwen_provider(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test Qwen provider config."""
+        monkeypatch.setenv("CORPRAG_LLM_PROVIDER", "qwen")
+        monkeypatch.setenv("CORPRAG_QWEN_API_KEY", "qwen-key")
+
+        config = CorpragConfig()  # type: ignore[call-arg]
+        assert config._get_provider_api_key("qwen") == "qwen-key"
+        assert "dashscope" in config._get_provider_base_url("qwen")
+
+    def test_minimax_provider(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test MiniMax provider config."""
+        monkeypatch.setenv("CORPRAG_LLM_PROVIDER", "minimax")
+        monkeypatch.setenv("CORPRAG_MINIMAX_API_KEY", "mm-key")
+
+        config = CorpragConfig()  # type: ignore[call-arg]
+        assert config._get_provider_api_key("minimax") == "mm-key"
+
+    def test_embedding_provider_defaults_to_llm_provider(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test embedding provider defaults to llm_provider (no magic fallback)."""
+        monkeypatch.setenv("CORPRAG_LLM_PROVIDER", "anthropic")
+        monkeypatch.setenv("CORPRAG_ANTHROPIC_API_KEY", "ant-key")
+
+        config = CorpragConfig()  # type: ignore[call-arg]
+        assert config.effective_embedding_provider == "anthropic"
+
+    def test_explicit_embedding_provider_requires_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that explicit embedding_provider validates its own API key."""
+        monkeypatch.setenv("CORPRAG_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("CORPRAG_OPENAI_API_KEY", "oai-key")
+        monkeypatch.setenv("CORPRAG_EMBEDDING_PROVIDER", "google_gemini")
+
+        with pytest.raises(ValueError, match="google_gemini_api_key"):
+            CorpragConfig()  # type: ignore[call-arg]
+
+    def test_explicit_vision_provider(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test explicit vision provider override."""
+        monkeypatch.setenv("CORPRAG_LLM_PROVIDER", "anthropic")
+        monkeypatch.setenv("CORPRAG_ANTHROPIC_API_KEY", "ant-key")
+        monkeypatch.setenv("CORPRAG_VISION_PROVIDER", "qwen")
+        monkeypatch.setenv("CORPRAG_QWEN_API_KEY", "qwen-key")
+
+        config = CorpragConfig()  # type: ignore[call-arg]
+        assert config.effective_vision_provider == "qwen"
+
+    def test_explicit_embedding_provider_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test explicit embedding provider override."""
+        monkeypatch.setenv("CORPRAG_LLM_PROVIDER", "anthropic")
+        monkeypatch.setenv("CORPRAG_ANTHROPIC_API_KEY", "ant-key")
+        monkeypatch.setenv("CORPRAG_EMBEDDING_PROVIDER", "openai")
+        monkeypatch.setenv("CORPRAG_OPENAI_API_KEY", "oai-key")
+
+        config = CorpragConfig()  # type: ignore[call-arg]
+        assert config.effective_embedding_provider == "openai"
+
+    def test_rerank_llm_provider_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test rerank LLM provider defaults to llm_provider."""
+        monkeypatch.setenv("CORPRAG_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("CORPRAG_OPENAI_API_KEY", "test-key")
+
+        config = CorpragConfig()  # type: ignore[call-arg]
+        assert config.effective_rerank_llm_provider == "openai"
+
+    def test_rerank_llm_provider_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test explicit rerank LLM provider override."""
+        monkeypatch.setenv("CORPRAG_LLM_PROVIDER", "anthropic")
+        monkeypatch.setenv("CORPRAG_ANTHROPIC_API_KEY", "ant-key")
+        monkeypatch.setenv("CORPRAG_OPENAI_API_KEY", "oai-key")
+        monkeypatch.setenv("CORPRAG_RERANK_LLM_PROVIDER", "openai")
+
+        config = CorpragConfig()  # type: ignore[call-arg]
+        assert config.effective_rerank_llm_provider == "openai"
+
+    def test_rerank_llm_provider_requires_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test that rerank_llm_provider validates API key."""
+        monkeypatch.setenv("CORPRAG_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("CORPRAG_OPENAI_API_KEY", "oai-key")
+        monkeypatch.setenv("CORPRAG_RERANK_LLM_PROVIDER", "anthropic")
+
+        with pytest.raises(ValueError, match="anthropic_api_key"):
             CorpragConfig()  # type: ignore[call-arg]
 
     def test_pg_env_bridge(self, monkeypatch: pytest.MonkeyPatch) -> None:

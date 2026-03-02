@@ -11,10 +11,10 @@ Use HashIndex as fallback for JSON-based or non-PG storage backends.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
 import hashlib
 import json
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -22,9 +22,22 @@ logger = logging.getLogger(__name__)
 
 # Supported file extensions for hash sync
 SUPPORTED_EXTENSIONS = {
-    ".pdf", ".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls",
-    ".txt", ".md", ".html",
-    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff",
+    ".pdf",
+    ".docx",
+    ".doc",
+    ".pptx",
+    ".ppt",
+    ".xlsx",
+    ".xls",
+    ".txt",
+    ".md",
+    ".html",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".bmp",
+    ".tiff",
 }
 
 
@@ -97,6 +110,11 @@ class HashIndex:
             return (True, entry.get("doc_id"))
         return (False, None)
 
+    def lookup(self, content_hash: str) -> dict[str, Any] | None:
+        """Return the full entry dict for a content hash, or None."""
+        index = self._load()
+        return index.get(content_hash)
+
     def register(self, content_hash: str, doc_id: str, file_path: str) -> None:
         index = self._load()
         index[content_hash] = {
@@ -115,7 +133,9 @@ class HashIndex:
         return False
 
     async def should_skip_file(
-        self, file_path: Path, replace: bool,
+        self,
+        file_path: Path,
+        replace: bool,
     ) -> tuple[bool, str | None, str | None]:
         content_hash = await asyncio.to_thread(compute_file_hash, file_path)
         if replace:
@@ -188,14 +208,16 @@ class HashIndex:
             sources_idx = next((i for i, p in enumerate(path_parts) if p == "sources"), -1)
             if sources_idx >= 0 and len(path_parts) > sources_idx + 1:
                 source_type = path_parts[sources_idx + 1]
-            results.append({
-                "file_path": file_path,
-                "doc_id": info.get("doc_id", ""),
-                "source_type": source_type,
-                "file_name": Path(file_path).name,
-                "content_hash": content_hash,
-                "created_at": info.get("created_at", ""),
-            })
+            results.append(
+                {
+                    "file_path": file_path,
+                    "doc_id": info.get("doc_id", ""),
+                    "source_type": source_type,
+                    "file_name": Path(file_path).name,
+                    "content_hash": content_hash,
+                    "created_at": info.get("created_at", ""),
+                }
+            )
         return results
 
 
@@ -208,7 +230,9 @@ class PGHashIndex:
 
     TABLE = "corprag_file_hashes"
 
-    def __init__(self, pool: Any, workspace: str = "default", sources_dir: Path | None = None) -> None:
+    def __init__(
+        self, pool: Any, workspace: str = "default", sources_dir: Path | None = None
+    ) -> None:
         self._pool = pool  # asyncpg.Pool
         self._workspace = workspace
         self._sources_dir = sources_dir
@@ -238,7 +262,8 @@ class PGHashIndex:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 f"SELECT doc_id FROM {self.TABLE} WHERE content_hash = $1 AND workspace = $2",
-                content_hash, self._workspace,
+                content_hash,
+                self._workspace,
             )
             return (True, row["doc_id"]) if row else (False, None)
 
@@ -250,19 +275,25 @@ class PGHashIndex:
                    ON CONFLICT (content_hash) DO UPDATE SET
                      doc_id = EXCLUDED.doc_id,
                      file_path = EXCLUDED.file_path""",
-                content_hash, doc_id, file_path, self._workspace,
+                content_hash,
+                doc_id,
+                file_path,
+                self._workspace,
             )
 
     async def remove(self, content_hash: str) -> bool:
         async with self._pool.acquire() as conn:
             result = await conn.execute(
                 f"DELETE FROM {self.TABLE} WHERE content_hash = $1 AND workspace = $2",
-                content_hash, self._workspace,
+                content_hash,
+                self._workspace,
             )
             return result != "DELETE 0"
 
     async def should_skip_file(
-        self, file_path: Path, replace: bool,
+        self,
+        file_path: Path,
+        replace: bool,
     ) -> tuple[bool, str | None, str | None]:
         content_hash = await asyncio.to_thread(compute_file_hash, file_path)
         if replace:
@@ -293,7 +324,6 @@ class PGHashIndex:
         if loop and loop.is_running():
             # Can't await from sync context inside running loop — use blocking query
             # This is acceptable for deletion (rare operation)
-            import asyncpg
 
             return self._sync_find_by_name(filename)
         return _asyncio.run(self._async_find_by_name(filename))
@@ -308,7 +338,8 @@ class PGHashIndex:
             row = await conn.fetchrow(
                 f"SELECT content_hash, doc_id, file_path FROM {self.TABLE} "
                 f"WHERE file_path LIKE $1 AND workspace = $2 LIMIT 1",
-                f"%/{filename}", self._workspace,
+                f"%/{filename}",
+                self._workspace,
             )
             if row:
                 return (row["doc_id"], row["content_hash"], row["file_path"])
@@ -333,14 +364,16 @@ class PGHashIndex:
                 sources_idx = next((i for i, p in enumerate(path_parts) if p == "sources"), -1)
                 if sources_idx >= 0 and len(path_parts) > sources_idx + 1:
                     source_type = path_parts[sources_idx + 1]
-                results.append({
-                    "file_path": file_path,
-                    "doc_id": row["doc_id"],
-                    "source_type": source_type,
-                    "file_name": Path(file_path).name,
-                    "content_hash": row["content_hash"],
-                    "created_at": row["created_at"].isoformat() if row["created_at"] else "",
-                })
+                results.append(
+                    {
+                        "file_path": file_path,
+                        "doc_id": row["doc_id"],
+                        "source_type": source_type,
+                        "file_name": Path(file_path).name,
+                        "content_hash": row["content_hash"],
+                        "created_at": row["created_at"].isoformat() if row["created_at"] else "",
+                    }
+                )
             return results
 
     async def sync_existing(self) -> int:

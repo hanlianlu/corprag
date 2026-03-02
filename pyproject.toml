@@ -18,14 +18,14 @@ dependencies = [
     "openai>=2.24.0",
     # PostgreSQL
     "asyncpg>=0.31.0",
-    "pgvector>=0.3.0",
+    "pgvector>=0.4.2",
     # Config
     "pydantic>=2.11.0",
     "pydantic-settings>=2.13.1",
     "python-dotenv>=1.2.1",
     # Utils
-    "httpx>=0.28.1",
-    "numpy>=1.26.0",
+    "httpx>=0.28.0",
+    "numpy>=2.4.2",
     "Pillow>=11.3.0",
     "pypdfium2>=4.30.0",
     # Data sourcing
@@ -36,17 +36,22 @@ dependencies = [
     # MCP server
     "mcp[cli]>=1.9.0",
     # REST API server
-    "fastapi>=0.115.0",
-    "uvicorn[standard]>=0.34.0",
-    "python-multipart>=0.0.20",
+    "fastapi>=0.135.1",
+    "uvicorn[standard]>=0.41.0",
+    "python-multipart>=0.0.22",
+    # LLM providers (Anthropic, Google Gemini)
+    "langchain-anthropic>=1.3.0",
+    "anthropic>=0.84.0",
+    "langchain-google-genai>=4.2.0",
+    "google-genai>=1.65.0",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
-    "pytest>=9.0.1",
+    "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
     "pytest-cov>=7.0.0",
-    "ruff>=0.11.0",
+    "ruff>=0.15.0",
 ]
 
 [project.urls]
@@ -73,9 +78,11 @@ target-version = "py312"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B", "SIM", "TCH"]
-ignore = ["E501"]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501", "B008"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+addopts = "--cov=corprag --cov-report=term-missing"
+markers = ["integration: requires running PostgreSQL"]

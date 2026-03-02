@@ -101,6 +101,42 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="answer",
+            description="Ask a question and get an LLM-generated answer backed by retrieved context from the knowledge base.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The question to answer",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["local", "global", "hybrid", "naive", "mix"],
+                        "default": "mix",
+                        "description": "Retrieval mode",
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Number of top results to retrieve",
+                    },
+                    "conversation_history": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "role": {"type": "string", "enum": ["user", "assistant"]},
+                                "content": {"type": "string"},
+                            },
+                            "required": ["role", "content"],
+                        },
+                        "description": "Previous conversation turns for multi-turn context",
+                    },
+                },
+                "required": ["query"],
+            },
+        ),
+        Tool(
             name="list_files",
             description="List all documents ingested in the knowledge base.",
             inputSchema={
@@ -144,18 +180,48 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             )
             import json
 
-            return [TextContent(
-                type="text",
-                text=json.dumps(
-                    {
-                        "answer": result.answer,
-                        "contexts": result.contexts,
-                        "sources": result.raw.get("sources", []),
-                    },
-                    default=str,
-                    indent=2,
-                ),
-            )]
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "answer": result.answer,
+                            "contexts": result.contexts,
+                            "sources": result.raw.get("sources", []),
+                        },
+                        default=str,
+                        indent=2,
+                    ),
+                )
+            ]
+
+        if name == "answer":
+            kwargs: dict[str, Any] = {}
+            if arguments.get("conversation_history"):
+                kwargs["conversation_history"] = arguments["conversation_history"]
+
+            result = await service.aanswer(
+                query=arguments["query"],
+                mode=arguments.get("mode", "mix"),
+                top_k=arguments.get("top_k"),
+                **kwargs,
+            )
+            import json
+
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "answer": result.answer,
+                            "contexts": result.contexts,
+                            "sources": result.raw.get("sources", []),
+                        },
+                        default=str,
+                        indent=2,
+                    ),
+                )
+            ]
 
         if name == "ingest":
             source_type = arguments["source_type"]
@@ -182,10 +248,12 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             files = service.list_ingested_files()
             import json
 
-            return [TextContent(
-                type="text",
-                text=json.dumps({"files": files, "count": len(files)}, default=str),
-            )]
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps({"files": files, "count": len(files)}, default=str),
+                )
+            ]
 
         if name == "delete_files":
             results = await service.adelete_files(
@@ -220,17 +288,15 @@ async def run_stdio() -> None:
 
 async def run_streamable_http(host: str, port: int) -> None:
     """Run MCP server over streamable-http transport."""
-    from mcp.server.streamable_http import StreamableHTTPServerTransport
     import uvicorn
+    from mcp.server.streamable_http import StreamableHTTPServerTransport
     from starlette.applications import Starlette
     from starlette.routing import Mount
 
-    transport = StreamableHTTPServerTransport(
-        "/mcp",
-    )
+    transport = StreamableHTTPServerTransport(mcp_session_id=None)
 
     starlette_app = Starlette(
-        routes=[Mount("/mcp", app=transport.get_app())],
+        routes=[Mount("/mcp", app=transport.handle_request)],
     )
 
     config = uvicorn.Config(
@@ -258,9 +324,7 @@ def main() -> None:
     config = _get_config()
 
     if config.mcp_transport == "streamable-http":
-        logger.info(
-            f"Starting MCP server (streamable-http) on {config.mcp_host}:{config.mcp_port}"
-        )
+        logger.info(f"Starting MCP server (streamable-http) on {config.mcp_host}:{config.mcp_port}")
         asyncio.run(run_streamable_http(config.mcp_host, config.mcp_port))
     else:
         logger.info("Starting MCP server (stdio)")

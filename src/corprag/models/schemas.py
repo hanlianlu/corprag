@@ -18,9 +18,7 @@ class RankedChunk(BaseModel):
 class RerankResult(BaseModel):
     """LLM reranker output - list of chunks sorted by relevance."""
 
-    ranked_chunks: list[RankedChunk] = Field(
-        description="Chunks sorted by relevance descending"
-    )
+    ranked_chunks: list[RankedChunk] = Field(description="Chunks sorted by relevance descending")
 
     model_config = {"extra": "forbid"}
 

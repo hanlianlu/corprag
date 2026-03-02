@@ -3,19 +3,24 @@
 
 Self-contained — all models are constructed from CorpragConfig without
 external dependencies on backend.llm or backend.agents.
+
+Supports multiple LLM providers:
+- Category A (OpenAI-compatible): openai, azure_openai, qwen, minimax
+- Category B (Dedicated class): anthropic, google_gemini
 """
+# pyright: reportCallIssue=false, reportArgumentType=false, reportAttributeAccessIssue=false
 
 from __future__ import annotations
 
 import base64
-from collections.abc import Awaitable, Callable
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from lightrag.utils import EmbeddingFunc
 import numpy as np
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import HumanMessage, SystemMessage
+from lightrag.utils import EmbeddingFunc
 from pydantic import SecretStr
 
 from corprag.config import CorpragConfig
@@ -24,31 +29,103 @@ logger = logging.getLogger(__name__)
 
 LLMFunc = Callable[..., Awaitable[str]]
 
+# OpenAI-compatible providers that can use ChatOpenAI with custom base_url
+_OPENAI_COMPATIBLE_PROVIDERS = {"openai", "azure_openai", "qwen", "minimax"}
+
+
+def _ensure_bytes(data: bytes | bytearray | str) -> bytes | None:
+    """Normalize image data to bytes from various input formats."""
+    if isinstance(data, bytes | bytearray):
+        return bytes(data)
+    if isinstance(data, str):
+        s = data.strip()
+        if s.startswith("data:image"):
+            try:
+                _, b64data = s.split(",", 1)
+                return base64.b64decode(b64data)
+            except Exception:
+                logger.warning("Failed to decode image data URI")
+                return None
+        try:
+            return base64.b64decode(s, validate=True)
+        except Exception:
+            logger.debug("String image_data is not valid base64; ignoring")
+            return None
+    return None
+
 
 # ═══════════════════════════════════════════════════════════════════
-# LLM Factories
+# Chat Model Factory
 # ═══════════════════════════════════════════════════════════════════
 
 
-def _build_chat_openai(
+def _build_chat_model(
     config: CorpragConfig,
     model: str,
     temperature: float | None = None,
-) -> ChatOpenAI:
-    """Build a ChatOpenAI instance from config."""
-    return ChatOpenAI(  # type: ignore[call-arg]
-        model=model,
-        api_key=SecretStr(config.unified_api_key),
-        base_url=config.unified_base_url,
-        temperature=temperature if temperature is not None else config.llm_temperature,
-        timeout=config.llm_request_timeout,
-        max_retries=config.llm_max_retries,
-    )
+    provider: str | None = None,
+) -> BaseChatModel:
+    """Build a LangChain chat model instance from config.
+
+    Args:
+        config: Configuration object.
+        model: Model name / deployment name.
+        temperature: Override temperature. Falls back to config.llm_temperature.
+        provider: Override LLM provider. Falls back to config.llm_provider.
+
+    Category A (OpenAI-compatible): uses ChatOpenAI with provider-specific base_url.
+    Category B (Dedicated class): uses ChatAnthropic or ChatGoogleGenerativeAI.
+    """
+    temp = temperature if temperature is not None else config.llm_temperature
+    provider = provider or config.llm_provider
+
+    if provider in _OPENAI_COMPATIBLE_PROVIDERS:
+        from langchain_openai import ChatOpenAI
+
+        api_key = config._get_provider_api_key(provider)
+        base_url = config._get_provider_base_url(provider)
+
+        return ChatOpenAI(  # type: ignore[call-arg]
+            model=model,
+            api_key=SecretStr(api_key),
+            base_url=base_url,
+            temperature=temp,
+            timeout=config.llm_request_timeout,
+            max_retries=config.llm_max_retries,
+        )
+
+    if provider == "anthropic":
+        from langchain_anthropic import ChatAnthropic
+
+        return ChatAnthropic(  # type: ignore[call-arg]
+            model=model,
+            api_key=SecretStr(config.anthropic_api_key or ""),
+            temperature=temp,
+            timeout=float(config.llm_request_timeout),
+            max_retries=config.llm_max_retries,
+        )
+
+    if provider == "google_gemini":
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        return ChatGoogleGenerativeAI(  # type: ignore[call-arg]
+            model=model,
+            google_api_key=config.google_gemini_api_key,
+            temperature=temp,
+            timeout=config.llm_request_timeout,
+            max_retries=config.llm_max_retries,
+        )
+
+    raise ValueError(f"Unsupported LLM provider: {provider}")
 
 
-def _build_llm_model_func(config: CorpragConfig, deployment: str, temperature: float | None = None) -> LLMFunc:
+def _build_llm_model_func(
+    config: CorpragConfig,
+    deployment: str,
+    temperature: float | None = None,
+) -> LLMFunc:
     """Build a LightRAG-compatible LLM function from config."""
-    llm = _build_chat_openai(config, deployment, temperature)
+    llm = _build_chat_model(config, deployment, temperature)
 
     async def llm_model_func(
         prompt: str,
@@ -99,47 +176,51 @@ def get_ingestion_llm_model_func(config: CorpragConfig | None = None) -> LLMFunc
 # ═══════════════════════════════════════════════════════════════════
 
 
-def get_vision_model_func(config: CorpragConfig | None = None) -> Callable[..., Awaitable[str]] | None:
+def get_vision_model_func(
+    config: CorpragConfig | None = None,
+) -> Callable[..., Awaitable[str]] | None:
     """Vision-language model func for RAGAnything / LightRAG.
 
-    Uses raw OpenAI client for multimodal message format support.
+    Dispatches to provider-specific builders based on effective_vision_provider.
     """
     from corprag.config import get_config
 
     cfg = config or get_config()
+    vision_provider = cfg.effective_vision_provider
     vision_deployment = cfg.vision_model_name
     if not vision_deployment:
         logger.warning("No vision model configured; disabling VLM.")
         return None
 
+    if vision_provider in _OPENAI_COMPATIBLE_PROVIDERS:
+        return _build_openai_vision_func(cfg, vision_deployment, vision_provider)
+    if vision_provider == "anthropic":
+        return _build_anthropic_vision_func(cfg, vision_deployment)
+    if vision_provider == "google_gemini":
+        return _build_google_vision_func(cfg, vision_deployment)
+
+    logger.warning("Vision not supported for provider: %s", vision_provider)
+    return None
+
+
+def _build_openai_vision_func(
+    cfg: CorpragConfig,
+    vision_deployment: str,
+    provider: str,
+) -> Callable[..., Awaitable[str]]:
+    """OpenAI-compatible vision func (covers openai, azure_openai, qwen, minimax)."""
     from openai import AsyncOpenAI
 
+    api_key = cfg._get_provider_api_key(provider)
+    base_url = cfg._get_provider_base_url(provider)
+
     client = AsyncOpenAI(
-        api_key=cfg.unified_api_key,
-        base_url=cfg.unified_base_url,
+        api_key=api_key,
+        base_url=base_url,
         timeout=cfg.llm_request_timeout,
         max_retries=cfg.llm_max_retries,
     )
     vision_temp = cfg.vision_temperature
-
-    def _ensure_bytes(data: bytes | bytearray | str) -> bytes | None:
-        if isinstance(data, bytes | bytearray):
-            return bytes(data)
-        if isinstance(data, str):
-            s = data.strip()
-            if s.startswith("data:image"):
-                try:
-                    _, b64data = s.split(",", 1)
-                    return base64.b64decode(b64data)
-                except Exception:
-                    logger.warning("Failed to decode image data URI")
-                    return None
-            try:
-                return base64.b64decode(s, validate=True)
-            except Exception:
-                logger.debug("String image_data is not valid base64; ignoring")
-                return None
-        return None
 
     async def vision_model_func(
         prompt: str,
@@ -148,7 +229,7 @@ def get_vision_model_func(config: CorpragConfig | None = None) -> Callable[..., 
         history_messages: list | None = None,
         image_data: bytes | bytearray | str | None = None,
         messages: list | None = None,
-        **kwargs: object,
+        **_kwargs: object,
     ) -> str:
         """Vision model function compatible with RAG-Anything."""
         # Pattern 1: Pre-formatted messages from RAG-Anything
@@ -205,22 +286,262 @@ def get_vision_model_func(config: CorpragConfig | None = None) -> Callable[..., 
     return vision_model_func
 
 
+def _convert_openai_to_anthropic_messages(
+    openai_messages: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], str]:
+    """Convert OpenAI-format messages to Anthropic format.
+
+    Returns (messages, system_prompt) since Anthropic separates system messages.
+    """
+    system_parts: list[str] = []
+    anthropic_messages: list[dict[str, Any]] = []
+
+    for msg in openai_messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+
+        if role == "system":
+            system_parts.append(content if isinstance(content, str) else str(content))
+            continue
+
+        if isinstance(content, str):
+            anthropic_messages.append({"role": role, "content": content})
+        elif isinstance(content, list):
+            blocks: list[dict[str, Any]] = []
+            for block in content:
+                if block.get("type") == "text":
+                    blocks.append({"type": "text", "text": block["text"]})
+                elif block.get("type") == "image_url":
+                    url = block["image_url"]["url"]
+                    if url.startswith("data:"):
+                        media_type, _, b64data = url.partition(";base64,")
+                        media_type = media_type.replace("data:", "")
+                        blocks.append(
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": b64data,
+                                },
+                            }
+                        )
+            if blocks:
+                anthropic_messages.append({"role": role, "content": blocks})
+
+    return anthropic_messages, "\n".join(system_parts)
+
+
+def _build_anthropic_vision_func(
+    cfg: CorpragConfig,
+    vision_deployment: str,
+) -> Callable[..., Awaitable[str]]:
+    """Anthropic vision func using AsyncAnthropic client."""
+    from anthropic import AsyncAnthropic
+
+    client = AsyncAnthropic(
+        api_key=cfg.anthropic_api_key,
+        timeout=float(cfg.llm_request_timeout),
+        max_retries=cfg.llm_max_retries,
+    )
+    vision_temp = cfg.vision_temperature
+
+    async def vision_model_func(
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        history_messages: list | None = None,
+        image_data: bytes | bytearray | str | None = None,
+        messages: list | None = None,
+        **_kwargs: object,
+    ) -> str:
+        # Pattern 1: Pre-formatted messages from RAG-Anything
+        if messages is not None:
+            try:
+                ant_msgs, sys = _convert_openai_to_anthropic_messages(messages)
+                resp = await client.messages.create(
+                    model=vision_deployment,
+                    messages=ant_msgs,  # type: ignore[arg-type]
+                    system=sys or (system_prompt or ""),
+                    max_tokens=4096,
+                    temperature=vision_temp,
+                )
+                return resp.content[0].text if resp.content else ""
+            except Exception:
+                logger.exception("Anthropic vision call failed (messages mode)")
+                return ""
+
+        # Pattern 2: Individual image_data
+        if image_data is None:
+            logger.warning("vision_model_func called without image_data or messages")
+            return ""
+
+        raw_bytes = _ensure_bytes(image_data)
+        if raw_bytes is None:
+            return ""
+
+        b64 = base64.b64encode(raw_bytes).decode("utf-8")
+        ant_msgs_list: list[dict[str, Any]] = []
+        if history_messages:
+            for hm in history_messages:
+                ant_msgs_list.append(
+                    {
+                        "role": hm.get("role", "user"),
+                        "content": str(hm.get("content", "")),
+                    }
+                )
+        ant_msgs_list.append(
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": b64,
+                        },
+                    },
+                ],
+            }
+        )
+
+        try:
+            resp = await client.messages.create(
+                model=vision_deployment,
+                messages=ant_msgs_list,  # type: ignore[arg-type]
+                system=system_prompt or "",
+                max_tokens=4096,
+                temperature=vision_temp,
+            )
+            return resp.content[0].text if resp.content else ""
+        except Exception:
+            logger.exception("Anthropic vision call failed (image_data mode)")
+            return ""
+
+    return vision_model_func
+
+
+def _build_google_vision_func(
+    cfg: CorpragConfig,
+    vision_deployment: str,
+) -> Callable[..., Awaitable[str]]:
+    """Google Gemini vision func using google-genai client."""
+    from google import genai
+    from google.genai.types import Content, Part
+
+    client = genai.Client(api_key=cfg.google_gemini_api_key)
+    vision_temp = cfg.vision_temperature
+
+    async def vision_model_func(
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        history_messages: list | None = None,
+        image_data: bytes | bytearray | str | None = None,
+        messages: list | None = None,
+        **_kwargs: object,
+    ) -> str:
+        # Pattern 1: Pre-formatted messages from RAG-Anything
+        if messages is not None:
+            try:
+                contents: list[Content] = []
+                for msg in messages:
+                    role = "user" if msg.get("role") in ("user", "system") else "model"
+                    content = msg.get("content", "")
+                    if isinstance(content, str):
+                        contents.append(Content(role=role, parts=[Part.from_text(text=content)]))
+                    elif isinstance(content, list):
+                        parts: list[Part] = []
+                        for block in content:
+                            if block.get("type") == "text":
+                                parts.append(Part.from_text(text=block["text"]))
+                            elif block.get("type") == "image_url":
+                                url = block["image_url"]["url"]
+                                if url.startswith("data:"):
+                                    _, _, b64data = url.partition(";base64,")
+                                    img_bytes = base64.b64decode(b64data)
+                                    parts.append(
+                                        Part.from_bytes(data=img_bytes, mime_type="image/png")
+                                    )
+                        if parts:
+                            contents.append(Content(role=role, parts=parts))
+
+                resp = await client.aio.models.generate_content(
+                    model=vision_deployment,
+                    contents=contents,
+                    config={"temperature": vision_temp},
+                )
+                return resp.text or ""
+            except Exception:
+                logger.exception("Google vision call failed (messages mode)")
+                return ""
+
+        # Pattern 2: Individual image_data
+        if image_data is None:
+            logger.warning("vision_model_func called without image_data or messages")
+            return ""
+
+        raw_bytes = _ensure_bytes(image_data)
+        if raw_bytes is None:
+            return ""
+
+        parts_list: list[Part] = []
+        if system_prompt:
+            parts_list.append(Part.from_text(text=system_prompt))
+        parts_list.append(Part.from_text(text=prompt))
+        parts_list.append(Part.from_bytes(data=raw_bytes, mime_type="image/png"))
+
+        try:
+            resp = await client.aio.models.generate_content(
+                model=vision_deployment,
+                contents=Content(parts=parts_list),
+                config={"temperature": vision_temp},
+            )
+            return resp.text or ""
+        except Exception:
+            logger.exception("Google vision call failed (image_data mode)")
+            return ""
+
+    return vision_model_func
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Embedding
 # ═══════════════════════════════════════════════════════════════════
 
 
 def get_embedding_func(config: CorpragConfig | None = None) -> EmbeddingFunc:
-    """Get embedding function for RAGAnything."""
+    """Get embedding function for RAGAnything.
+
+    Dispatches based on effective_embedding_provider.
+    """
     from corprag.config import get_config
 
     cfg = config or get_config()
-    embeddings = OpenAIEmbeddings(  # type: ignore[call-arg]
-        model=cfg.embedding_model,
-        api_key=SecretStr(cfg.unified_api_key),
-        base_url=cfg.unified_base_url,
-        dimensions=cfg.embedding_dim,
-    )
+    emb_provider = cfg.effective_embedding_provider
+
+    if emb_provider == "google_gemini":
+        from langchain_google_genai import GoogleGenerativeAIEmbeddings
+
+        embeddings = GoogleGenerativeAIEmbeddings(  # type: ignore[call-arg]
+            model=cfg.embedding_model,
+            google_api_key=cfg.google_gemini_api_key,
+        )
+    else:
+        # All OpenAI-compatible providers
+        from langchain_openai import OpenAIEmbeddings
+
+        api_key = cfg._get_provider_api_key(emb_provider)
+        base_url = cfg._get_provider_base_url(emb_provider)
+
+        embeddings = OpenAIEmbeddings(  # type: ignore[call-arg]
+            model=cfg.embedding_model,
+            api_key=SecretStr(api_key),
+            base_url=base_url,
+            dimensions=cfg.embedding_dim,
+        )
 
     async def embed_func(texts: list[str]) -> np.ndarray:
         try:
@@ -246,7 +567,7 @@ def get_rerank_func(config: CorpragConfig | None = None) -> Callable:
     """Return rerank function based on configured provider.
 
     Providers:
-    - "llm": LLM-based listwise reranker
+    - "llm": LLM-based listwise reranker (uses current llm_provider)
     - "cohere": Cohere REST API
     - "azure_cohere": Azure AI Services Cohere deployment
     """
@@ -254,7 +575,7 @@ def get_rerank_func(config: CorpragConfig | None = None) -> Callable:
 
     cfg = config or get_config()
 
-    if cfg.rerank_provider == "cohere":
+    if cfg.rerank_backend == "cohere":
         from functools import partial
 
         from lightrag.rerank import cohere_rerank
@@ -266,11 +587,15 @@ def get_rerank_func(config: CorpragConfig | None = None) -> Callable:
             model=cfg.cohere_rerank_model,
         )
 
-    if cfg.rerank_provider == "azure_cohere":
+    if cfg.rerank_backend == "azure_cohere":
         logger.info("Reranker: provider=azure_cohere, model=%s", cfg.azure_cohere_deployment)
         return _build_azure_cohere_rerank_func(cfg)
 
-    logger.info("Reranker: provider=llm, model=%s", cfg.rerank_model)
+    logger.info(
+        "Reranker: provider=llm (%s), model=%s",
+        cfg.effective_rerank_llm_provider,
+        cfg.effective_rerank_model,
+    )
     return _build_llm_rerank_func(cfg)
 
 
@@ -278,7 +603,12 @@ def _build_llm_rerank_func(config: CorpragConfig) -> Callable:
     """LLM-based listwise reranker using structured output."""
     from corprag.models.schemas import RerankResult
 
-    llm = _build_chat_openai(config, config.rerank_model, temperature=config.rerank_temperature)
+    llm = _build_chat_model(
+        config,
+        config.effective_rerank_model,
+        temperature=config.rerank_temperature,
+        provider=config.effective_rerank_llm_provider,
+    )
     structured_llm = llm.with_structured_output(RerankResult)
     default_domain_knowledge = config.domain_knowledge_hints
 
@@ -315,9 +645,7 @@ def _build_llm_rerank_func(config: CorpragConfig) -> Callable:
             for chunk in result.ranked_chunks:
                 if 0 <= chunk.index < len(documents) and chunk.index not in seen:
                     seen.add(chunk.index)
-                    results.append(
-                        {"index": chunk.index, "relevance_score": chunk.relevance_score}
-                    )
+                    results.append({"index": chunk.index, "relevance_score": chunk.relevance_score})
 
             # Append any chunks LLM didn't return (preserves all chunks, just sorted)
             if len(results) < len(documents):
@@ -350,9 +678,7 @@ def _build_azure_cohere_rerank_func(config: CorpragConfig) -> Callable:
     deployment = config.azure_cohere_deployment
 
     if not endpoint or not api_key:
-        raise ValueError(
-            "azure_cohere_endpoint and azure_cohere_api_key required for azure_cohere"
-        )
+        raise ValueError("azure_cohere_endpoint and azure_cohere_api_key required for azure_cohere")
 
     endpoint = endpoint.rstrip("/")
     rerank_url = (

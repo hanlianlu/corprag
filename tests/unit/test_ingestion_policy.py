@@ -53,9 +53,7 @@ class TestIngestionPolicy:
 
     def test_custom_drop_types(self) -> None:
         """Test custom drop types configuration."""
-        config = IngestionPolicyConfig(
-            drop_types=frozenset({"custom_noise"})
-        )
+        config = IngestionPolicyConfig(drop_types=frozenset({"custom_noise"}))
         policy = IngestionPolicy(config)
 
         content_list = [
