@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from corprag.config import CorpragConfig, reset_config
+from corprag.config import CorpragConfig, reset_config, set_config
 
 
 @pytest.fixture(autouse=True)
@@ -32,10 +32,10 @@ def tmp_working_dir(tmp_path: Path) -> Path:
 def test_config(tmp_working_dir: Path) -> CorpragConfig:
     """Create a test config with temporary paths.
 
-    Note: Requires CORPRAG_OPENAI_API_KEY or similar to be set
-    for tests that actually call LLM functions.
+    Also sets the global singleton so that code calling get_config()
+    directly (e.g. /health endpoint) gets the test config.
     """
-    return CorpragConfig(  # type: ignore[call-arg]
+    cfg = CorpragConfig(  # type: ignore[call-arg]
         working_dir=str(tmp_working_dir),
         openai_api_key=os.getenv("CORPRAG_OPENAI_API_KEY", "test-key-for-unit-tests"),
         # Use JSON storage for unit tests (no PG dependency)
@@ -44,3 +44,5 @@ def test_config(tmp_working_dir: Path) -> CorpragConfig:
         vector_storage="NanoVectorDBStorage",
         graph_storage="NetworkXStorage",
     )
+    set_config(cfg)
+    return cfg

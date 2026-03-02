@@ -410,6 +410,12 @@ def get_config() -> CorpragConfig:
     return _config
 
 
+def set_config(config: CorpragConfig) -> None:
+    """Set the global config singleton. Useful for testing."""
+    global _config
+    _config = config
+
+
 def reset_config() -> None:
     """Reset the global config singleton. Useful for testing."""
     global _config
