@@ -6,10 +6,12 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from corprag.sourcing.base import DataSource
+
 logger = logging.getLogger(__name__)
 
 
-class LocalDataSource:
+class LocalDataSource(DataSource):
     """Local filesystem adapter for document loading.
 
     Wraps local file I/O to match the DataSource protocol.

@@ -3,13 +3,11 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 from corprag.retrieval.engine import (
     RetrievalResult,
     _extract_rag_relative,
-    _load_kv_store_page_indices,
     _to_download_url,
     augment_retrieval_result,
     build_sources_and_media_from_contexts,
@@ -95,51 +93,6 @@ class TestToDownloadUrl:
     def test_fallback_full_path(self) -> None:
         result = _to_download_url("/random/path.pdf")
         assert result == "file:///random/path.pdf"
-
-
-# ---------------------------------------------------------------------------
-# TestLoadKvStorePageIndices
-# ---------------------------------------------------------------------------
-
-
-class TestLoadKvStorePageIndices:
-    """Test KV store page index loading."""
-
-    def test_loads_and_converts_to_1_based(self, tmp_path: Path) -> None:
-        kv_path = tmp_path / "kv_store_text_chunks.json"
-        kv_path.write_text(
-            json.dumps(
-                {
-                    "chunk-001": {"page_idx": 0},
-                    "chunk-002": {"page_idx": 4},
-                }
-            )
-        )
-        result = _load_kv_store_page_indices(str(tmp_path))
-        assert result["chunk-001"] == 1
-        assert result["chunk-002"] == 5
-
-    def test_none_page_idx(self, tmp_path: Path) -> None:
-        kv_path = tmp_path / "kv_store_text_chunks.json"
-        kv_path.write_text(
-            json.dumps(
-                {
-                    "chunk-001": {"page_idx": None},
-                }
-            )
-        )
-        result = _load_kv_store_page_indices(str(tmp_path))
-        assert result["chunk-001"] is None
-
-    def test_file_not_found(self, tmp_path: Path) -> None:
-        result = _load_kv_store_page_indices(str(tmp_path))
-        assert result == {}
-
-    def test_corrupt_json(self, tmp_path: Path) -> None:
-        kv_path = tmp_path / "kv_store_text_chunks.json"
-        kv_path.write_text("not valid json {{{")
-        result = _load_kv_store_page_indices(str(tmp_path))
-        assert result == {}
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +184,7 @@ class TestBuildSourcesAndMediaFromContexts:
 class TestAugmentRetrievalResult:
     """Test result augmentation with sources/media."""
 
-    def test_attaches_sources(self) -> None:
+    async def test_attaches_sources(self) -> None:
         result = RetrievalResult(
             answer=None,
             contexts={
@@ -246,13 +199,16 @@ class TestAugmentRetrievalResult:
             },
             raw={},
         )
-        augmented = augment_retrieval_result(result)
+        augmented = await augment_retrieval_result(result)
         assert "sources" in augmented.raw
         assert len(augmented.raw["sources"]) == 1
 
-    def test_page_idx_injected(self, tmp_path: Path) -> None:
-        kv_path = tmp_path / "kv_store_text_chunks.json"
-        kv_path.write_text(json.dumps({"c1": {"page_idx": 2}}))
+    async def test_page_idx_injected(self) -> None:
+        lightrag = MagicMock()
+        lightrag.text_chunks = MagicMock()
+        lightrag.text_chunks.get_by_ids = AsyncMock(
+            return_value=[{"page_idx": 2, "content": "text"}]
+        )
 
         result = RetrievalResult(
             answer=None,
@@ -268,11 +224,29 @@ class TestAugmentRetrievalResult:
             },
             raw={},
         )
-        augmented = augment_retrieval_result(result, rag_working_dir=str(tmp_path))
+        augmented = await augment_retrieval_result(result, lightrag=lightrag)
         chunk = augmented.contexts["chunks"][0]
         assert chunk["page_idx"] == 3  # 0-based 2 -> 1-based 3
 
-    def test_no_contexts_no_crash(self) -> None:
+    async def test_no_contexts_no_crash(self) -> None:
         result = RetrievalResult(answer=None, contexts={}, raw={})
-        augmented = augment_retrieval_result(result)
+        augmented = await augment_retrieval_result(result)
         assert augmented is result
+
+    async def test_no_lightrag_no_page_idx(self) -> None:
+        result = RetrievalResult(
+            answer=None,
+            contexts={
+                "chunks": [
+                    {
+                        "chunk_id": "c1",
+                        "file_path": "/storage/doc.pdf",
+                        "reference_id": "ref-001",
+                        "content": "text",
+                    },
+                ],
+            },
+            raw={},
+        )
+        augmented = await augment_retrieval_result(result, lightrag=None)
+        assert "page_idx" not in augmented.contexts["chunks"][0]

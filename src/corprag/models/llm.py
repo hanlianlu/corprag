@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -30,7 +31,15 @@ logger = logging.getLogger(__name__)
 LLMFunc = Callable[..., Awaitable[str]]
 
 # OpenAI-compatible providers that can use ChatOpenAI with custom base_url
-_OPENAI_COMPATIBLE_PROVIDERS = {"openai", "azure_openai", "qwen", "minimax", "ollama", "openrouter"}
+_OPENAI_COMPATIBLE_PROVIDERS = {
+    "openai",
+    "azure_openai",
+    "qwen",
+    "minimax",
+    "ollama",
+    "xinference",
+    "openrouter",
+}
 
 
 def _ensure_bytes(data: bytes | bytearray | str) -> bytes | None:
@@ -64,6 +73,7 @@ def _build_chat_model(
     model: str,
     temperature: float | None = None,
     provider: str | None = None,
+    model_kwargs: dict[str, Any] | None = None,
 ) -> BaseChatModel:
     """Build a LangChain chat model instance from config.
 
@@ -72,18 +82,21 @@ def _build_chat_model(
         model: Model name / deployment name.
         temperature: Override temperature. Falls back to config.llm_temperature.
         provider: Override LLM provider. Falls back to config.llm_provider.
+        model_kwargs: Extra parameters forwarded to the provider API call
+            (e.g. ``{"think": False}`` for Ollama reasoning models).
 
     Category A (OpenAI-compatible): uses ChatOpenAI with provider-specific base_url.
     Category B (Dedicated class): uses ChatAnthropic or ChatGoogleGenerativeAI.
     """
     temp = temperature if temperature is not None else config.llm_temperature
     provider = provider or config.llm_provider
+    extra = model_kwargs or {}
 
     if provider in _OPENAI_COMPATIBLE_PROVIDERS:
         from langchain_openai import ChatOpenAI
 
         api_key = config._get_provider_api_key(provider)
-        base_url = config._get_provider_base_url(provider)
+        base_url = config._get_url(f"{provider}_base_url")
 
         return ChatOpenAI(  # type: ignore[call-arg]
             model=model,
@@ -92,6 +105,7 @@ def _build_chat_model(
             temperature=temp,
             timeout=config.llm_request_timeout,
             max_retries=config.llm_max_retries,
+            extra_body=extra,
         )
 
     if provider == "anthropic":
@@ -103,6 +117,7 @@ def _build_chat_model(
             temperature=temp,
             timeout=float(config.llm_request_timeout),
             max_retries=config.llm_max_retries,
+            model_kwargs=extra,
         )
 
     if provider == "google_gemini":
@@ -114,6 +129,7 @@ def _build_chat_model(
             temperature=temp,
             timeout=config.llm_request_timeout,
             max_retries=config.llm_max_retries,
+            model_kwargs=extra,
         )
 
     raise ValueError(f"Unsupported LLM provider: {provider}")
@@ -123,9 +139,10 @@ def _build_llm_model_func(
     config: CorpragConfig,
     deployment: str,
     temperature: float | None = None,
+    model_kwargs: dict[str, Any] | None = None,
 ) -> LLMFunc:
     """Build a LightRAG-compatible LLM function from config."""
-    llm = _build_chat_model(config, deployment, temperature)
+    llm = _build_chat_model(config, deployment, temperature, model_kwargs=model_kwargs)
 
     async def llm_model_func(
         prompt: str,
@@ -140,12 +157,18 @@ def _build_llm_model_func(
             messages.append(SystemMessage(content=system_prompt))
         messages.append(HumanMessage(content=prompt))
 
+        t0 = time.perf_counter()
         try:
             model = llm.bind(max_tokens=max_tokens) if max_tokens else llm
             resp = await model.ainvoke(messages)
-            return str(resp.content) if resp.content else ""
+            result = str(resp.content) if resp.content else ""
+            elapsed = time.perf_counter() - t0
+            preview = result[:120].replace("\n", " ")
+            logger.info("LLM %.1fs %dc [%s]", elapsed, len(result), preview)
+            return result
         except Exception:
-            logger.exception("LLM call failed")
+            elapsed = time.perf_counter() - t0
+            logger.exception("LLM failed %.1fs", elapsed)
             return ""
 
     return llm_model_func
@@ -156,7 +179,7 @@ def get_llm_model_func(config: CorpragConfig | None = None) -> LLMFunc:
     from corprag.config import get_config
 
     cfg = config or get_config()
-    return _build_llm_model_func(cfg, cfg.chat_model_name)
+    return _build_llm_model_func(cfg, cfg.chat_model_name, model_kwargs=cfg.chat_model_kwargs)
 
 
 def get_ingestion_llm_model_func(config: CorpragConfig | None = None) -> LLMFunc:
@@ -168,6 +191,7 @@ def get_ingestion_llm_model_func(config: CorpragConfig | None = None) -> LLMFunc
         cfg,
         cfg.ingestion_model_name,
         temperature=cfg.ingestion_temperature,
+        model_kwargs=cfg.ingestion_model_kwargs,
     )
 
 
@@ -192,12 +216,14 @@ def get_vision_model_func(
         logger.warning("No vision model configured; disabling VLM.")
         return None
 
+    extra = cfg.vision_model_kwargs
+
     if vision_provider in _OPENAI_COMPATIBLE_PROVIDERS:
-        return _build_openai_vision_func(cfg, vision_deployment, vision_provider)
+        return _build_openai_vision_func(cfg, vision_deployment, vision_provider, extra)
     if vision_provider == "anthropic":
-        return _build_anthropic_vision_func(cfg, vision_deployment)
+        return _build_anthropic_vision_func(cfg, vision_deployment, extra)
     if vision_provider == "google_gemini":
-        return _build_google_vision_func(cfg, vision_deployment)
+        return _build_google_vision_func(cfg, vision_deployment, extra)
 
     logger.warning("Vision not supported for provider: %s", vision_provider)
     return None
@@ -207,12 +233,13 @@ def _build_openai_vision_func(
     cfg: CorpragConfig,
     vision_deployment: str,
     provider: str,
+    model_kwargs: dict[str, Any] | None = None,
 ) -> Callable[..., Awaitable[str]]:
     """OpenAI-compatible vision func (covers openai, azure_openai, qwen, minimax)."""
     from openai import AsyncOpenAI
 
     api_key = cfg._get_provider_api_key(provider)
-    base_url = cfg._get_provider_base_url(provider)
+    base_url = cfg._get_url(f"{provider}_base_url")
 
     client = AsyncOpenAI(
         api_key=api_key,
@@ -221,6 +248,7 @@ def _build_openai_vision_func(
         max_retries=cfg.llm_max_retries,
     )
     vision_temp = cfg.vision_temperature
+    extra = model_kwargs or {}
 
     async def vision_model_func(
         prompt: str,
@@ -234,15 +262,21 @@ def _build_openai_vision_func(
         """Vision model function compatible with RAG-Anything."""
         # Pattern 1: Pre-formatted messages from RAG-Anything
         if messages is not None:
+            t0 = time.perf_counter()
             try:
                 resp = await client.chat.completions.create(
                     model=vision_deployment,
                     messages=messages,  # type: ignore[arg-type]
                     temperature=vision_temp,
+                    extra_body=extra,
                 )
-                return resp.choices[0].message.content or "" if resp.choices else ""
+                result = resp.choices[0].message.content or "" if resp.choices else ""
+                elapsed = time.perf_counter() - t0
+                preview = result[:120].replace("\n", " ")
+                logger.info("Vision %.1fs %dc [%s]", elapsed, len(result), preview)
+                return result
             except Exception:
-                logger.exception("Vision call failed (messages mode)")
+                logger.exception("Vision failed %.1fs", time.perf_counter() - t0)
                 return ""
 
         # Pattern 2: Individual image_data parameter
@@ -272,15 +306,21 @@ def _build_openai_vision_func(
             }
         )
 
+        t0 = time.perf_counter()
         try:
             resp = await client.chat.completions.create(
                 model=vision_deployment,
                 messages=msg_list,  # type: ignore[arg-type]
                 temperature=vision_temp,
+                extra_body=extra,
             )
-            return resp.choices[0].message.content or "" if resp.choices else ""
+            result = resp.choices[0].message.content or "" if resp.choices else ""
+            elapsed = time.perf_counter() - t0
+            preview = result[:120].replace("\n", " ")
+            logger.info("Vision %.1fs %dc [%s]", elapsed, len(result), preview)
+            return result
         except Exception:
-            logger.exception("Vision call failed (image_data mode)")
+            logger.exception("Vision failed %.1fs", time.perf_counter() - t0)
             return ""
 
     return vision_model_func
@@ -335,6 +375,7 @@ def _convert_openai_to_anthropic_messages(
 def _build_anthropic_vision_func(
     cfg: CorpragConfig,
     vision_deployment: str,
+    model_kwargs: dict[str, Any] | None = None,
 ) -> Callable[..., Awaitable[str]]:
     """Anthropic vision func using AsyncAnthropic client."""
     from anthropic import AsyncAnthropic
@@ -426,6 +467,7 @@ def _build_anthropic_vision_func(
 def _build_google_vision_func(
     cfg: CorpragConfig,
     vision_deployment: str,
+    model_kwargs: dict[str, Any] | None = None,
 ) -> Callable[..., Awaitable[str]]:
     """Google Gemini vision func using google-genai client."""
     from google import genai
@@ -534,13 +576,14 @@ def get_embedding_func(config: CorpragConfig | None = None) -> EmbeddingFunc:
         from langchain_openai import OpenAIEmbeddings
 
         api_key = cfg._get_provider_api_key(emb_provider)
-        base_url = cfg._get_provider_base_url(emb_provider)
+        base_url = cfg._get_url(f"{emb_provider}_base_url")
 
         embeddings = OpenAIEmbeddings(  # type: ignore[call-arg]
             model=cfg.embedding_model,
             api_key=SecretStr(api_key),
             base_url=base_url,
             dimensions=cfg.embedding_dim,
+            check_embedding_ctx_length=emb_provider not in ("ollama", "xinference"),
         )
 
     async def embed_func(texts: list[str]) -> np.ndarray:
@@ -555,6 +598,7 @@ def get_embedding_func(config: CorpragConfig | None = None) -> EmbeddingFunc:
         embedding_dim=cfg.embedding_dim,
         max_token_size=8192,
         func=embed_func,
+        model_name=cfg.embedding_model,
     )
 
 
@@ -564,35 +608,55 @@ def get_embedding_func(config: CorpragConfig | None = None) -> EmbeddingFunc:
 
 
 def get_rerank_func(config: CorpragConfig | None = None) -> Callable:
-    """Return rerank function based on configured provider.
+    """Return rerank function based on configured backend.
 
-    Providers:
+    Backends:
     - "llm": LLM-based listwise reranker (uses current llm_provider)
-    - "cohere": Cohere REST API
-    - "azure_cohere": Azure AI Services Cohere deployment
+    - "cohere": Cohere-compatible API (works with Cohere, Xinference, LiteLLM, etc.)
+    - "jina": Jina-compatible API
+    - "aliyun": Aliyun DashScope API
+    - "azure_cohere": Azure AI Foundry Cohere deployment (custom auth header)
+
+    The cohere/jina/aliyun backends can target any compatible endpoint via
+    CORPRAG_RERANK_BASE_URL, following the same pattern as LightRAG's
+    --rerank-binding + --rerank-binding-host.
     """
+    from functools import partial
+
     from corprag.config import get_config
 
     cfg = config or get_config()
 
-    if cfg.rerank_backend == "cohere":
-        from functools import partial
+    if cfg.rerank_backend in ("cohere", "jina", "aliyun"):
+        from lightrag.rerank import ali_rerank, cohere_rerank, jina_rerank
 
-        from lightrag.rerank import cohere_rerank
+        rerank_functions = {
+            "cohere": cohere_rerank,
+            "jina": jina_rerank,
+            "aliyun": ali_rerank,
+        }
+        selected_func = rerank_functions[cfg.rerank_backend]
+        model = cfg.effective_rerank_model
+        api_key = cfg.effective_rerank_api_key
 
-        logger.info("Reranker: provider=cohere, model=%s", cfg.cohere_rerank_model)
-        return partial(
-            cohere_rerank,
-            api_key=cfg.cohere_api_key,
-            model=cfg.cohere_rerank_model,
+        kwargs: dict[str, Any] = {"api_key": api_key, "model": model}
+        if cfg.rerank_base_url:
+            kwargs["base_url"] = cfg.rerank_base_url
+
+        logger.info(
+            "Reranker: backend=%s, model=%s, base_url=%s",
+            cfg.rerank_backend,
+            model,
+            cfg.rerank_base_url or "(provider default)",
         )
+        return partial(selected_func, **kwargs)
 
     if cfg.rerank_backend == "azure_cohere":
-        logger.info("Reranker: provider=azure_cohere, model=%s", cfg.azure_cohere_deployment)
+        logger.info("Reranker: backend=azure_cohere, model=%s", cfg.effective_rerank_model)
         return _build_azure_cohere_rerank_func(cfg)
 
     logger.info(
-        "Reranker: provider=llm (%s), model=%s",
+        "Reranker: backend=llm (%s), model=%s",
         cfg.effective_rerank_llm_provider,
         cfg.effective_rerank_model,
     )
@@ -673,14 +737,12 @@ def _build_azure_cohere_rerank_func(config: CorpragConfig) -> Callable:
     """Azure AI Services Cohere reranker via REST API."""
     import httpx
 
-    endpoint = config.azure_cohere_endpoint
-    api_key = config.azure_cohere_api_key
-    deployment = config.azure_cohere_deployment
+    endpoint = config._get_url("rerank_base_url")
+    api_key = config.rerank_api_key
+    deployment = config.effective_rerank_model
 
     if not endpoint or not api_key:
-        raise ValueError("azure_cohere_endpoint and azure_cohere_api_key required for azure_cohere")
-
-    endpoint = endpoint.rstrip("/")
+        raise ValueError("rerank_base_url and rerank_api_key required for azure_cohere backend")
     rerank_url = (
         endpoint
         if "/providers/cohere/" in endpoint or endpoint.endswith("/rerank")

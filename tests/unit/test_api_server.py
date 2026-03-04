@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -37,7 +37,7 @@ def mock_service():
     service.aanswer = AsyncMock(
         return_value=RetrievalResult(answer="The answer is 42", contexts={"chunks": []}, raw={})
     )
-    service.list_ingested_files = MagicMock(return_value=[])
+    service.alist_ingested_files = AsyncMock(return_value=[])
     service.adelete_files = AsyncMock(return_value=[{"status": "deleted"}])
     return service
 
@@ -414,7 +414,7 @@ class TestFilesEndpoint:
     async def test_list_files_count_matches(
         self, client: AsyncClient, mock_config: CorpragConfig, mock_service
     ) -> None:
-        mock_service.list_ingested_files = MagicMock(return_value=["a.pdf", "b.pdf", "c.pdf"])
+        mock_service.alist_ingested_files = AsyncMock(return_value=["a.pdf", "b.pdf", "c.pdf"])
 
         async def _fake_get():
             return mock_service

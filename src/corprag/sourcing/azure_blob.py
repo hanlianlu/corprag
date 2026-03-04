@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import os
 
+from corprag.sourcing.base import AsyncDataSource, DataSource
 
-class AzureBlobDataSource:
+
+class AzureBlobDataSource(DataSource, AsyncDataSource):
     """Azure Blob Storage adapter (sync + async)."""
 
     def __init__(
@@ -31,6 +33,12 @@ class AzureBlobDataSource:
         """List all blob names in container (sync)."""
         blobs = self.container_client.list_blobs(name_starts_with=prefix)
         return [blob.name for blob in blobs]
+
+    def load_document(self, doc_id: str) -> bytes:
+        """Download blob content as bytes (sync)."""
+        blob_client = self.container_client.get_blob_client(doc_id)
+        stream = blob_client.download_blob()
+        return stream.readall()
 
     async def alist_documents(self, prefix: str | None = None) -> list[str]:
         """List all blob names in container (async)."""

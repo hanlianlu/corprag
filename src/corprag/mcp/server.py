@@ -245,7 +245,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(result, default=str))]
 
         if name == "list_files":
-            files = service.list_ingested_files()
+            files = await service.alist_ingested_files()
             import json
 
             return [

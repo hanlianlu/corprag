@@ -149,6 +149,9 @@ class RAGService:
         self.rag_text: EnhancedRAGAnything | None = None
         self.rag_vision: EnhancedRAGAnything | None = None
 
+        # asyncpg pool for PGHashIndex (closed in close())
+        self._hash_pool: Any | None = None
+
     def _unregister_atexit_cleanup(self, rag_obj: Any) -> None:
         """Prevent double-close logging errors by removing raganything atexit hooks."""
         try:
@@ -300,6 +303,7 @@ class RAGService:
 
         # LightRAG configuration
         lightrag_kwargs: dict[str, Any] = {
+            "default_llm_timeout": config.llm_request_timeout,
             "chunk_token_size": config.chunk_size,
             "chunk_overlap_token_size": config.chunk_overlap,
             "max_parallel_insert": config.max_parallel_insert,
@@ -331,12 +335,17 @@ class RAGService:
             lightrag_kwargs,
         )
         self._unregister_atexit_cleanup(rag_ingestion)
+
+        # Auto-detect hash index backend based on storage config
+        hash_index = await self._create_hash_index(config)
+
         self.ingestion = IngestionPipeline(
             rag_ingestion,
             config=config,
             max_concurrent=config.max_concurrent_ingestion,
             mineru_backend=mineru_backend,
             cancel_checker=self._cancel_checker,
+            hash_index=hash_index,
         )
 
         # Initialize LightRAG storages
@@ -379,6 +388,48 @@ class RAGService:
 
         logger.info("All RAG pipelines initialized successfully")
 
+    async def _create_hash_index(self, config: CorpragConfig) -> Any:
+        """Create the appropriate hash index backend based on storage config.
+
+        Uses PGHashIndex when KV storage is PG-backed, otherwise falls back
+        to JSON file-based HashIndex.
+        """
+        if config.kv_storage.startswith("PG"):
+            try:
+                import asyncpg
+
+                from corprag.ingestion.hash_index import PGHashIndex
+
+                pool = await asyncpg.create_pool(
+                    host=config.postgres_host,
+                    port=config.postgres_port,
+                    user=config.postgres_user,
+                    password=config.postgres_password,
+                    database=config.postgres_database,
+                    min_size=1,
+                    max_size=3,
+                )
+                self._hash_pool = pool  # track for cleanup in close()
+
+                pg_index = PGHashIndex(
+                    pool,
+                    workspace=config.postgres_workspace,
+                    sources_dir=config.sources_dir,
+                )
+                await pg_index.initialize()
+                logger.info("Hash index: PGHashIndex (PostgreSQL)")
+                return pg_index
+
+            except ImportError:
+                logger.warning("asyncpg not available, falling back to JSON HashIndex")
+            except Exception as e:
+                logger.warning(f"PGHashIndex creation failed, falling back to JSON: {e}")
+
+        from corprag.ingestion.hash_index import HashIndex
+
+        logger.info("Hash index: HashIndex (JSON file)")
+        return HashIndex(config.working_dir_path, config.sources_dir)
+
     def _ensure_initialized(self) -> None:
         """Raise error if not initialized."""
         if not self._initialized:
@@ -402,6 +453,14 @@ class RAGService:
                     await rag_obj.finalize_storages()
             except Exception:  # noqa: BLE001
                 logger.warning("Failed to finalize retrieval storages", exc_info=True)
+
+        # Close PGHashIndex connection pool
+        if self._hash_pool is not None:
+            try:
+                await self._hash_pool.close()
+            except Exception:  # noqa: BLE001
+                logger.warning("Failed to close hash index pool", exc_info=True)
+            self._hash_pool = None
 
     # === INGESTION API ===
 
@@ -554,10 +613,11 @@ class RAGService:
             **query_kwargs,
         )
 
-        return augment_retrieval_result(
+        return await augment_retrieval_result(
             result,
             str(self.config.working_dir_path),
             url_transformer=self._url_transformer,
+            lightrag=rag.lightrag,
         )
 
     async def aanswer(
@@ -632,10 +692,11 @@ class RAGService:
             **query_kwargs,
         )
 
-        return augment_retrieval_result(
+        return await augment_retrieval_result(
             result,
             str(self.config.working_dir_path),
             url_transformer=self._url_transformer,
+            lightrag=rag.lightrag,
         )
 
     async def _rerank_chunks(
@@ -670,12 +731,12 @@ class RAGService:
 
     # === FILE MANAGEMENT API ===
 
-    def list_ingested_files(self) -> list[dict[str, Any]]:
+    async def alist_ingested_files(self) -> list[dict[str, Any]]:
         """List all ingested files."""
         self._ensure_initialized()
         if not self.ingestion:
             raise RuntimeError("Ingestion pipeline not initialized")
-        return self.ingestion.list_ingested_files()
+        return await self.ingestion.alist_ingested_files()
 
     async def adelete_files(
         self,

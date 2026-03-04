@@ -3,19 +3,17 @@
 [![PyPI](https://img.shields.io/pypi/v/corprag)](https://pypi.org/project/corprag/)
 [![CI](https://github.com/hanlianlu/corprag/actions/workflows/ci.yml/badge.svg)](https://github.com/hanlianlu/corprag/actions/workflows/ci.yml)
 
-Multimodal RAG service built upon [RAGAnything](https://github.com/HKUDS/RAG-Anything) + [LightRAG](https://github.com/HKUDS/LightRAG) with PostgreSQL and additional enhancements as the unified service.
+Multimodal RAG service built upon [RAGAnything](https://github.com/HKUDS/RAG-Anything) + [LightRAG](https://github.com/HKUDS/LightRAG) with PostgreSQL defaults and additional enhancements as the unified service.
 
 ## Features
 
-- 🗂️ **Multimodal ingestion** -- PDF, Word, Excel, PowerPoint, images, and more via parsing engine
-- 🔭 **Knowledge graph + vector search** -- Dual retrieval with Apache AGE (graph) and pgvector (vector) in a single PostgreSQL instance
-- ♻️ **Content deduplication** -- SHA-256 hash index prevents re-ingesting unchanged documents
-- 🎛️ **Multiple retrieval modes** -- local, global, hybrid, naive, and mix modes for flexible retrieval strategies
-- 🤖 **Multi-provider LLM** -- OpenAI, Azure OpenAI, Anthropic, Google Gemini, Qwen, MiniMax, Ollama, OpenRouter
-- ↕️ **LLM reranking** -- Optional reranking with any LLM provider, or specialized Cohere, or Azure Cohere
-- 🛠️ **Three interfaces** -- Python SDK, REST API, and MCP server
-- 🔌 **Pluggable storage** -- Default PostgreSQL, also supports Neo4j, Milvus, Redis, MongoDB, JSON (via LightRAG)
 - 🌐 **Flexible data sourcing** -- Ingest from local filesystem, Azure Blob Storage, or Snowflake tables
+- 🗂️ **Multimodal ingestion with granular enhancements** -- PDF, Word, Excel, PowerPoint, images, and more via parsing engine
+- 🤖 **Multi-provider LLM** -- OpenAI, Azure OpenAI, Anthropic, Google Gemini, Qwen, MiniMax, Ollama, OpenRouter, xInference
+- 🔭 **Knowledge graph + Vector semantic** -- Dual retrieval with Apache AGE (graph) and pgvector (vector) in a single PostgreSQL instance
+- ↕️ **Reranking** -- LLM-based listwise OR Reranker from Cohere, Jina, Aliyun, Azure Cohere; Point any backend at a custom endpoint (Xinference, Ollama etc.)
+- ✨ **Retrieval enrichment** -- Enhanced answer and retrieval formation for better citation and reference.
+- 🔌 **Three interfaces** -- Python SDK, REST API, and MCP server
 
 ## Quick Start
 
@@ -55,6 +53,7 @@ asyncio.run(main())
 
 > **Note:** The SDK requires a running PostgreSQL instance with pgvector + AGE extensions, or use JSON fallback for development (see [Configuration](#configuration)).
 
+
 ### Option B: Self-Hosted Server (Docker)
 
 ```bash
@@ -87,6 +86,7 @@ curl -X POST http://localhost:8100/answer \
   -d '{"query": "What are the key findings?"}'
 ```
 
+
 ### Option C: MCP Server (for AI Agents)
 
 ```bash
@@ -110,6 +110,7 @@ Available MCP tools: `retrieve`, `answer`, `ingest`, `list_files`, `delete_files
 
 > **Note:** Like the SDK, the MCP server requires PostgreSQL with pgvector + AGE, or JSON fallback storage (see [Configuration](#configuration)).
 
+
 ## Local Development
 
 ```bash
@@ -118,6 +119,7 @@ cd corprag
 
 # Configure environment
 cp .env.example .env
+
 # Edit .env -- at minimum set CORPRAG_OPENAI_API_KEY
 
 # Install dependencies
@@ -125,8 +127,11 @@ uv sync
 
 # Start PostgreSQL (pick one)
 docker compose up postgres -d        # via Docker
-# or use an existing PostgreSQL with pgvector + AGE extensions
+
+# starts all services including PostgreSQL, API, and MCP
+docker compose up  -d  
 ```
+
 
 ### Testing
 
@@ -136,6 +141,7 @@ uv run pytest tests/integration             # integration tests (requires Postgr
 uv run pytest                               # all tests
 uv run pytest --cov-report=html             # + HTML report → htmlcov/index.html
 ```
+
 
 ### Linting
 
@@ -156,6 +162,7 @@ uv run ruff format src/ tests/ scripts/
 > ```
 
 > **Note:** Excel-to-PDF conversion requires [LibreOffice](https://www.libreoffice.org/) (`libreoffice` on PATH). If not installed, Excel files are ingested as-is without conversion. The Docker image includes LibreOffice.
+
 
 ## Configuration
 
@@ -191,6 +198,46 @@ See [.env.example](.env.example) for all provider-specific variables.
 
 See [.env.example](.env.example) for all available configuration options.
 
+### Reranking
+
+Five backends are available. The `cohere`, `jina`, and `aliyun` backends use LightRAG's built-in rerank functions and can target any API-compatible service via `RERANK_BASE_URL`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `CORPRAG_RERANK_BACKEND` | `llm` | `llm`, `cohere`, `jina`, `aliyun`, `azure_cohere` |
+| `CORPRAG_RERANK_MODEL` | (backend default) | Model name sent to the endpoint |
+| `CORPRAG_RERANK_BASE_URL` | (provider default) | Custom endpoint URL for any compatible service |
+| `CORPRAG_RERANK_API_KEY` | — | Generic API key (falls back to provider-specific keys) |
+
+**Backend defaults** (used when `RERANK_MODEL` / `RERANK_API_KEY` are not set):
+
+| Backend | Default model | Provider-specific key |
+|---|---|---|
+| `llm` | (follows `INGESTION_MODEL`) | (follows `LLM_PROVIDER` credentials) |
+| `cohere` | `rerank-v4.0-pro` | `CORPRAG_COHERE_API_KEY` |
+| `jina` | `jina-reranker-v2-base-multilingual` | `CORPRAG_JINA_API_KEY` |
+| `aliyun` | `gte-rerank-v2` | `CORPRAG_ALIYUN_RERANK_API_KEY` |
+| `azure_cohere` | `Cohere-rerank-v4.0-pro` | `CORPRAG_AZURE_COHERE_API_KEY` + `CORPRAG_AZURE_COHERE_ENDPOINT` |
+
+**Examples:**
+
+```bash
+# Cohere (direct)
+CORPRAG_RERANK_BACKEND=cohere
+CORPRAG_COHERE_API_KEY=your-key
+
+# Local reranker via Xinference / LiteLLM / any Cohere-compatible endpoint
+CORPRAG_RERANK_BACKEND=cohere
+CORPRAG_RERANK_MODEL=bge-reranker-v2-m3
+CORPRAG_RERANK_BASE_URL=http://localhost:9997/v1/rerank
+
+# LLM-based listwise reranker (default -- no extra config needed)
+CORPRAG_RERANK_BACKEND=llm
+```
+
+See [.env.example](.env.example) for all reranking options.
+
+
 ## REST API
 
 | Method | Endpoint | Description |
@@ -203,6 +250,7 @@ See [.env.example](.env.example) for all available configuration options.
 | `GET` | `/health` | Health check with storage status |
 
 Set `CORPRAG_API_AUTH_TOKEN` to enable bearer token authentication.
+
 
 ## Architecture
 
@@ -238,6 +286,7 @@ Set `CORPRAG_API_AUTH_TOKEN` to enable bearer token authentication.
   │  Ollama · ...     │
   └───────────────────┘
 ```
+
 
 ## License
 

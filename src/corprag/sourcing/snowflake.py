@@ -13,10 +13,12 @@ import os
 import uuid
 from typing import Any
 
+from corprag.sourcing.base import DataSource
+
 logger = logging.getLogger(__name__)
 
 
-class SnowflakeDataSource:
+class SnowflakeDataSource(DataSource):
     """Snowflake adapter for document export and ingestion.
 
     Features:
@@ -59,6 +61,33 @@ class SnowflakeDataSource:
             client_session_keep_alive=True,
         )
 
+    def execute_query(self, query: str, source_label: str = "query") -> list[str]:
+        """Execute raw SQL and cache results as documents.
+
+        First column is treated as text content.
+        Remaining columns become metadata (keyed by column name).
+
+        Returns:
+            List of document IDs
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(query)  # noqa: S608
+
+        col_names = [desc[0] for desc in cursor.description]
+        doc_ids = []
+        for row in cursor:
+            doc_id = str(uuid.uuid4())
+            doc_data = {
+                "text": str(row[0]),
+                "metadata": {col_names[i]: row[i] for i in range(1, len(col_names))},
+                "source": f"snowflake://{source_label}",
+            }
+            self._cache[doc_id] = json.dumps(doc_data).encode("utf-8")
+            doc_ids.append(doc_id)
+
+        cursor.close()
+        return doc_ids
+
     def export_table(
         self,
         table: str,
@@ -66,7 +95,7 @@ class SnowflakeDataSource:
         metadata_columns: list[str] | None = None,
         where_clause: str | None = None,
     ) -> list[str]:
-        """Export Snowflake table as documents.
+        """Export Snowflake table as documents (convenience wrapper).
 
         Returns:
             List of document IDs
@@ -78,29 +107,10 @@ class SnowflakeDataSource:
         if where_clause:
             query += f" WHERE {where_clause}"
 
-        cursor = self.conn.cursor()
-        cursor.execute(query)
-
-        doc_ids = []
-        for row in cursor:
-            doc_id = str(uuid.uuid4())
-            doc_data = {
-                "text": row[0],
-                "metadata": {col: row[i + 1] for i, col in enumerate(metadata_cols)},
-                "source": f"snowflake://{table}",
-            }
-            self._cache[doc_id] = json.dumps(doc_data).encode("utf-8")
-            doc_ids.append(doc_id)
-
-        cursor.close()
-        return doc_ids
+        return self.execute_query(query, source_label=table)
 
     def list_documents(self, prefix: str | None = None) -> list[str]:  # noqa: ARG002
-        """List all cached document IDs (sync)."""
-        return list(self._cache.keys())
-
-    async def alist_documents(self, prefix: str | None = None) -> list[str]:  # noqa: ARG002
-        """List all cached document IDs (async)."""
+        """List all cached document IDs."""
         return list(self._cache.keys())
 
     def load_document(self, doc_id: str) -> bytes:
@@ -108,10 +118,6 @@ class SnowflakeDataSource:
         if doc_id not in self._cache:
             raise KeyError(f"Document not found: {doc_id}")
         return self._cache[doc_id]
-
-    def save_document(self, doc_id: str, content: bytes) -> None:
-        """Not supported for Snowflake (read-only)."""
-        raise NotImplementedError("Snowflake is read-only")
 
     def close(self) -> None:
         """Close Snowflake connection."""

@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -109,20 +108,22 @@ class TestIngestionPipelineHelpers:
         assert d.is_dir()
         assert "custom_type" in str(d)
 
-    def test_copy_to_sources_local_new_file(
+    async def test_acopy_to_sources_local_new_file(
         self, test_config: CorpragConfig, tmp_path: Path
     ) -> None:
         pipeline = _make_pipeline(test_config)
         src = tmp_path / "new_doc.pdf"
         src.write_text("pdf bytes")
-        dest = pipeline._copy_to_sources_local(src)
+        dest = await pipeline._acopy_to_sources_local(src)
         assert dest.exists()
         assert dest.name == "new_doc.pdf"
         assert dest.read_text() == "pdf bytes"
 
-    def test_copy_to_sources_local_conflict_resolution(
+    async def test_acopy_to_sources_local_conflict_resolution(
         self, test_config: CorpragConfig, tmp_path: Path
     ) -> None:
+        from datetime import date
+
         pipeline = _make_pipeline(test_config)
         # Pre-create file in sources/local/
         existing = test_config.sources_dir / "local" / "report.pdf"
@@ -131,78 +132,20 @@ class TestIngestionPipelineHelpers:
         # New file with same name but different content
         src = tmp_path / "report.pdf"
         src.write_text("new version")
-        dest = pipeline._copy_to_sources_local(src)
-        assert dest.name == "report_1.pdf"
+        dest = await pipeline._acopy_to_sources_local(src)
+        date_str = date.today().strftime("%Y_%m_%d")
+        assert dest.name == f"report_{date_str}.pdf"
         assert dest.read_text() == "new version"
 
-    def test_copy_to_sources_local_already_in_place(self, test_config: CorpragConfig) -> None:
+    async def test_acopy_to_sources_local_already_in_place(
+        self, test_config: CorpragConfig
+    ) -> None:
         pipeline = _make_pipeline(test_config)
         # File already in sources/local
         existing = test_config.sources_dir / "local" / "report.pdf"
         existing.write_text("content")
-        dest = pipeline._copy_to_sources_local(existing)
+        dest = await pipeline._acopy_to_sources_local(existing)
         assert dest == existing
-
-
-# ---------------------------------------------------------------------------
-# TestFindAllByBasename
-# ---------------------------------------------------------------------------
-
-
-class TestFindAllByBasename:
-    """Tests for _find_all_by_basename KV store lookup."""
-
-    def _write_kv_store(self, config: CorpragConfig, data: dict) -> None:
-        kv_path = config.working_dir_path / "kv_store_doc_status.json"
-        kv_path.write_text(json.dumps(data))
-
-    def test_exact_match(self, test_config: CorpragConfig) -> None:
-        pipeline = _make_pipeline(test_config)
-        self._write_kv_store(
-            test_config,
-            {
-                "doc-001": {"file_path": "/storage/sources/local/report.pdf"},
-            },
-        )
-        matches = pipeline._find_all_by_basename("report.pdf")
-        assert len(matches) == 1
-        assert matches[0]["doc_id"] == "doc-001"
-
-    def test_stem_match_fallback(self, test_config: CorpragConfig) -> None:
-        pipeline = _make_pipeline(test_config)
-        self._write_kv_store(
-            test_config,
-            {
-                "doc-001": {"file_path": "/storage/sources/local/report.pdf"},
-            },
-        )
-        # Different extension but same stem
-        matches = pipeline._find_all_by_basename("report.xlsx")
-        assert len(matches) == 1
-
-    def test_exact_before_stem(self, test_config: CorpragConfig) -> None:
-        pipeline = _make_pipeline(test_config)
-        self._write_kv_store(
-            test_config,
-            {
-                "doc-exact": {"file_path": "/storage/report.pdf"},
-                "doc-stem": {"file_path": "/storage/report.docx"},
-            },
-        )
-        matches = pipeline._find_all_by_basename("report.pdf")
-        assert matches[0]["doc_id"] == "doc-exact"
-
-    def test_no_kv_file(self, test_config: CorpragConfig) -> None:
-        pipeline = _make_pipeline(test_config)
-        matches = pipeline._find_all_by_basename("anything.pdf")
-        assert matches == []
-
-    def test_corrupt_kv_file(self, test_config: CorpragConfig) -> None:
-        pipeline = _make_pipeline(test_config)
-        kv_path = test_config.working_dir_path / "kv_store_doc_status.json"
-        kv_path.write_text("not valid json {{{")
-        matches = pipeline._find_all_by_basename("report.pdf")
-        assert matches == []
 
 
 # ---------------------------------------------------------------------------
@@ -281,7 +224,7 @@ class TestIngestSingleFileWithPolicy:
 
         assert result.status == "success"
         # Hash index should remain empty since no hash was provided
-        assert pipeline._hash_index.list_all() == []
+        assert await pipeline._hash_index.list_all() == []
 
     async def test_mineru_backend_passed_to_parse_kwargs(
         self, test_config: CorpragConfig, tmp_path: Path

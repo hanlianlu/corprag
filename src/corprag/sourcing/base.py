@@ -1,19 +1,18 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
-"""Base protocol for data sources."""
+"""Abstract base classes for data sources."""
 
 from __future__ import annotations
 
-from typing import Protocol
+from abc import ABC, abstractmethod
 
 
-class DataSource(Protocol):
-    """Protocol for data sources.
+class DataSource(ABC):
+    """Abstract base class for sync data sources.
 
-    All data sources must implement this interface.
+    All sync data sources must implement this interface.
     Responsibilities:
         - List available documents
         - Load document content (bytes)
-        - Store document content (optional)
 
     NOT responsible for:
         - Document parsing
@@ -22,17 +21,32 @@ class DataSource(Protocol):
         - RAG logic
     """
 
+    @abstractmethod
     def list_documents(self, prefix: str | None = None) -> list[str]:
         """List available document identifiers."""
         ...
 
+    @abstractmethod
     def load_document(self, doc_id: str) -> bytes:
         """Load document content as bytes."""
         ...
 
-    def save_document(self, doc_id: str, content: bytes) -> None:
-        """Save document content (optional, not all sources support this)."""
+
+class AsyncDataSource(ABC):
+    """Abstract base class for async data sources.
+
+    All async data sources must implement this interface.
+    """
+
+    @abstractmethod
+    async def alist_documents(self, prefix: str | None = None) -> list[str]:
+        """List available document identifiers (async)."""
+        ...
+
+    @abstractmethod
+    async def aload_document(self, doc_id: str) -> bytes:
+        """Load document content as bytes (async)."""
         ...
 
 
-__all__ = ["DataSource"]
+__all__ = ["AsyncDataSource", "DataSource"]

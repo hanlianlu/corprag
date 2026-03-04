@@ -33,7 +33,6 @@ import asyncio
 import json
 import os
 import sys
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -50,12 +49,10 @@ def _get_auth_token() -> str | None:
     if token:
         return token
 
-    env_file = Path(".env")
-    if env_file.exists():
-        for line in env_file.read_text().splitlines():
-            if line.startswith("CORPRAG_API_AUTH_TOKEN="):
-                return line.split("=", 1)[1].strip()
-    return None
+    from dotenv import dotenv_values, find_dotenv
+
+    env = dotenv_values(find_dotenv(usecwd=True))
+    return env.get("CORPRAG_API_AUTH_TOKEN")
 
 
 def _headers() -> dict[str, str]:
@@ -131,7 +128,7 @@ def _validate_ingest_args(args: argparse.Namespace) -> None:
 
 async def _run_ingest(args: argparse.Namespace) -> None:
     """Run ingestion directly via RAGService (no API server needed)."""
-    from corprag import RAGService
+    from corprag.service import RAGService
 
     source = args.source_type
     kwargs: dict[str, Any] = {}

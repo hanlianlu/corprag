@@ -10,7 +10,6 @@ Flow: parse_document() -> policy filter -> insert_content_list()
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import shutil
 from collections.abc import Awaitable, Callable
@@ -22,11 +21,12 @@ from raganything import RAGAnything
 
 from corprag.converters.office import create_converter
 from corprag.ingestion.cleanup import collect_deletion_context
-from corprag.ingestion.hash_index import HashIndex
+from corprag.ingestion.hash_index import HashIndex, compute_file_hash
 from corprag.ingestion.policy import IngestionPolicy, PolicyStats
 
 if TYPE_CHECKING:
     from corprag.config import CorpragConfig
+    from corprag.sourcing.base import AsyncDataSource
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +77,7 @@ class IngestionPipeline:
         policy: IngestionPolicy | None = None,
         mineru_backend: str | None = None,
         cancel_checker: Callable[[], Awaitable[bool]] | None = None,
+        hash_index: Any | None = None,
     ) -> None:
         self.rag = rag_instance
         self.config = config
@@ -92,8 +93,8 @@ class IngestionPipeline:
         # LibreOffice converter for Excel-to-PDF auto-conversion
         self.converter = create_converter(config)
 
-        # Hash index for content deduplication
-        self._hash_index = HashIndex(
+        # Hash index for content deduplication (auto-detected by caller)
+        self._hash_index = hash_index or HashIndex(
             self.config.working_dir_path,
             self.config.sources_dir,
         )
@@ -174,44 +175,44 @@ class IngestionPipeline:
             )
             return file_path
 
-    def _copy_to_sources_local(self, src_path: Path) -> Path:
+    async def _acopy_to_sources_local(self, src_path: Path) -> Path:
         """Copy file to sources/local/, auto-converting Excel to PDF if configured."""
         source_dir = self._get_source_dir("local")
         dest_path = source_dir / src_path.name
 
         # Handle filename conflicts
         if dest_path.exists() and not dest_path.samefile(src_path):
-            base = src_path.stem
-            suffix = src_path.suffix
-            counter = 1
-            while dest_path.exists():
-                dest_path = source_dir / f"{base}_{counter}{suffix}"
-                counter += 1
+            # Same content? Reuse existing file instead of creating a duplicate
+            src_hash = await asyncio.to_thread(compute_file_hash, src_path)
+            dest_hash = await asyncio.to_thread(compute_file_hash, dest_path)
+            if src_hash == dest_hash:
+                logger.debug(f"Identical file already in sources: {dest_path.name}")
+            else:
+                # Genuinely different file with same name — version with date suffix
+                from datetime import date
+
+                base = src_path.stem
+                suffix = src_path.suffix
+                date_str = date.today().strftime("%Y_%m_%d")
+                dest_path = source_dir / f"{base}_{date_str}{suffix}"
+                # Same date but already exists with different content? Add counter
+                if dest_path.exists():
+                    counter = 2
+                    while dest_path.exists():
+                        dest_path = source_dir / f"{base}_{date_str}_{counter}{suffix}"
+                        counter += 1
 
         # Copy if not already in sources/local
         if not dest_path.exists():
-            shutil.copy2(src_path, dest_path)
+            await asyncio.to_thread(shutil.copy2, src_path, dest_path)
             logger.debug(f"Copied {src_path} to {dest_path}")
 
-        # Auto-convert Excel to PDF (synchronous version)
-        if self.converter.should_convert(dest_path):
-            try:
-                pdf_path = self.converter.convert_to_pdf(
-                    source_path=dest_path,
-                    output_dir=source_dir,
-                )
-                logger.info(f"Auto-converted Excel to PDF: {src_path.name} -> {pdf_path.name}")
-                return pdf_path
-            except Exception as e:
-                logger.warning(
-                    f"Excel-to-PDF conversion failed for {src_path.name}, using original: {e}"
-                )
-
-        return dest_path
+        # Auto-convert Excel to PDF using centralized async method
+        return await self._maybe_convert_excel_to_pdf(dest_path, source_dir)
 
     async def _download_blob_to_storage_async(
         self,
-        source: Any,  # AzureBlobDataSource
+        source: AsyncDataSource,
         container_name: str,
         blob_path: str,
     ) -> Path:
@@ -313,9 +314,28 @@ class IngestionPipeline:
                         doc_id=doc_id,
                     )
 
+                # Step 3.5: Inject page metadata into chunks
+                if result.index_stream and doc_id:
+                    try:
+                        from corprag.ingestion.page_metadata import (
+                            inject_page_idx_to_chunks,
+                        )
+
+                        updated = await inject_page_idx_to_chunks(
+                            self.rag.lightrag,
+                            doc_id,
+                            result.index_stream,
+                        )
+                        if updated:
+                            logger.info(
+                                f"Injected page_idx for {updated} chunks [{file_path.name}]"
+                            )
+                    except Exception as e:
+                        logger.warning(f"Page metadata injection failed for {file_path.name}: {e}")
+
                 # Step 4: Register hash for deduplication (if hash was provided)
                 if content_hash and doc_id:
-                    self._hash_index.register(content_hash, doc_id, str(file_path))
+                    await self._hash_index.register(content_hash, doc_id, str(file_path))
 
                 return IngestionResult(
                     status="success",
@@ -389,10 +409,10 @@ class IngestionPipeline:
                 )
 
             if replace:
-                await self.adelete_files(filenames=[path.name], delete_source=False)
+                await self.adelete_files(filenames=[path.name], delete_source=True)
 
             # Copy to sources/local/
-            source_path = self._copy_to_sources_local(path)
+            source_path = await self._acopy_to_sources_local(path)
 
             logger.info(
                 "Ingesting local file: %s -> %s",
@@ -433,9 +453,9 @@ class IngestionPipeline:
                     continue
 
                 if replace:
-                    await self.adelete_files(filenames=[file_path.name], delete_source=False)
+                    await self.adelete_files(filenames=[file_path.name], delete_source=True)
 
-                copied_path = self._copy_to_sources_local(file_path)
+                copied_path = await self._acopy_to_sources_local(file_path)
                 files_to_process.append((copied_path, content_hash or ""))
 
             total_files = len(files_to_process) + skipped_count
@@ -501,7 +521,7 @@ class IngestionPipeline:
 
     async def aingest_from_azure_blob(
         self,
-        source: Any,  # AzureBlobDataSource
+        source: AsyncDataSource,
         container_name: str,
         blob_path: str | None = None,
         prefix: str | None = None,
@@ -560,7 +580,7 @@ class IngestionPipeline:
                 )
 
             if replace:
-                await self.adelete_files(filenames=[basename], delete_source=False)
+                await self.adelete_files(filenames=[basename], delete_source=True)
 
             logger.info("Ingesting Azure blob: %s", blob_path)
 
@@ -650,7 +670,7 @@ class IngestionPipeline:
                     continue
 
                 if replace:
-                    await self.adelete_files(filenames=[downloaded_path.name], delete_source=False)
+                    await self.adelete_files(filenames=[downloaded_path.name], delete_source=True)
 
                 files_to_process.append((downloaded_path, content_hash or ""))
 
@@ -764,17 +784,28 @@ class IngestionPipeline:
 
     async def aingest_from_snowflake(
         self,
-        query: str,  # noqa: ARG002
+        query: str,
         table: str | None = None,
-        content_columns: list[str] | None = None,  # noqa: ARG002
-        metadata_columns: list[str] | None = None,  # noqa: ARG002
         **snowflake_kwargs: Any,
     ) -> IngestionResult:
-        """Ingest structured data from Snowflake into RAG via content_list."""
+        """Ingest structured data from Snowflake into RAG via content_list.
+
+        Executes raw SQL via the Snowflake connector (sync, offloaded to thread)
+        and ingests the results. The first column of the query result is treated
+        as text content; remaining columns become metadata.
+
+        Args:
+            query: Raw SQL query to execute
+            table: Optional label for source tracking (defaults to "query")
+        """
         from corprag.sourcing.snowflake import SnowflakeDataSource
 
         config = self.config
-        source = SnowflakeDataSource(
+        source_label = table or "query"
+
+        # Connection + query are sync I/O; offload to thread
+        source = await asyncio.to_thread(
+            SnowflakeDataSource,
             account=snowflake_kwargs.get("account") or config.snowflake_account or "",
             user=snowflake_kwargs.get("user") or config.snowflake_user or "",
             password=snowflake_kwargs.get("password") or config.snowflake_password or "",
@@ -784,36 +815,29 @@ class IngestionPipeline:
         )
 
         try:
+            await asyncio.to_thread(source.execute_query, query, source_label)
+
+            # Cache reads are pure in-memory, no need for to_thread
             content_list: list[dict[str, Any]] = []
+            for doc_id in source.list_documents():
+                raw = source.load_document(doc_id)
+                content = raw.decode("utf-8", errors="ignore")
 
-            for doc_id in await source.alist_documents():
-                try:
-                    content = await asyncio.to_thread(source.load_document, doc_id)
-                    if isinstance(content, bytes):
-                        content = content.decode("utf-8", errors="ignore")
-
-                    content_list.append(
-                        {
-                            "type": "text",
-                            "text": str(content),
-                            "metadata": {
-                                "doc_id": doc_id,
-                                "table": table or "query",
-                            },
-                        }
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Failed to load Snowflake document %s: %s",
-                        doc_id,
-                        exc,
-                    )
-                    continue
+                content_list.append(
+                    {
+                        "type": "text",
+                        "text": content,
+                        "metadata": {
+                            "doc_id": doc_id,
+                            "table": source_label,
+                        },
+                    }
+                )
 
             if content_list:
                 result = await self.aingest_content_list(
                     content_list=content_list,
-                    file_path=f"snowflake://{table or 'query'}",
+                    file_path=f"snowflake://{source_label}",
                     display_stats=True,
                 )
                 result.source_type = "snowflake"
@@ -825,48 +849,15 @@ class IngestionPipeline:
                 source_type="snowflake",
             )
         finally:
-            source.close()
-
-    def _find_all_by_basename(self, basename: str) -> list[dict[str, str | None]]:
-        """Find all matching entries by basename from kv_store_doc_status.
-
-        Returns list of dicts with doc_id, file_path for each match.
-        Exact name matches are returned first, then stem matches.
-        """
-        kv_path = self.config.working_dir_path / "kv_store_doc_status.json"
-        if not kv_path.exists():
-            return []
-
-        try:
-            data = json.loads(kv_path.read_text())
-        except Exception as exc:
-            logger.warning("Could not read doc status store: %s", exc)
-            return []
-
-        exact_matches: list[dict[str, str | None]] = []
-        stem_matches: list[dict[str, str | None]] = []
-        file_stem = Path(basename).stem
-
-        for doc_id, meta in data.items():
-            file_path = meta.get("file_path") or ""
-            stored_name = Path(str(file_path)).name
-            stored_stem = Path(str(file_path)).stem
-
-            if stored_name == basename:
-                exact_matches.append({"doc_id": doc_id, "file_path": file_path})
-            elif stored_stem == file_stem:
-                stem_matches.append({"doc_id": doc_id, "file_path": file_path})
-
-        # Return exact matches first, then stem matches as fallback
-        return exact_matches + stem_matches
+            await asyncio.to_thread(source.close)
 
     # ─────────────────────────────────────────────────────────────────
     # Public API: File management
     # ─────────────────────────────────────────────────────────────────
 
-    def list_ingested_files(self) -> list[dict[str, Any]]:
+    async def alist_ingested_files(self) -> list[dict[str, Any]]:
         """List all ingested files from hash index."""
-        return self._hash_index.list_all()
+        return await self._hash_index.list_all()
 
     async def adelete_files(
         self,
@@ -950,7 +941,7 @@ class IngestionPipeline:
 
             # Phase 3a: Remove from hash index
             for content_hash in ctx.content_hashes:
-                if self._hash_index.remove(content_hash):
+                if await self._hash_index.remove(content_hash):
                     deletion_result["cleanup_results"]["hash_index"] = "removed"
                     logger.info(f"Removed hash index entry: {content_hash[:30]}...")
 

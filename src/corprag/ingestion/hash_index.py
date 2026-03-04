@@ -115,7 +115,7 @@ class HashIndex:
         index = self._load()
         return index.get(content_hash)
 
-    def register(self, content_hash: str, doc_id: str, file_path: str) -> None:
+    async def register(self, content_hash: str, doc_id: str, file_path: str) -> None:
         index = self._load()
         index[content_hash] = {
             "doc_id": doc_id,
@@ -124,7 +124,7 @@ class HashIndex:
         }
         self._save()
 
-    def remove(self, content_hash: str) -> bool:
+    async def remove(self, content_hash: str) -> bool:
         index = self._load()
         if content_hash in index:
             del index[content_hash]
@@ -173,7 +173,7 @@ class HashIndex:
             if content_hash in existing_hashes:
                 continue
             doc_id = self.generate_doc_id_from_path(file_path)
-            self.register(content_hash, doc_id, str(file_path))
+            await self.register(content_hash, doc_id, str(file_path))
             existing_hashes.add(content_hash)
             file_path_to_hash[str(file_path)] = content_hash
             synced_count += 1
@@ -197,7 +197,7 @@ class HashIndex:
                 return (info.get("doc_id"), h, stored_path)
         return (None, None, None)
 
-    def list_all(self) -> list[dict[str, Any]]:
+    async def list_all(self) -> list[dict[str, Any]]:
         self.invalidate()
         index = self._load()
         results = []

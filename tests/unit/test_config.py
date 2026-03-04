@@ -100,7 +100,7 @@ class TestCorpragConfig:
 
         config = CorpragConfig()  # type: ignore[call-arg]
         assert config._get_provider_api_key("qwen") == "qwen-key"
-        assert "dashscope" in config._get_provider_base_url("qwen")
+        assert "dashscope" in config._get_url("qwen_base_url")
 
     def test_minimax_provider(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test MiniMax provider config."""
@@ -116,7 +116,15 @@ class TestCorpragConfig:
 
         config = CorpragConfig()  # type: ignore[call-arg]
         assert config._get_provider_api_key("ollama") == "ollama"
-        assert "11434" in config._get_provider_base_url("ollama")
+        assert "11434" in config._get_url("ollama_base_url")
+
+    def test_xinference_provider(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test Xinference provider config (no API key needed)."""
+        monkeypatch.setenv("CORPRAG_LLM_PROVIDER", "xinference")
+
+        config = CorpragConfig()  # type: ignore[call-arg]
+        assert config._get_provider_api_key("xinference") == "xinference"
+        assert "9997" in config._get_url("xinference_base_url")
 
     def test_openrouter_provider(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test OpenRouter provider config."""
@@ -125,7 +133,7 @@ class TestCorpragConfig:
 
         config = CorpragConfig()  # type: ignore[call-arg]
         assert config._get_provider_api_key("openrouter") == "sk-or-key"
-        assert "openrouter" in config._get_provider_base_url("openrouter")
+        assert "openrouter" in config._get_url("openrouter_base_url")
 
     def test_openrouter_requires_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test OpenRouter provider requires API key."""
@@ -197,6 +205,7 @@ class TestCorpragConfig:
         """Test that rerank_llm_provider validates API key."""
         monkeypatch.setenv("CORPRAG_LLM_PROVIDER", "openai")
         monkeypatch.setenv("CORPRAG_OPENAI_API_KEY", "oai-key")
+        monkeypatch.setenv("CORPRAG_RERANK_BACKEND", "llm")
         monkeypatch.setenv("CORPRAG_RERANK_LLM_PROVIDER", "anthropic")
 
         with pytest.raises(ValueError, match="anthropic_api_key"):

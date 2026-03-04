@@ -7,7 +7,6 @@ across all storage layers is handled by LightRAG's adelete_by_doc_id.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,11 +32,12 @@ async def collect_deletion_context(
     hash_index: Any,
     lightrag: Any = None,
 ) -> DeletionContext:
-    """Find doc_id(s) for a file using hash index and KV doc_status fallback.
+    """Find doc_id(s) for a file using hash index and LightRAG doc_status.
 
     Strategy order:
     1. Hash index - authoritative source for content_hash -> doc_id
-    2. KV store doc_status - filename matching (catches additional doc_ids)
+    2. LightRAG doc_status - storage-agnostic lookup by file_path
+       (works with PG, JSON, Redis, etc. — whatever backend is configured)
     """
     ctx = DeletionContext(identifier=identifier)
     basename = Path(identifier).name
@@ -57,23 +57,42 @@ async def collect_deletion_context(
         if file_path:
             ctx.file_paths.add(file_path)
 
-    # Strategy 2: KV store doc_status lookup (JSON fallback for non-PG backends)
-    doc_status_path = rag_working_dir / "kv_store_doc_status.json"
-    if doc_status_path.exists():
+    # Strategy 2: LightRAG doc_status lookup (storage-agnostic)
+    if lightrag and hasattr(lightrag, "doc_status"):
+        doc_status = lightrag.doc_status
         try:
-            data = json.loads(doc_status_path.read_text())
-            for d_id, status in data.items():
-                fp = status.get("file_path", "")
-                stored_name = Path(fp).name
-                stored_stem = Path(fp).stem
+            # Try exact path match first
+            result = await doc_status.get_doc_by_file_path(identifier)
 
-                if stored_name == basename or stored_stem == stem:
-                    ctx.doc_ids.add(d_id)
-                    ctx.file_paths.add(fp)
-                    if "doc_status" not in ctx.sources_used:
-                        ctx.sources_used.append("doc_status")
+            # If identifier is a basename, also try matching stored paths
+            if result is None and not Path(identifier).is_absolute():
+                # Query all processed docs and match by basename/stem
+                from lightrag.base import DocStatus
+
+                all_docs = await doc_status.get_docs_by_status(DocStatus.PROCESSED)
+                for d_id, doc_info in all_docs.items():
+                    fp = getattr(doc_info, "file_path", "") or ""
+                    stored_name = Path(fp).name
+                    stored_stem = Path(fp).stem
+
+                    if stored_name == basename or stored_stem == stem:
+                        result = {"id": d_id, "file_path": fp}
+                        ctx.doc_ids.add(d_id)
+                        ctx.file_paths.add(fp)
+
+            if result and "doc_status" not in ctx.sources_used:
+                # get_doc_by_file_path returns dict with id as key or 'id' field
+                if isinstance(result, dict):
+                    d_id = result.get("id") or result.get("doc_id")
+                    fp = result.get("file_path", "")
+                    if d_id:
+                        ctx.doc_ids.add(d_id)
+                    if fp:
+                        ctx.file_paths.add(fp)
+                    ctx.sources_used.append("doc_status")
+
         except Exception as e:
-            logger.warning(f"Could not read doc_status for {identifier}: {e}")
+            logger.warning(f"LightRAG doc_status lookup failed for {identifier}: {e}")
 
     logger.info(
         f"Deletion context for {identifier}: "

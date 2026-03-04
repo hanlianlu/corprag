@@ -1,9 +1,9 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
 """Data source adapters for document ingestion."""
 
-from corprag.sourcing.base import DataSource
+from corprag.sourcing.base import AsyncDataSource, DataSource
 
-__all__ = ["DataSource"]
+__all__ = ["AsyncDataSource", "DataSource"]
 
 
 def __getattr__(name: str):

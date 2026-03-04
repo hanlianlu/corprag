@@ -5,8 +5,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from corprag.ingestion.hash_index import HashIndex, compute_file_hash
 
 
@@ -44,7 +42,7 @@ class TestComputeFileHash:
 class TestHashIndex:
     """Test JSON-based hash index."""
 
-    def test_register_and_lookup(self, tmp_path: Path) -> None:
+    async def test_register_and_lookup(self, tmp_path: Path) -> None:
         """Test registering and looking up hashes."""
         sources_dir = tmp_path / "sources"
         sources_dir.mkdir()
@@ -52,7 +50,7 @@ class TestHashIndex:
         index = HashIndex(tmp_path, sources_dir)
 
         content_hash = "sha256:abc123"
-        index.register(content_hash, "doc-001", "/path/to/file.pdf")
+        await index.register(content_hash, "doc-001", "/path/to/file.pdf")
 
         entry = index.lookup(content_hash)
         assert entry is not None
@@ -67,7 +65,7 @@ class TestHashIndex:
         index = HashIndex(tmp_path, sources_dir)
         assert index.lookup("sha256:nonexistent") is None
 
-    def test_remove(self, tmp_path: Path) -> None:
+    async def test_remove(self, tmp_path: Path) -> None:
         """Test removing a hash entry."""
         sources_dir = tmp_path / "sources"
         sources_dir.mkdir()
@@ -75,40 +73,40 @@ class TestHashIndex:
         index = HashIndex(tmp_path, sources_dir)
         content_hash = "sha256:abc123"
 
-        index.register(content_hash, "doc-001", "/path/to/file.pdf")
+        await index.register(content_hash, "doc-001", "/path/to/file.pdf")
         assert index.lookup(content_hash) is not None
 
-        result = index.remove(content_hash)
+        result = await index.remove(content_hash)
         assert result is True
         assert index.lookup(content_hash) is None
 
-    def test_remove_missing(self, tmp_path: Path) -> None:
+    async def test_remove_missing(self, tmp_path: Path) -> None:
         """Test removing non-existent hash."""
         sources_dir = tmp_path / "sources"
         sources_dir.mkdir()
 
         index = HashIndex(tmp_path, sources_dir)
-        assert index.remove("sha256:nonexistent") is False
+        assert await index.remove("sha256:nonexistent") is False
 
-    def test_list_all(self, tmp_path: Path) -> None:
+    async def test_list_all(self, tmp_path: Path) -> None:
         """Test listing all entries."""
         sources_dir = tmp_path / "sources"
         sources_dir.mkdir()
 
         index = HashIndex(tmp_path, sources_dir)
-        index.register("sha256:aaa", "doc-001", "/path/a.pdf")
-        index.register("sha256:bbb", "doc-002", "/path/b.pdf")
+        await index.register("sha256:aaa", "doc-001", "/path/a.pdf")
+        await index.register("sha256:bbb", "doc-002", "/path/b.pdf")
 
-        entries = index.list_all()
+        entries = await index.list_all()
         assert len(entries) == 2
 
-    def test_invalidate(self, tmp_path: Path) -> None:
+    async def test_invalidate(self, tmp_path: Path) -> None:
         """Test cache invalidation."""
         sources_dir = tmp_path / "sources"
         sources_dir.mkdir()
 
         index = HashIndex(tmp_path, sources_dir)
-        index.register("sha256:aaa", "doc-001", "/path/a.pdf")
+        await index.register("sha256:aaa", "doc-001", "/path/a.pdf")
 
         # Invalidate should clear cache without error
         index.invalidate()
@@ -117,7 +115,6 @@ class TestHashIndex:
         entry = index.lookup("sha256:aaa")
         assert entry is not None
 
-    @pytest.mark.asyncio
     async def test_should_skip_file_new(self, tmp_path: Path) -> None:
         """Test should_skip_file for a new file."""
         sources_dir = tmp_path / "sources"
@@ -133,7 +130,6 @@ class TestHashIndex:
         assert content_hash is not None
         assert content_hash.startswith("sha256:")
 
-    @pytest.mark.asyncio
     async def test_should_skip_file_duplicate(self, tmp_path: Path) -> None:
         """Test should_skip_file for a duplicate file."""
         sources_dir = tmp_path / "sources"
@@ -146,7 +142,7 @@ class TestHashIndex:
 
         # Register the hash first
         content_hash = compute_file_hash(test_file)
-        index.register(content_hash, "doc-001", str(test_file))
+        await index.register(content_hash, "doc-001", str(test_file))
 
         # Now check — should skip
         should_skip, _, reason = await index.should_skip_file(test_file, replace=False)

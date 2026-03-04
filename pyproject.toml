@@ -2,7 +2,7 @@
 
 [project]
 name = "corprag"
-version = "0.1.1"
+version = "0.2.0"
 description = "Corporate RAG - multimodal document ingestion & retrieval service"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"

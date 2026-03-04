@@ -8,7 +8,6 @@ Provides EnhancedRAGAnything (data-only retrieval) and augment_retrieval_result
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import re
 from collections.abc import Callable
@@ -78,30 +77,6 @@ class RetrievalResult:
     answer: str | None = field(default=None)
     contexts: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
-
-
-def _load_kv_store_page_indices(rag_working_dir: str) -> dict[str, int | None]:
-    """Load page_idx mapping from kv_store_text_chunks.json.
-
-    Converts 0-based page_idx to 1-based for display (PDF pages are 1-indexed).
-    """
-    kv_path = Path(rag_working_dir) / "kv_store_text_chunks.json"
-
-    if not kv_path.exists():
-        return {}
-
-    try:
-        with open(kv_path) as f:
-            kv_store = json.load(f)
-        return {
-            chunk_id: (chunk_data["page_idx"] + 1)
-            if chunk_data.get("page_idx") is not None
-            else None
-            for chunk_id, chunk_data in kv_store.items()
-        }
-    except Exception as e:
-        logger.warning(f"Failed to load kv_store for page_idx: {e}")
-        return {}
 
 
 def build_sources_and_media_from_contexts(
@@ -178,10 +153,11 @@ def build_sources_and_media_from_contexts(
     return list(sources.values()), list(media.values())
 
 
-def augment_retrieval_result(
+async def augment_retrieval_result(
     result: RetrievalResult,
     rag_working_dir: str | None = None,
     url_transformer: Callable[[str], str] | None = None,
+    lightrag: Any = None,
 ) -> RetrievalResult:
     """Attach sources/media (download URLs) derived from contexts into result.raw.
 
@@ -192,18 +168,26 @@ def augment_retrieval_result(
         result: The retrieval result to augment
         rag_working_dir: Base directory for RAG storage
         url_transformer: Optional callback for URL generation (e.g., signed URLs)
+        lightrag: LightRAG instance for storage-agnostic KV lookups
     """
     chunk_contexts = result.contexts.get("chunks", []) if result.contexts else []
 
-    # Load page_idx mapping from kv_store once for all chunks
-    page_idx_map: dict[str, int | None] = {}
-    if rag_working_dir:
-        page_idx_map = _load_kv_store_page_indices(rag_working_dir)
-
-    for ctx in chunk_contexts:
-        chunk_id = ctx.get("chunk_id")
-        if chunk_id and chunk_id in page_idx_map and page_idx_map[chunk_id] is not None:
-            ctx["page_idx"] = page_idx_map[chunk_id]
+    # Look up page_idx from KV store via storage-agnostic API
+    if lightrag and hasattr(lightrag, "text_chunks") and chunk_contexts:
+        chunk_ids = [ctx.get("chunk_id") for ctx in chunk_contexts if ctx.get("chunk_id")]
+        if chunk_ids:
+            try:
+                chunk_data_list = await lightrag.text_chunks.get_by_ids(chunk_ids)
+                page_idx_map: dict[str, int | None] = {}
+                for cid, cdata in zip(chunk_ids, chunk_data_list, strict=True):
+                    if cdata and cdata.get("page_idx") is not None:
+                        page_idx_map[cid] = cdata["page_idx"] + 1  # 0-based → 1-based
+                for ctx in chunk_contexts:
+                    cid = ctx.get("chunk_id")
+                    if cid and cid in page_idx_map:
+                        ctx["page_idx"] = page_idx_map[cid]
+            except Exception as e:
+                logger.warning(f"Failed to load page_idx from KV store: {e}")
 
     sources, media = build_sources_and_media_from_contexts(
         chunk_contexts,

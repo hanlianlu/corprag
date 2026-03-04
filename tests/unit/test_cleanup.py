@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 from corprag.ingestion.cleanup import collect_deletion_context
 
@@ -25,10 +25,35 @@ def _make_hash_index(
     return index
 
 
-def _write_kv_doc_status(working_dir: Path, data: dict) -> None:
-    """Write a kv_store_doc_status.json file."""
-    kv_path = working_dir / "kv_store_doc_status.json"
-    kv_path.write_text(json.dumps(data))
+def _make_lightrag(docs: dict[str, str] | None = None):
+    """Create a mock lightrag with doc_status API.
+
+    Args:
+        docs: mapping of doc_id -> file_path for processed docs
+    """
+    if docs is None:
+        return None
+
+    doc_status = MagicMock()
+
+    # get_doc_by_file_path: exact match on file_path
+    async def _get_by_path(fp: str):
+        for d_id, stored_fp in docs.items():
+            if stored_fp == fp:
+                return {"id": d_id, "file_path": stored_fp}
+        return None
+
+    doc_status.get_doc_by_file_path = AsyncMock(side_effect=_get_by_path)
+
+    # get_docs_by_status: return all docs as SimpleNamespace objects
+    async def _get_by_status(_status):
+        return {d_id: SimpleNamespace(file_path=fp) for d_id, fp in docs.items()}
+
+    doc_status.get_docs_by_status = AsyncMock(side_effect=_get_by_status)
+
+    lightrag = MagicMock()
+    lightrag.doc_status = doc_status
+    return lightrag
 
 
 # ---------------------------------------------------------------------------
@@ -64,34 +89,26 @@ class TestCollectDeletionContext:
         assert "doc-002" in ctx.doc_ids
         assert "hash_index" in ctx.sources_used
 
-    async def test_kv_doc_status_json_fallback(self, tmp_path: Path) -> None:
+    async def test_lightrag_doc_status_fallback(self, tmp_path: Path) -> None:
         index = _make_hash_index()  # Returns nothing
-        _write_kv_doc_status(
-            tmp_path,
-            {
-                "doc-003": {"file_path": "/storage/sources/local/report.pdf"},
-            },
-        )
+        lightrag = _make_lightrag({"doc-003": "/storage/sources/local/report.pdf"})
         ctx = await collect_deletion_context(
             identifier="report.pdf",
             rag_working_dir=tmp_path,
             hash_index=index,
+            lightrag=lightrag,
         )
         assert "doc-003" in ctx.doc_ids
         assert "doc_status" in ctx.sources_used
 
     async def test_both_strategies_merge(self, tmp_path: Path) -> None:
         index = _make_hash_index(find_by_name_result=("doc-001", "sha256:abc", "/path/file.pdf"))
-        _write_kv_doc_status(
-            tmp_path,
-            {
-                "doc-002": {"file_path": "/storage/sources/local/file.pdf"},
-            },
-        )
+        lightrag = _make_lightrag({"doc-002": "/storage/sources/local/file.pdf"})
         ctx = await collect_deletion_context(
             identifier="file.pdf",
             rag_working_dir=tmp_path,
             hash_index=index,
+            lightrag=lightrag,
         )
         assert ctx.doc_ids == {"doc-001", "doc-002"}
 
@@ -105,54 +122,51 @@ class TestCollectDeletionContext:
         assert ctx.doc_ids == set()
         assert ctx.file_paths == set()
 
-    async def test_stem_match_in_kv_store(self, tmp_path: Path) -> None:
+    async def test_stem_match_via_doc_status(self, tmp_path: Path) -> None:
         index = _make_hash_index()
-        _write_kv_doc_status(
-            tmp_path,
-            {
-                "doc-004": {"file_path": "/storage/report.pdf"},
-            },
-        )
+        lightrag = _make_lightrag({"doc-004": "/storage/report.pdf"})
         # Query with different extension but same stem
         ctx = await collect_deletion_context(
             identifier="report.xlsx",
             rag_working_dir=tmp_path,
             hash_index=index,
+            lightrag=lightrag,
         )
         assert "doc-004" in ctx.doc_ids
 
-    async def test_corrupt_kv_store(self, tmp_path: Path) -> None:
+    async def test_doc_status_exception_handled(self, tmp_path: Path) -> None:
         index = _make_hash_index(find_by_name_result=("doc-001", "sha256:abc", "/path/file.pdf"))
-        kv_path = tmp_path / "kv_store_doc_status.json"
-        kv_path.write_text("not valid json {{{")
+        lightrag = MagicMock()
+        lightrag.doc_status = MagicMock()
+        lightrag.doc_status.get_doc_by_file_path = AsyncMock(
+            side_effect=RuntimeError("connection lost")
+        )
         ctx = await collect_deletion_context(
             identifier="file.pdf",
             rag_working_dir=tmp_path,
             hash_index=index,
+            lightrag=lightrag,
         )
-        # Hash index result should still be present
+        # Hash index result should still be present despite doc_status failure
         assert "doc-001" in ctx.doc_ids
 
-    async def test_no_kv_store_file(self, tmp_path: Path) -> None:
+    async def test_no_lightrag(self, tmp_path: Path) -> None:
         index = _make_hash_index(find_by_name_result=("doc-001", None, None))
         ctx = await collect_deletion_context(
             identifier="file.pdf",
             rag_working_dir=tmp_path,
             hash_index=index,
+            lightrag=None,
         )
         assert "doc-001" in ctx.doc_ids
 
-    async def test_no_hash_index(self, tmp_path: Path) -> None:
-        _write_kv_doc_status(
-            tmp_path,
-            {
-                "doc-005": {"file_path": "/storage/data.pdf"},
-            },
-        )
+    async def test_no_hash_index_uses_doc_status(self, tmp_path: Path) -> None:
+        lightrag = _make_lightrag({"doc-005": "/storage/data.pdf"})
         ctx = await collect_deletion_context(
             identifier="data.pdf",
             rag_working_dir=tmp_path,
             hash_index=None,
+            lightrag=lightrag,
         )
         assert "doc-005" in ctx.doc_ids
         assert "doc_status" in ctx.sources_used

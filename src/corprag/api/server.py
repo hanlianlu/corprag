@@ -205,7 +205,7 @@ async def answer(body: AnswerRequest) -> dict[str, Any]:
 async def list_files() -> dict[str, Any]:
     """List all ingested documents."""
     service = await _get_rag_service()
-    files = service.list_ingested_files()
+    files = await service.alist_ingested_files()
     return {"files": files, "count": len(files)}
 
 

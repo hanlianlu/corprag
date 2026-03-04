@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
+from dotenv import find_dotenv
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -26,6 +27,7 @@ LLMProvider = Literal[
     "qwen",
     "minimax",
     "ollama",
+    "xinference",
     "openrouter",
 ]
 
@@ -42,7 +44,7 @@ class CorpragConfig(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_prefix="CORPRAG_",
-        env_file=".env",
+        env_file=find_dotenv(usecwd=True),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -125,6 +127,22 @@ class CorpragConfig(BaseSettings):
     ingestion_model: str = Field(default="gpt-4.1-mini")
     vision_model: str | None = Field(default="gpt-4.1-mini")
 
+    # ----- Extra Model Parameters (passed through to provider API) -----
+    chat_model_kwargs: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Extra parameters forwarded to the chat model API call. "
+        "Example: CORPRAG_CHAT_MODEL_KWARGS='{\"think\": false}'",
+    )
+    ingestion_model_kwargs: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Extra parameters forwarded to the ingestion model API call. "
+        "Example: CORPRAG_INGESTION_MODEL_KWARGS='{\"think\": false}'",
+    )
+    vision_model_kwargs: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Extra parameters forwarded to the vision model API call.",
+    )
+
     # ----- Provider API Keys & Endpoints -----
     openai_api_key: str | None = Field(default=None)
     openai_base_url: str | None = Field(default=None)
@@ -137,9 +155,14 @@ class CorpragConfig(BaseSettings):
         default="https://dashscope.aliyuncs.com/compatible-mode/v1",
     )
     minimax_api_key: str | None = Field(default=None)
-    minimax_base_url: str = Field(default="https://api.minimax.chat/v1")
+    minimax_base_url: str = Field(
+        default="https://api.minimaxi.com/v1",
+        description="MiniMax API endpoint. Use https://api.minimax.io/v1 for international access.",
+    )
     ollama_api_key: str | None = Field(default="ollama")  # dummy; Ollama ignores keys
     ollama_base_url: str = Field(default="http://localhost:11434/v1")
+    xinference_api_key: str | None = Field(default="xinference")  # dummy; Xinference ignores keys
+    xinference_base_url: str = Field(default="http://localhost:9997/v1")
     openrouter_api_key: str | None = Field(default=None)
     openrouter_base_url: str = Field(default="https://openrouter.ai/api/v1")
 
@@ -159,7 +182,9 @@ class CorpragConfig(BaseSettings):
 
     # ===== Reranking =====
     enable_rerank: bool = Field(default=True)
-    rerank_backend: Literal["llm", "cohere", "azure_cohere"] = Field(default="llm")
+    rerank_backend: Literal["llm", "cohere", "jina", "aliyun", "azure_cohere"] = Field(
+        default="llm"
+    )
     rerank_llm_provider: LLMProvider | None = Field(
         default=None,
         description="LLM provider for reranking when rerank_backend='llm'. "
@@ -167,13 +192,20 @@ class CorpragConfig(BaseSettings):
     )
     rerank_model: str | None = Field(
         default=None,
-        description="Model for LLM reranking. Defaults to ingestion_model.",
+        description="Model name for reranking. For 'llm' backend defaults to ingestion_model. "
+        "For API backends (cohere/jina/aliyun) this is the model identifier sent to the endpoint.",
     )
-    cohere_api_key: str | None = Field(default=None)
-    cohere_rerank_model: str = Field(default="rerank-v4.0-pro")
-    azure_cohere_endpoint: str | None = Field(default=None)
-    azure_cohere_api_key: str | None = Field(default=None)
-    azure_cohere_deployment: str = Field(default="Cohere-rerank-v4.0-pro")
+    rerank_base_url: str | None = Field(
+        default=None,
+        description="Custom base URL for the rerank API endpoint. "
+        "Overrides the provider default. Use this to point cohere/jina/aliyun "
+        "bindings at any compatible service (e.g. Xinference, LiteLLM proxy).",
+    )
+    rerank_api_key: str | None = Field(
+        default=None,
+        description="API key for the rerank endpoint. "
+        "Used by cohere/jina/aliyun backends. Falls back to provider-specific keys.",
+    )
 
     # ===== RAG Processing =====
     working_dir: str = Field(default="./corprag_storage")
@@ -307,16 +339,34 @@ class CorpragConfig(BaseSettings):
 
     @property
     def effective_rerank_model(self) -> str:
-        """Resolve rerank model. Falls back to ingestion_model."""
-        return self.rerank_model or self.ingestion_model
+        """Resolve rerank model based on backend.
+
+        For API backends, falls back to sensible defaults.
+        For LLM backend, falls back to ingestion_model.
+        """
+        if self.rerank_model:
+            return self.rerank_model
+        defaults = {
+            "cohere": "rerank-v4.0-pro",
+            "jina": "jina-reranker-v3",
+            "aliyun": "qwen3-rerank",
+            "azure_cohere": "Cohere-rerank-v4.0-pro",
+        }
+        return defaults.get(self.rerank_backend, self.ingestion_model)
+
+    @property
+    def effective_rerank_api_key(self) -> str | None:
+        """Rerank API key."""
+        return self.rerank_api_key
 
     def _get_provider_api_key(self, provider: str) -> str:
         """Get API key for a specific provider."""
         return getattr(self, f"{provider}_api_key", "") or ""
 
-    def _get_provider_base_url(self, provider: str) -> str | None:
-        """Get base URL for a specific provider."""
-        return getattr(self, f"{provider}_base_url", None)
+    def _get_url(self, field_name: str) -> str | None:
+        """Get a URL config field by name (trailing slash stripped)."""
+        url = getattr(self, field_name, None)
+        return url.rstrip("/") if url else None
 
     def model_post_init(self, __context) -> None:
         """Bridge CORPRAG_POSTGRES_* to POSTGRES_* env vars for LightRAG.
