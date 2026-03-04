@@ -321,6 +321,17 @@ async def run_streamable_http(host: str, port: int) -> None:
 
 def main() -> None:
     """Entry point for corprag-mcp."""
+    import argparse
+
+    from dotenv import load_dotenv
+
+    parser = argparse.ArgumentParser(description="corprag MCP server")
+    parser.add_argument("--env-file", help="Path to .env configuration file")
+    args = parser.parse_args()
+
+    if args.env_file:
+        load_dotenv(args.env_file, override=True)
+
     config = _get_config()
 
     if config.mcp_transport == "streamable-http":

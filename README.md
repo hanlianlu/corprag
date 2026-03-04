@@ -20,7 +20,7 @@ Multimodal RAG service built upon [RAGAnything](https://github.com/HKUDS/RAG-Any
 ### Option A: Python SDK
 
 ```bash
-pip install corprag   # requires Python 3.12
+uv add corprag        # or: pip install corprag
 ```
 
 ```python
@@ -28,7 +28,7 @@ import asyncio
 from corprag import RAGService, CorpragConfig
 
 async def main():
-    # Minimal config -- just needs an LLM API key
+    # Minimal config example -- just needs an OpenAI API key
     config = CorpragConfig(openai_api_key="sk-...")
 
     # Initialize (connects to PostgreSQL, sets up RAG engine)
@@ -90,17 +90,20 @@ curl -X POST http://localhost:8100/answer \
 ### Option C: MCP Server (for AI Agents)
 
 ```bash
-pip install corprag
-corprag-mcp  # stdio mode
+uv tool install corprag   # or: pip install corprag
+corprag-mcp --env-file /path/to/.env
 ```
 
-Add to Claude Desktop (`claude_desktop_config.json`):
+Create a `.env` with `CORPRAG_*` variables — see [`.env.example`](.env.example) for a full template.
+
+Example MCP client configuration (works with Claude Desktop, VS Code, Cursor, or any MCP-compatible agent):
 
 ```json
 {
   "mcpServers": {
     "corprag": {
-      "command": "corprag-mcp"
+      "command": "uvx",
+      "args": ["corprag-mcp", "--env-file", "/absolute/path/to/.env"]
     }
   }
 }
@@ -108,7 +111,7 @@ Add to Claude Desktop (`claude_desktop_config.json`):
 
 Available MCP tools: `retrieve`, `answer`, `ingest`, `list_files`, `delete_files`.
 
-> **Note:** Like the SDK, the MCP server requires PostgreSQL with pgvector + AGE, or JSON fallback storage (see [Configuration](#configuration)).
+> **Note:** Like the SDK, the MCP server requires PostgreSQL with pgvector + AGE, or JSON fallback storage (see [Configuration](#configuration)). Use `--env-file` to point to your `.env` with `CORPRAG_*` variables (API keys, database, etc.).
 
 
 ## Local Development

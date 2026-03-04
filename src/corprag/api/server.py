@@ -272,7 +272,17 @@ async def rag_unavailable_handler(
 
 def main() -> None:
     """Entry point for corprag-api."""
+    import argparse
+
     import uvicorn
+    from dotenv import load_dotenv
+
+    parser = argparse.ArgumentParser(description="corprag REST API server")
+    parser.add_argument("--env-file", help="Path to .env configuration file")
+    args = parser.parse_args()
+
+    if args.env_file:
+        load_dotenv(args.env_file, override=True)
 
     config = get_config()
     uvicorn.run(

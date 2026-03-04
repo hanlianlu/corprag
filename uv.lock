@@ -510,7 +510,7 @@ wheels = [
 
 [[package]]
 name = "corprag"
-version = "0.2.0"
+version = "0.2.1"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
@@ -3054,7 +3054,7 @@ wheels = [
 [[package]]
 name = "raganything"
 version = "1.2.9"
-source = { git = "https://github.com/HKUDS/RAG-Anything.git?rev=main#3b02ae128f4ea5d92aedfda5546e891307c39c8a" }
+source = { git = "https://github.com/HKUDS/RAG-Anything.git?rev=main#04b13152816cb61da1346106762f0d683d602638" }
 dependencies = [
     { name = "huggingface-hub" },
     { name = "lightrag-hku" },
