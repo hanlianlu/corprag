@@ -230,10 +230,10 @@ class CorpragConfig(BaseSettings):
 
     # ===== Ingestion Performance =====
     max_concurrent_ingestion: int = Field(default=4)
-    max_parallel_insert: int = Field(default=6)
-    max_async: int = Field(default=16)
+    max_parallel_insert: int = Field(default=2)
+    max_async: int = Field(default=4)
     embedding_func_max_async: int = Field(default=8)
-    embedding_batch_num: int = Field(default=5)
+    embedding_batch_num: int = Field(default=10)
     ingestion_replace_default: bool = Field(default=False)
 
     # ===== Query Configuration =====
