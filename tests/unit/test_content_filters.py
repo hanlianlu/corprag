@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from corprag.utils.content_filters import (
+from dlightrag.utils.content_filters import (
     extract_table_row_text,
     filter_content_for_snippet,
     is_table_separator_line,

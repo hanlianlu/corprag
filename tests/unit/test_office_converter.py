@@ -5,36 +5,36 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from corprag.config import CorpragConfig
-from corprag.converters.office import LibreOfficeConverter
+from dlightrag.config import DlightragConfig
+from dlightrag.converters.office import LibreOfficeConverter
 
 
 class TestLibreOfficeConverter:
     """Test converter configuration and should_convert logic."""
 
-    def _make_converter(self, test_config: CorpragConfig) -> LibreOfficeConverter:
+    def _make_converter(self, test_config: DlightragConfig) -> LibreOfficeConverter:
         return LibreOfficeConverter(test_config)
 
-    def test_should_convert_xlsx(self, test_config: CorpragConfig) -> None:
+    def test_should_convert_xlsx(self, test_config: DlightragConfig) -> None:
         """Test that .xlsx triggers conversion."""
         converter = self._make_converter(test_config)
         assert converter.should_convert(Path("test.xlsx"))
         assert converter.should_convert(Path("test.xls"))
 
-    def test_should_not_convert_pdf(self, test_config: CorpragConfig) -> None:
+    def test_should_not_convert_pdf(self, test_config: DlightragConfig) -> None:
         """Test that .pdf does not trigger conversion."""
         converter = self._make_converter(test_config)
         assert not converter.should_convert(Path("test.pdf"))
         assert not converter.should_convert(Path("test.docx"))
 
-    def test_should_skip_csv(self, test_config: CorpragConfig) -> None:
+    def test_should_skip_csv(self, test_config: DlightragConfig) -> None:
         """Test that .csv is skipped."""
         converter = self._make_converter(test_config)
         assert not converter.should_convert(Path("test.csv"))
 
     def test_respects_config_flag(self, tmp_path: Path) -> None:
         """Test that excel_auto_convert_to_pdf=False disables conversion."""
-        config = CorpragConfig(  # type: ignore[call-arg]
+        config = DlightragConfig(  # type: ignore[call-arg]
             working_dir=str(tmp_path),
             openai_api_key="test-key",
             excel_auto_convert_to_pdf=False,
@@ -48,7 +48,7 @@ class TestLibreOfficeConverter:
 
     def test_docling_parser_skips_conversion(self, tmp_path: Path) -> None:
         """Test that docling parser disables Excel conversion."""
-        config = CorpragConfig(  # type: ignore[call-arg]
+        config = DlightragConfig(  # type: ignore[call-arg]
             working_dir=str(tmp_path),
             openai_api_key="test-key",
             parser="docling",
@@ -60,7 +60,7 @@ class TestLibreOfficeConverter:
         converter = LibreOfficeConverter(config)
         assert not converter.should_convert(Path("test.xlsx"))
 
-    def test_is_safe_to_delete(self, test_config: CorpragConfig) -> None:
+    def test_is_safe_to_delete(self, test_config: DlightragConfig) -> None:
         """Test safety check for file deletion."""
         converter = self._make_converter(test_config)
 

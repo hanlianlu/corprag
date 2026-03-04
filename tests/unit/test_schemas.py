@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from corprag.models.schemas import RankedChunk, RerankResult
+from dlightrag.models.schemas import RankedChunk, RerankResult
 
 # ---------------------------------------------------------------------------
 # RankedChunk

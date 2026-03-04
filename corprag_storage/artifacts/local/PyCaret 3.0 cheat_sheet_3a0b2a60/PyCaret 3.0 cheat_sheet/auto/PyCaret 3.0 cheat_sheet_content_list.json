@@ -1,0 +1,331 @@
+[
+    {
+        "type": "text",
+        "text": "Tutorials ",
+        "text_level": 1,
+        "bbox": [
+            16,
+            133,
+            69,
+            157
+        ],
+        "page_idx": 0
+    },
+    {
+        "type": "text",
+        "text": "Clustering Beginner ",
+        "bbox": [
+            15,
+            183,
+            61,
+            227
+        ],
+        "page_idx": 0
+    },
+    {
+        "type": "text",
+        "text": "Anomaly Beginner ",
+        "bbox": [
+            15,
+            250,
+            56,
+            294
+        ],
+        "page_idx": 0
+    },
+    {
+        "type": "text",
+        "text": "Association Rules Beginner ",
+        "bbox": [
+            15,
+            316,
+            92,
+            361
+        ],
+        "page_idx": 0
+    },
+    {
+        "type": "table",
+        "img_path": "images/75aec086b23fdf4963283b44fdad521387978f381bbeaf46b8638990063ebe81.jpg",
+        "table_caption": [],
+        "table_footnote": [],
+        "table_body": "<table><tr><td colspan=\"3\">Regression &amp; Classification</td><td colspan=\"2\"> Time Series</td><td>Clustering</td><td>Anomaly Detection</td></tr><tr><td>setup()</td><td></td><td>setup()</td><td></td><td></td><td>setup()</td><td>setup()</td></tr><tr><td>create_model(*)</td><td>model: (classification)</td><td>model: (regression)</td><td>create_model(*)</td><td> ** plot=</td><td>create_model(*)</td><td> create_model()</td></tr><tr><td>compare_models()</td><td>‘1r&#x27;</td><td>&#x27;1r&#x27;</td><td>compare_models()</td><td>‘ts&#x27;</td><td>assign_model()</td><td>compare_models()</td></tr><tr><td>ensemble_models()</td><td>‘knn&#x27;</td><td>&#x27;lasso&#x27;</td><td>tune_model()</td><td>&#x27;cv&#x27;</td><td> plot_model(**)</td><td>tune_model()</td></tr><tr><td>tune_model()</td><td>‘nb&#x27;</td><td>&#x27;ridge&#x27;</td><td>blend_models()</td><td>‘acf&#x27;</td><td>evaluate_model()</td><td>blend_models()</td></tr><tr><td>blend_models()</td><td>&#x27;dt&#x27;</td><td>‘en&#x27;</td><td>plot_model()</td><td>&#x27;pacf&#x27;</td><td></td><td> plot_model()</td></tr><tr><td>stack_models()</td><td>‘svm&#x27;</td><td>‘lar&#x27;</td><td>predict_model()</td><td>&#x27;decomp_stl&#x27;</td><td>predict_model() deploy_model()</td><td>predict_model()</td></tr><tr><td> plot_model(**)</td><td>&#x27;rbfsvm&#x27;</td><td>‘llar&#x27;</td><td>finalize_model()</td><td>&#x27;diagnostics&#x27;</td><td>save_model()</td><td>finalize_model()</td></tr><tr><td>evaluate_model()</td><td>&#x27;gpc&#x27;</td><td>‘omp&#x27;</td><td>deploy_model()</td><td>&#x27;forecast&#x27;</td><td></td><td>deploy_model()</td></tr><tr><td>interpret_model()</td><td>&#x27;mlp&#x27;</td><td>‘br&#x27;</td><td>save_model()</td><td>‘insample&#x27;</td><td>load_model()</td><td>save_model()</td></tr><tr><td></td><td>&#x27;ridge&#x27;</td><td>‘ard&#x27;</td><td>load_model()</td><td>&#x27;residuals&#x27;</td><td>pull()</td><td>load_model()</td></tr><tr><td>1 calibrate_model()</td><td>&#x27;rf&#x27;</td><td>‘par&#x27;</td><td>pull()</td><td>&#x27;train_test_split&#x27;</td><td>models() get_metrics()</td><td>pull()</td></tr><tr><td>1 optimize_threshold()</td><td>‘qda&#x27;</td><td>&#x27;ransac&#x27;</td><td>models()</td><td>&#x27;decomp_classical&#x27;</td><td>add_metric()</td><td>models()</td></tr><tr><td>predict_model()</td><td>‘ada&#x27;</td><td>‘tr&#x27;</td><td> get_metrics()</td><td></td><td>remove_metric()</td><td> get_metrics()</td></tr><tr><td>finalize_model()</td><td>&#x27;gbc&#x27;</td><td>‘huber&#x27;</td><td>add_metric()</td><td></td><td>get_logs()</td><td>add_metrics()</td></tr><tr><td>deploy_model()</td><td>‘ida&#x27;</td><td>‘kr&#x27;</td><td>remove_metric()</td><td></td><td>get_config()</td><td>remove_metric()</td></tr><tr><td>deep_check()</td><td>‘et&#x27;</td><td>‘svm&#x27;</td><td>get_logs()</td><td></td><td>set_config()</td><td>get_logs()</td></tr><tr><td>save_model()</td><td>‘xgboost&#x27;</td><td>‘knn&#x27;</td><td>get_config()</td><td></td><td> save_experiment()</td><td>get_config()</td></tr><tr><td>load_model()</td><td>‘lightgbm&#x27;</td><td>&#x27;dt&#x27;</td><td>set_config()</td><td></td><td>load_experiment()</td><td>set_config()</td></tr><tr><td>automl()</td><td>&#x27;catboost&#x27;</td><td>‘rf&#x27;</td><td>save_experiment()</td><td></td><td>set_current_experiment() s</td><td> save_experiment()</td></tr><tr><td>pull() models()</td><td></td><td>‘et&#x27;</td><td>load_experiment()</td><td></td><td>get_allowed_engines()</td><td>load_experiment()</td></tr><tr><td>get_metrics()</td><td></td><td>‘ada&#x27; &#x27;gbr&#x27;</td><td>set_current_experiment() get_current_experiment()</td><td></td><td>get_engine()</td><td></td></tr><tr><td colspan=\"3\">add_metric() **</td><td colspan=\"2\"></td><td></td><td> set_current_experiment()</td></tr><tr><td>remove_metric()</td><td>plot= ‘auc&#x27;</td><td>&#x27;mlp&#x27;</td><td colspan=\"2\">check_stats()</td><td></td><td>get_current_experiment() get_current_experiment() check_stats()</td></tr><tr><td>get_logs()</td><td>&#x27;threshold&#x27;</td><td>(xgboost&#x27;</td><td colspan=\"2\"></td><td></td><td> get_allowed_engines()</td></tr><tr><td></td><td></td><td>&#x27;lightgbm&#x27;</td><td>* model:</td><td></td><td>model:</td><td> get_engine()</td></tr><tr><td>get_config()</td><td>‘pr,</td><td>&#x27;catboost&#x27;</td><td>&#x27;naive&#x27;</td><td>&#x27;lasso_cds_dt&#x27;</td><td>`kmeans&#x27;</td><td></td></tr><tr><td>set_config()</td><td>‘error&#x27;</td><td></td><td>&#x27;grand_means&#x27;</td><td>&#x27;lar_cds_dt&#x27;</td><td>&#x27;ap&#x27;</td><td>* model:</td></tr><tr><td> save_experiment()</td><td>‘class_report&#x27;</td><td>** plot=</td><td>&#x27;snaive&#x27;</td><td>&#x27;llar_cds_dt&#x27;</td><td>&#x27;meanshift&#x27;</td><td>‘abod&#x27;</td></tr><tr><td>load_experiment()</td><td>‘boundary&#x27;</td><td>&#x27;residuals&#x27;</td><td>&#x27;polytrend&#x27;</td><td>&#x27;br_cds_dt&#x27;</td><td>‘sc&#x27;</td><td>&#x27;cluster&#x27;</td></tr><tr><td>get_leaderboard()</td><td>&#x27;rfe&#x27;</td><td>&#x27;error&#x27;</td><td>&#x27;arima&#x27;</td><td>&#x27;huber_cds_dt&#x27; &#x27;par_cds_dt&#x27;</td><td>&#x27;hclust&#x27;</td><td>‘histogram&#x27;</td></tr><tr><td>set_current_experiment()</td><td>‘learning&#x27;</td><td>‘cooks&#x27;</td><td>&#x27;auto_arima&#x27;</td><td>&#x27;omp_cds_dt&#x27;</td><td>&#x27;dbscan&#x27;</td><td>‘knn&#x27;</td></tr><tr><td>get_current_experiment()</td><td>‘manifold&#x27;</td><td>&#x27;rfe&#x27;</td><td>‘exp_smooth&#x27;</td><td>&#x27;knn_cds_dt&#x27;</td><td>&#x27;optics&#x27;</td><td>‘1of&#x27;</td></tr><tr><td>dashboard()</td><td>&#x27;calibration&#x27;</td><td>‘learning&#x27;</td><td>‘ets&#x27;</td><td>&#x27;dt_cds_dt&#x27;</td><td>‘birch&#x27;</td><td>‘svm&#x27;</td></tr><tr><td>convert_model()</td><td>&#x27;vc&#x27;</td><td>‘vc&#x27;</td><td>&#x27;theta&#x27;</td><td>&#x27;rf_cds_dt&#x27;</td><td>&#x27;kmodes&#x27;</td><td>&#x27;pca&#x27;</td></tr><tr><td>eda()</td><td>&#x27;dimension&#x27;</td><td>‘manifold&#x27;</td><td>‘tbats&#x27;</td><td>&#x27;et_cds_dt&#x27;</td><td></td><td>&#x27;mcd&#x27;</td></tr><tr><td>check_fairness()</td><td>‘feature&#x27;</td><td>‘feature&#x27;</td><td>&#x27;bats&#x27;</td><td>&#x27;gbr_cds_dt&#x27; &#x27;ada_cds_dt&#x27;</td><td>plot</td><td>`sod&#x27;</td></tr><tr><td>create_api()</td><td>&#x27;feature_all&#x27;</td><td>&#x27;feature_all&#x27;</td><td>&#x27;prophet&#x27;</td><td>&#x27;lightgbm_cds_dt&#x27;</td><td>&#x27;cluster&#x27;</td><td>&#x27;sos&#x27;</td></tr><tr><td>create_docker()</td><td>‘parameter&#x27;</td><td>&#x27;residuals_</td><td>&#x27;lr_cds_dt&#x27;</td><td></td><td>&#x27;tsne&#x27;</td><td></td></tr><tr><td>create_app()</td><td>‘lift&#x27;</td><td>interactive&#x27;</td><td></td><td></td><td>‘elbow&#x27;</td><td> ** plot=</td></tr><tr><td>get_allowed_engines()</td><td>&#x27;gain&#x27;</td><td>‘parameter&#x27;</td><td>‘en_cds_dt&#x27;</td><td></td><td>&#x27;silhouette&#x27;</td><td>‘tsne&#x27;</td></tr><tr><td>get_engine()</td><td>‘tree&#x27;</td><td>&#x27;tree&#x27;</td><td>&#x27;ridge_cds_dt&#x27;</td><td></td><td>&#x27;distance&#x27;</td><td>‘umap&#x27;</td></tr><tr><td>check_drift()</td><td>‘ks’</td><td></td><td></td><td></td><td>&#x27;distribution&#x27;</td><td></td></tr><tr><td></td><td colspan=\"2\">‘confusion_matrix&#x27;</td><td colspan=\"2\"></td><td colspan=\"2\"></td></tr></table>",
+        "bbox": [
+            128,
+            33,
+            996,
+            970
+        ],
+        "page_idx": 0
+    },
+    {
+        "type": "text",
+        "text": "NLP Beginner Intermediate ",
+        "bbox": [
+            15,
+            383,
+            72,
+            448
+        ],
+        "page_idx": 0
+    },
+    {
+        "type": "text",
+        "text": "Regression ",
+        "text_level": 1,
+        "bbox": [
+            16,
+            474,
+            63,
+            492
+        ],
+        "page_idx": 0
+    },
+    {
+        "type": "text",
+        "text": "Beginner Intermediate ",
+        "bbox": [
+            16,
+            496,
+            72,
+            537
+        ],
+        "page_idx": 0
+    },
+    {
+        "type": "text",
+        "text": "Classification ",
+        "text_level": 1,
+        "bbox": [
+            16,
+            561,
+            73,
+            579
+        ],
+        "page_idx": 0
+    },
+    {
+        "type": "text",
+        "text": "Binary (Beginner) Binary (Intermediate) Multiclass (Beginner) ",
+        "bbox": [
+            15,
+            585,
+            107,
+            648
+        ],
+        "page_idx": 0
+    },
+    {
+        "type": "text",
+        "text": "Time Series Beginner ",
+        "bbox": [
+            15,
+            674,
+            67,
+            716
+        ],
+        "page_idx": 0
+    },
+    {
+        "type": "text",
+        "text": "Supervised Learning ",
+        "bbox": [
+            23,
+            783,
+            105,
+            801
+        ],
+        "page_idx": 0
+    },
+    {
+        "type": "text",
+        "text": "Times Series Analysis ",
+        "bbox": [
+            21,
+            827,
+            107,
+            846
+        ],
+        "page_idx": 0
+    },
+    {
+        "type": "text",
+        "text": "Unsupervised Learning ",
+        "bbox": [
+            19,
+            872,
+            110,
+            892
+        ],
+        "page_idx": 0
+    },
+    {
+        "type": "discarded",
+        "text": "PYCARET pycaret.org ",
+        "bbox": [
+            8,
+            3,
+            116,
+            77
+        ],
+        "page_idx": 0
+    },
+    {
+        "type": "discarded",
+        "text": "(1) classification only ",
+        "bbox": [
+            11,
+            940,
+            117,
+            959
+        ],
+        "page_idx": 0
+    },
+    {
+        "type": "discarded",
+        "text": "",
+        "bbox": [
+            123,
+            31,
+            997,
+            68
+        ],
+        "page_idx": 0
+    },
+    {
+        "type": "text",
+        "text": "Regression & Classification ",
+        "text_level": 1,
+        "bbox": [
+            141,
+            61,
+            259,
+            79
+        ],
+        "page_idx": 1
+    },
+    {
+        "type": "text",
+        "text": "Time Series ",
+        "text_level": 1,
+        "bbox": [
+            461,
+            61,
+            512,
+            79
+        ],
+        "page_idx": 1
+    },
+    {
+        "type": "text",
+        "text": "Clustering ",
+        "text_level": 1,
+        "bbox": [
+            652,
+            61,
+            696,
+            79
+        ],
+        "page_idx": 1
+    },
+    {
+        "type": "text",
+        "text": "Anomaly Detection ",
+        "text_level": 1,
+        "bbox": [
+            825,
+            61,
+            909,
+            79
+        ],
+        "page_idx": 1
+    },
+    {
+        "type": "text",
+        "text": "pycaret.classification.ClassificationExperime   \nsetup(   \ndata $=$ None,   \ndata_func $=$ None,   \ntarget $\\begin{array} { r l } { \\mathbf { \\Sigma } = } & { { } - \\mathbf { \\Sigma } \\mathbf { \\mathcal { 1 } } } \\end{array}$ ,   \nindex $=$ True,   \ntrain_size $= ~ 0 . 7$ ,   \ntest_data $=$ None,   \nordinal_features $=$ None,   \nnumeric_features $=$ None,   \ncategorical_features $\\it \\Delta \\phi = \\Delta \\it { N o n e }$ ,   \ndate_features $=$ None,   \ntext_features $=$ None,   \nignore_features $=$ None,   \nkeep_features $=$ None,   \npreprocess $= \\tau r u e$ ,   \ncreate_date_columns $=$ ['day','month','year'],   \nimputation_type $=$ 'simple',   \nnumeric_imputation $=$ 'mean',   \ncategorical_imputation $\\begin{array} { r l } { = } & { { } ^ { \\prime } m o d e } \\end{array}$ ',   \niterative_imputation_iters $= ~ 5$ ,   \nnumeric_iterative_imputer $=$ 'lightgbm',   \ncategorical_iterative_imputer $=$ 'lightgbm',   \ntext_features_method $=$ 'tf-idf',   \nmax_encoding_ohe $= ~ 2 5$ ,   \nencoding_method $=$ None,   \nrare_to_value $=$ None,   \nrare_value $=$ 'rare',   \npolynomial_features $=$ False,   \npolynomial_degree $= 2$ ,   \nlow_variance_threshold $=$ None,   \ngroup_features $=$ None,   \ngroup_names $=$ None,   \ndrop_groups $= F a l s e$ ,   \nremove_multicollinearity $= F a l s e$ ,   \nmulticollinearity_threshold $= ~ \\theta , 9$ ,   \nbin_numeric_features $=$ None,   \nremove_outliers $=$ False,   \noutliers_method $=$ 'iforest',   \noutliers_threshold $= ~ \\theta , \\theta 5$ ,   \n(c) fix_imbalance $= F a l s e$ ,   \n(c) fix_imbalance_method $=$ 'SMOTE',   \ntransformation $=$ False,   \ntransformation_method $=$ 'yeo-johnson',   \nnormalize $= F a l s \\epsilon$ ,   \nnormalize_method $=$ 'zscore',   \npc $\\textsf { a } = F a l s e$ ,   \npca_method $=$ 'linear'   \npca_components $=$ None,   \nfeature_selection $= F a l s e$ ,   \nfeature_selection_method $=$ 'classic',   \nfeature_selection_estimator $=$ 'lightgbm',   \nn_features_to_select $= ~ \\theta , 2$ ,   \n(r) transform_target $= F a l s e$ ,   \n(r) transform_target_method $=$ 'yeo-johnson’,   \ncustom_pipeline $=$ None,   \ncustom_pipeline_position $\\begin{array} { r l } { \\mathbf { \\Sigma } = } & { { } - \\mathbf { \\Sigma } \\mathbf { \\mathcal { 1 } } } \\end{array}$ ,   \ndata_split_shuffle $= \\tau r u e$ ,   \ndata_split_stratify $= F a l s e$ ,   \nfold_strategy $=$ 'kfold',   \nfold $= \\ 1 \\theta$ ,   \nfold_shuffle $=$ False,   \nfold_groups $=$ None,   \nn_jobs $\\ c = \\ c - 1$ 1,   \nuse_gpu $=$ False,   \nhtml $= \\tau r u e$ ,   \nsession $\\begin{array} { r l } { \\dot { \\bf 1 } \\dot { \\bf d } } & { { } = } \\end{array}$ None,   \nsystem_log $= \\tau r u e$ ,   \nlog_experiment $= F a l s e$ ,   \nexperiment_name $=$ None,   \nexperiment_custom_tags $=$ None,   \nlog_plots $=$ False,   \nlog_profile $=$ False,   \nlog_data $= F a l s e$ ,   \nengine $=$ None,   \nverbose $= \\tau r u e$ ,   \nmemory $= \\tau r u e$ ,   \nprofile $= F a l s e$ ,   \nprofile_kwargs $=$ None)   \npycaret.time_series.TSForecastingExperim   \nsetup(   \ndata $=$ None,   \ndata_func $=$ None,   \ntarget $=$ None,   \nindex $=$ None,   \nignore_features $=$ None,   \nnumeric_imputation_target $=$ None,   \nnumeric_imputation_exogenous $=$ None,   \ntransform_target $=$ None,   \ntransform_exogenous $=$ None,   \nscale_target $=$ None,   \nscale_exogenous $=$ None,   \nfe_target_rr $=$ None,   \nfe_exogenous $=$ None,   \nfold_strategy $=$ 'expanding',   \n$\\mathsf { f o l d } \\ = \\ 3$ ,   \n$\\mathsf { f h } \\ = \\ \\mathsf { \\Omega } _ { 1 }$ ,   \nhyperparameter_split $\\mathbf { \\Sigma } = \\mathbf { \\Sigma } ^ { \\prime } \\circ \\iota t$ ',   \nseasonal_period $=$ None,   \nignore_seasonality_test $=$ False,   \nsp_detection $=$ 'auto',   \nmax_sp_to_consider $\\qquad = ~ 6 \\theta$ ,   \nremove_harmonics $= F a l s \\epsilon$ e,   \nharmonic_order_method $=$ 'harmonic_max',   \nnum_sps_to_use $\\ c = \\textit { 1 }$ ,   \npoint_alpha $=$ None,   \ncoverage $= ~ \\theta , 9$ ,   \nenforce_exogenous $= \\tau r u e$ ,   \nn_jobs $= ~ \\cdot$ -1,   \nuse_gpu $=$ False,   \ncustom_pipeline $=$ None,   \nhtml $\\bf \\Pi = \\textit { T r u e } _ { \\it 4 }$ ,   \nsession_id $=$ None,   \nsystem_log $=$ True,   \nlog_experiment $=$ False,   \nexperiment_name $=$ None,   \nexperiment_custom_tags $=$ None,   \nlog_plots $=$ False,   \nlog_profile $=$ False,   \nlog_data $= F a l s e$ ,   \nengine $=$ None,   \nverbose $= \\tau r u e$ ,   \nprofile $= F a l s e$ ,   \nprofile_kwargs $=$ None,   \nfig_kwargs $=$ None)   \npycaret.clustering.ClusteringExperiment()   \nsetup(   \ndata $=$ None,   \ndata_func $=$ None,   \nindex $= \\tau r u e$ ,   \nordinal_features $=$ None,   \nnumeric_features $=$ None,   \ncategorical_features $=$ None,   \ndate_features $=$ None,   \ntext_features $=$ None,   \nignore_features $=$ None,   \nkeep_features $=$ None,   \npreprocess $\\mathit { \\Pi } = \\tau r u e$ ,   \ncreate_date_columns $=$ ['day','month','year'],   \nimputation_type $=$ 'simple’,   \nnumeric_imputation $=$ 'mean',   \ncategorical_imputation $= \\quad ^ { \\prime } m o d e$ ',   \ntext_features_method $=$ 'tf-idf',   \nmax_encoding_ohe $\\begin{array} { r l } { \\mathbf { \\Sigma } = } & { { } - \\mathbf { \\Sigma } \\mathbf { \\mathcal { 1 } } } \\end{array}$ ,   \nencoding_method $=$ None,   \nrare_to_value $=$ None,   \nrare_value $=$ 'rare',   \npolynomial_features $=$ False,   \npolynomial_degree $\\ c = ~ 2$ ,   \nlow_variance_threshold $=$ None,   \nremove_multicollinearity $= F a l s e$ ,   \nmulticollinearity_threshol ${ \\textsf { d } } = \\theta . 9$ ,   \nbin_numeric_features $=$ None,   \nremove_outliers $=$ False,   \noutliers_method $=$ 'iforest',   \noutliers_threshold $= ~ \\theta , \\theta 5$ ,   \ntransformation $= F a l s e$ ,   \ntransformation_method $=$ 'yeo-johnson',   \nnormalize $=$ False,   \nnormalize_method $=$ 'zscore',   \n$\\mathsf { p c a } ~ = ~ F a l s e$ ,   \npca_method $=$ 'linear',   \npca_components $=$ None,   \ncustom_pipeline $=$ None,   \ncustom_pipeline_position $\\begin{array} { r l } { \\mathbf { \\Sigma } = } & { { } - \\mathbf { \\Sigma } \\mathcal { 1 } } \\end{array}$ ,   \n$\\mathsf { n \\_ j o b s } ~ = ~ - 1$ ,   \nuse_gpu $=$ False,   \nhtm $\\mathrm { ~ l ~ } = \\tau r u e$ ,   \nsession_ $\\dot { \\mathsf { \\bot d } } =$ None,   \nsystem $. 1 0 8 ~ = ~ T r u e$ ,   \nlog_experiment $= F a l s e$ ,   \nexperiment_name $=$ None,   \nexperiment_custom_tags $=$ None,   \nlog_plots $=$ False,   \nlog_profile $=$ False,   \nlog_data $=$ False,   \nverbose $=$ True,   \nmemory $= \\tau r u e$ ,   \nprofile $=$ False,   \nprofile_kwargs $=$ None)   \npycaret.anomaly.AnomalyExperiment()   \nsetup(   \ndata $=$ None,   \ndata_func $=$ None,   \nindex $= \\tau r u e$ ,   \nordinal_features $=$ None,   \nnumeric_features $=$ None,   \ncategorical_features $=$ None,   \ndate_features $=$ None,   \ntext_features $=$ None,   \nignore_features $=$ None,   \nkeep_features $=$ None,   \npreprocess $= \\tau r u e$ ,   \ncreate_date_columns $=$ ['day','month','year'],   \nimputation_type $=$ 'simple',   \nnumeric_imputation $\\begin{array} { r l } { = { } } & { { } ^ { \\prime } m e a n } \\end{array}$ ',   \ncategorical_imputation $\\begin{array} { r l } { = } & { { } ^ { \\prime } m o d e } \\end{array}$ ',   \ntext_features_method $=$ 'tf-idf',   \nmax_encoding_ohe $\\begin{array} { r l } { \\mathbf { \\Sigma } = } & { { } - \\mathbf { \\Sigma } \\mathcal { I } } \\end{array}$ ,   \nencoding_method $=$ None,   \nrare_to_value $=$ None,   \nrare_value $=$ 'rare',   \npolynomial_features $=$ False,   \npolynomial_degree $= 2$ ,   \nlow_variance_threshold $=$ None,   \ngroup_features $=$ None,   \ngroup_names $=$ None,   \ndrop_groups $= F a l s e$ ,   \nremove_multicollinearity $= F a l s e$ ,   \nmulticollinearity_threshold $= ~ \\theta , 9$ ,   \nbin_numeric_features $=$ None,   \nremove_outliers $=$ False,   \noutliers_method $=$ 'iforest',   \noutliers_threshold $= ~ 8 . 6 5$ ,   \ntransformation $=$ False,   \ntransformation_method $=$ 'yeo-johnson',   \nnormalize $=$ False,   \nnormalize_method $=$ 'zscore',   \npca $=$ False, pca_method $=$ 'linear',   \npca_components $=$ None,   \ncustom_pipeline $=$ None,   \ncustom_pipeline_position $\\begin{array} { r l } { \\mathbf { \\Sigma } = } & { { } - \\mathbf { \\Sigma } \\mathbf { \\mathcal { 1 } } } \\end{array}$ ,   \nn_jobs $\\begin{array} { r l } { = } & { { } - 1 } \\end{array}$ 1,   \nuse_gpu $=$ False,   \nhtml $= \\tau r u e$ ,   \nsession_ $\\therefore d =$ None,   \nsystem_ $\\deg \\ = \\ T r u e$ ,   \nlog_experiment $= F a l s e$ ,   \nexperiment_name $=$ None,   \nexperiment_custom_tags $=$ None,   \nlog_plots $= F a l s e$ ,   \nlog_profile $=$ False,   \nlog_data $= F a l s e$ ,   \nverbose $= \\tau r u e$ ,   \nmemory $= \\tau r u e$ ,   \nprofile $=$ False,   \nprofile_kwargs $=$ None) ",
+        "bbox": [
+            22,
+            98,
+            204,
+            811
+        ],
+        "page_idx": 1
+    },
+    {
+        "type": "text",
+        "text": "",
+        "bbox": [
+            213,
+            118,
+            391,
+            633
+        ],
+        "page_idx": 1
+    },
+    {
+        "type": "text",
+        "text": "",
+        "bbox": [
+            406,
+            96,
+            567,
+            811
+        ],
+        "page_idx": 1
+    },
+    {
+        "type": "text",
+        "text": "",
+        "bbox": [
+            607,
+            92,
+            788,
+            957
+        ],
+        "page_idx": 1
+    },
+    {
+        "type": "text",
+        "text": "",
+        "bbox": [
+            793,
+            90,
+            979,
+            981
+        ],
+        "page_idx": 1
+    },
+    {
+        "type": "discarded",
+        "text": "PYCARET ",
+        "bbox": [
+            7,
+            3,
+            145,
+            46
+        ],
+        "page_idx": 1
+    },
+    {
+        "type": "discarded",
+        "text": "Parameters of setup() and its default values ",
+        "bbox": [
+            292,
+            18,
+            689,
+            55
+        ],
+        "page_idx": 1
+    },
+    {
+        "type": "discarded",
+        "text": "(c) Classification only (r) Regression only ",
+        "bbox": [
+            153,
+            844,
+            260,
+            879
+        ],
+        "page_idx": 1
+    }
+]

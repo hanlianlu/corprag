@@ -1,4 +1,4 @@
--- Auto-create required extensions for corprag
+-- Auto-create required extensions for dlightrag
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS age;
 

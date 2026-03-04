@@ -1,0 +1,425 @@
+{
+    "pdf_info": [
+        {
+            "preproc_blocks": [
+                {
+                    "type": "title",
+                    "bbox": [
+                        292,
+                        108,
+                        435,
+                        123
+                    ],
+                    "lines": [
+                        {
+                            "bbox": [
+                                290,
+                                107,
+                                437,
+                                125
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        290,
+                                        107,
+                                        437,
+                                        125
+                                    ],
+                                    "score": 1.0,
+                                    "content": "Project Management Data",
+                                    "type": "text"
+                                }
+                            ],
+                            "index": 0
+                        }
+                    ],
+                    "index": 0
+                },
+                {
+                    "type": "table",
+                    "bbox": [
+                        69,
+                        141,
+                        655,
+                        540
+                    ],
+                    "blocks": [
+                        {
+                            "type": "table_body",
+                            "bbox": [
+                                69,
+                                141,
+                                655,
+                                540
+                            ],
+                            "group_id": 0,
+                            "lines": [
+                                {
+                                    "bbox": [
+                                        69,
+                                        141,
+                                        655,
+                                        540
+                                    ],
+                                    "spans": [
+                                        {
+                                            "bbox": [
+                                                69,
+                                                141,
+                                                655,
+                                                540
+                                            ],
+                                            "score": 0.982,
+                                            "html": "<table><tr><td rowspan=1 colspan=1>Project Name</td><td rowspan=1 colspan=1>Task Name</td><td rowspan=1 colspan=1>Assigned to</td><td rowspan=1 colspan=1> Start Date</td><td rowspan=1 colspan=1>Days Required</td><td rowspan=1 colspan=1>End Date</td><td rowspan=1 colspan=1>Progress</td></tr><tr><td rowspan=1 colspan=1>Marketing</td><td rowspan=1 colspan=1>Market Research</td><td rowspan=1 colspan=1>Alice</td><td rowspan=1 colspan=1>01/01/2024</td><td rowspan=1 colspan=1>13</td><td rowspan=1 colspan=1>01/14/2024</td><td rowspan=1 colspan=1>78%</td></tr><tr><td rowspan=1 colspan=1>Marketing</td><td rowspan=1 colspan=1>Content Creation</td><td rowspan=1 colspan=1>Bob</td><td rowspan=1 colspan=1>01/14/2024</td><td rowspan=1 colspan=1>14</td><td rowspan=1 colspan=1>01/28/2024</td><td rowspan=1 colspan=1>100%</td></tr><tr><td rowspan=1 colspan=1>Marketing</td><td rowspan=1 colspan=1>Social Media Planning</td><td rowspan=1 colspan=1>Charlie</td><td rowspan=1 colspan=1>01/28/2024</td><td rowspan=1 colspan=1>22</td><td rowspan=1 colspan=1>02/19/2024</td><td rowspan=1 colspan=1>45%</td></tr><tr><td rowspan=1 colspan=1>Marketing</td><td rowspan=1 colspan=1>Campaign Analysis</td><td rowspan=1 colspan=1>Daisy</td><td rowspan=1 colspan=1>02/18/2024</td><td rowspan=1 colspan=1>25</td><td rowspan=1 colspan=1>03/14/2024</td><td rowspan=1 colspan=1>0%</td></tr><tr><td rowspan=1 colspan=1>Product Dev</td><td rowspan=1 colspan=1>Prototype Development</td><td rowspan=1 colspan=1>Ethan</td><td rowspan=1 colspan=1>01/02/2024</td><td rowspan=1 colspan=1>18</td><td rowspan=1 colspan=1>01/20/2024</td><td rowspan=1 colspan=1>100%</td></tr><tr><td rowspan=1 colspan=1>Product Dev</td><td rowspan=1 colspan=1>Quality Assurance</td><td rowspan=1 colspan=1>Fiona</td><td rowspan=1 colspan=1>01/20/2024</td><td rowspan=1 colspan=1>10</td><td rowspan=1 colspan=1>01/30/2024</td><td rowspan=1 colspan=1>78%</td></tr><tr><td rowspan=1 colspan=1>Product Dev</td><td rowspan=1 colspan=1>User Interface Design</td><td rowspan=1 colspan=1>Gabriel</td><td rowspan=1 colspan=1>02/04/2024</td><td rowspan=1 colspan=1>25</td><td rowspan=1 colspan=1>02/29/2024</td><td rowspan=1 colspan=1>0%</td></tr><tr><td rowspan=1 colspan=1>Customer Svc</td><td rowspan=1 colspan=1>Service Improvement</td><td rowspan=1 colspan=1>Hannah</td><td rowspan=1 colspan=1>02/01/2024</td><td rowspan=1 colspan=1>22</td><td rowspan=1 colspan=1>02/23/2024</td><td rowspan=1 colspan=1>100%</td></tr><tr><td rowspan=1 colspan=1>Customer Svc</td><td rowspan=1 colspan=1>Ticket Resolution</td><td rowspan=1 colspan=1>lan</td><td rowspan=1 colspan=1>02/24/2024</td><td rowspan=1 colspan=1>25</td><td rowspan=1 colspan=1>03/20/2024</td><td rowspan=1 colspan=1>100%</td></tr><tr><td rowspan=1 colspan=1>Customer Svc</td><td rowspan=1 colspan=1>Customer Feedback</td><td rowspan=1 colspan=1>Julia</td><td rowspan=1 colspan=1>03/21/2024</td><td rowspan=1 colspan=1>30</td><td rowspan=1 colspan=1>04/20/2024</td><td rowspan=1 colspan=1>0%</td></tr><tr><td rowspan=1 colspan=1>Financial</td><td rowspan=1 colspan=1>Budget Analysis</td><td rowspan=1 colspan=1>Kevin</td><td rowspan=1 colspan=1>02/02/2024</td><td rowspan=1 colspan=1>22</td><td rowspan=1 colspan=1>02/24/2024</td><td rowspan=1 colspan=1>10%</td></tr><tr><td rowspan=1 colspan=1>Financial</td><td rowspan=1 colspan=1>Financial Reporting</td><td rowspan=1 colspan=1>Mark</td><td rowspan=1 colspan=1>02/13/2024</td><td rowspan=1 colspan=1>21</td><td rowspan=1 colspan=1>02/09/2024</td><td rowspan=1 colspan=1>78%</td></tr><tr><td rowspan=1 colspan=1>Financial</td><td rowspan=1 colspan=1>Investment Planning</td><td rowspan=1 colspan=1>Mark</td><td rowspan=1 colspan=1>03/19/2024</td><td rowspan=1 colspan=1>25</td><td rowspan=1 colspan=1>04/13/2024</td><td rowspan=1 colspan=1>100%</td></tr><tr><td rowspan=1 colspan=1>Research</td><td rowspan=1 colspan=1>Market Trends Analysis</td><td rowspan=1 colspan=1>Nathan</td><td rowspan=1 colspan=1>01/02/2024</td><td rowspan=1 colspan=1>23</td><td rowspan=1 colspan=1>01/25/2024</td><td rowspan=1 colspan=1>50%</td></tr><tr><td rowspan=1 colspan=1>Research</td><td rowspan=1 colspan=1>Data Collection</td><td rowspan=1 colspan=1>Olivia</td><td rowspan=1 colspan=1>01/26/2024</td><td rowspan=1 colspan=1>32</td><td rowspan=1 colspan=1>02/27/2024</td><td rowspan=1 colspan=1>0%</td></tr><tr><td rowspan=1 colspan=1>Research</td><td rowspan=1 colspan=1>Research Paper Writing</td><td rowspan=1 colspan=1>Peter</td><td rowspan=1 colspan=1>02/28/2024</td><td rowspan=1 colspan=1>27</td><td rowspan=1 colspan=1>03/26/2024</td><td rowspan=1 colspan=1>0%</td></tr><tr><td rowspan=1 colspan=1>Development</td><td rowspan=1 colspan=1>Software Development</td><td rowspan=1 colspan=1>Quinn</td><td rowspan=1 colspan=1>01/02/2024</td><td rowspan=1 colspan=1>36</td><td rowspan=1 colspan=1>02/07/2024</td><td rowspan=1 colspan=1>100%</td></tr><tr><td rowspan=1 colspan=1>Development</td><td rowspan=1 colspan=1>Feature Enhancement</td><td rowspan=1 colspan=1>Rachel</td><td rowspan=1 colspan=1>02/08/2024</td><td rowspan=1 colspan=1>34</td><td rowspan=1 colspan=1>03/13/2024</td><td rowspan=1 colspan=1>0%</td></tr><tr><td rowspan=1 colspan=1>Development</td><td rowspan=1 colspan=1>Code Review</td><td rowspan=1 colspan=1>Sam</td><td rowspan=1 colspan=1>03/14/2024</td><td rowspan=1 colspan=1>30</td><td rowspan=1 colspan=1>04/13/2024</td><td rowspan=1 colspan=1>0%</td></tr><tr><td rowspan=1 colspan=1>Production</td><td rowspan=1 colspan=1>Manufacturing</td><td rowspan=1 colspan=1>Tim</td><td rowspan=1 colspan=1>01/03/2024</td><td rowspan=1 colspan=1>47</td><td rowspan=1 colspan=1>02/19/2024</td><td rowspan=1 colspan=1>30%</td></tr><tr><td rowspan=1 colspan=1>Production</td><td rowspan=1 colspan=1>Quality Control</td><td rowspan=1 colspan=1>Ursula</td><td rowspan=1 colspan=1>02/17/2024</td><td rowspan=1 colspan=1>27</td><td rowspan=1 colspan=1>03/15/2024</td><td rowspan=1 colspan=1>0%</td></tr></table>",
+                                            "type": "table",
+                                            "image_path": "55fdeb1f644823e2ee28a65d0c1aade4a44cc3404b2750fc13eeb6fb37e2c63d.jpg"
+                                        }
+                                    ]
+                                }
+                            ],
+                            "index": 2,
+                            "virtual_lines": [
+                                {
+                                    "bbox": [
+                                        69,
+                                        141,
+                                        655,
+                                        274.0
+                                    ],
+                                    "spans": [],
+                                    "index": 1
+                                },
+                                {
+                                    "bbox": [
+                                        69,
+                                        274.0,
+                                        655,
+                                        407.0
+                                    ],
+                                    "spans": [],
+                                    "index": 2
+                                },
+                                {
+                                    "bbox": [
+                                        69,
+                                        407.0,
+                                        655,
+                                        540.0
+                                    ],
+                                    "spans": [],
+                                    "index": 3
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 2
+                }
+            ],
+            "page_idx": 0,
+            "page_size": [
+                841,
+                595
+            ],
+            "discarded_blocks": [
+                {
+                    "type": "discarded",
+                    "bbox": [
+                        309,
+                        72,
+                        417,
+                        87
+                    ],
+                    "lines": [
+                        {
+                            "bbox": [
+                                308,
+                                71,
+                                419,
+                                88
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        308,
+                                        71,
+                                        419,
+                                        88
+                                    ],
+                                    "score": 1.0,
+                                    "content": "Excel Sample Data",
+                                    "type": "text"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ],
+            "para_blocks": [
+                {
+                    "type": "title",
+                    "bbox": [
+                        292,
+                        108,
+                        435,
+                        123
+                    ],
+                    "lines": [
+                        {
+                            "bbox": [
+                                290,
+                                107,
+                                437,
+                                125
+                            ],
+                            "spans": [
+                                {
+                                    "bbox": [
+                                        290,
+                                        107,
+                                        437,
+                                        125
+                                    ],
+                                    "score": 1.0,
+                                    "content": "Project Management Data",
+                                    "type": "text"
+                                }
+                            ],
+                            "index": 0
+                        }
+                    ],
+                    "index": 0
+                },
+                {
+                    "type": "table",
+                    "bbox": [
+                        69,
+                        141,
+                        655,
+                        540
+                    ],
+                    "blocks": [
+                        {
+                            "type": "table_body",
+                            "bbox": [
+                                69,
+                                141,
+                                655,
+                                540
+                            ],
+                            "group_id": 0,
+                            "lines": [
+                                {
+                                    "bbox": [
+                                        69,
+                                        141,
+                                        655,
+                                        540
+                                    ],
+                                    "spans": [
+                                        {
+                                            "bbox": [
+                                                69,
+                                                141,
+                                                655,
+                                                540
+                                            ],
+                                            "score": 0.982,
+                                            "html": "<table><tr><td colspan=\"1\" rowspan=\"1\">Project Name</td><td colspan=\"1\" rowspan=\"1\">Task Name</td><td colspan=\"1\" rowspan=\"1\">Assigned to</td><td colspan=\"1\" rowspan=\"1\"> Start Date</td><td colspan=\"1\" rowspan=\"1\">Days Required</td><td colspan=\"1\" rowspan=\"1\">End Date</td><td colspan=\"1\" rowspan=\"1\">Progress</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Marketing</td><td colspan=\"1\" rowspan=\"1\">Market Research</td><td colspan=\"1\" rowspan=\"1\">Alice</td><td colspan=\"1\" rowspan=\"1\">01/01/2024</td><td colspan=\"1\" rowspan=\"1\">13</td><td colspan=\"1\" rowspan=\"1\">01/14/2024</td><td colspan=\"1\" rowspan=\"1\">78%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Marketing</td><td colspan=\"1\" rowspan=\"1\">Content Creation</td><td colspan=\"1\" rowspan=\"1\">Bob</td><td colspan=\"1\" rowspan=\"1\">01/14/2024</td><td colspan=\"1\" rowspan=\"1\">14</td><td colspan=\"1\" rowspan=\"1\">01/28/2024</td><td colspan=\"1\" rowspan=\"1\">100%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Marketing</td><td colspan=\"1\" rowspan=\"1\">Social Media Planning</td><td colspan=\"1\" rowspan=\"1\">Charlie</td><td colspan=\"1\" rowspan=\"1\">01/28/2024</td><td colspan=\"1\" rowspan=\"1\">22</td><td colspan=\"1\" rowspan=\"1\">02/19/2024</td><td colspan=\"1\" rowspan=\"1\">45%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Marketing</td><td colspan=\"1\" rowspan=\"1\">Campaign Analysis</td><td colspan=\"1\" rowspan=\"1\">Daisy</td><td colspan=\"1\" rowspan=\"1\">02/18/2024</td><td colspan=\"1\" rowspan=\"1\">25</td><td colspan=\"1\" rowspan=\"1\">03/14/2024</td><td colspan=\"1\" rowspan=\"1\">0%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Product Dev</td><td colspan=\"1\" rowspan=\"1\">Prototype Development</td><td colspan=\"1\" rowspan=\"1\">Ethan</td><td colspan=\"1\" rowspan=\"1\">01/02/2024</td><td colspan=\"1\" rowspan=\"1\">18</td><td colspan=\"1\" rowspan=\"1\">01/20/2024</td><td colspan=\"1\" rowspan=\"1\">100%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Product Dev</td><td colspan=\"1\" rowspan=\"1\">Quality Assurance</td><td colspan=\"1\" rowspan=\"1\">Fiona</td><td colspan=\"1\" rowspan=\"1\">01/20/2024</td><td colspan=\"1\" rowspan=\"1\">10</td><td colspan=\"1\" rowspan=\"1\">01/30/2024</td><td colspan=\"1\" rowspan=\"1\">78%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Product Dev</td><td colspan=\"1\" rowspan=\"1\">User Interface Design</td><td colspan=\"1\" rowspan=\"1\">Gabriel</td><td colspan=\"1\" rowspan=\"1\">02/04/2024</td><td colspan=\"1\" rowspan=\"1\">25</td><td colspan=\"1\" rowspan=\"1\">02/29/2024</td><td colspan=\"1\" rowspan=\"1\">0%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Customer Svc</td><td colspan=\"1\" rowspan=\"1\">Service Improvement</td><td colspan=\"1\" rowspan=\"1\">Hannah</td><td colspan=\"1\" rowspan=\"1\">02/01/2024</td><td colspan=\"1\" rowspan=\"1\">22</td><td colspan=\"1\" rowspan=\"1\">02/23/2024</td><td colspan=\"1\" rowspan=\"1\">100%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Customer Svc</td><td colspan=\"1\" rowspan=\"1\">Ticket Resolution</td><td colspan=\"1\" rowspan=\"1\">lan</td><td colspan=\"1\" rowspan=\"1\">02/24/2024</td><td colspan=\"1\" rowspan=\"1\">25</td><td colspan=\"1\" rowspan=\"1\">03/20/2024</td><td colspan=\"1\" rowspan=\"1\">100%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Customer Svc</td><td colspan=\"1\" rowspan=\"1\">Customer Feedback</td><td colspan=\"1\" rowspan=\"1\">Julia</td><td colspan=\"1\" rowspan=\"1\">03/21/2024</td><td colspan=\"1\" rowspan=\"1\">30</td><td colspan=\"1\" rowspan=\"1\">04/20/2024</td><td colspan=\"1\" rowspan=\"1\">0%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Financial</td><td colspan=\"1\" rowspan=\"1\">Budget Analysis</td><td colspan=\"1\" rowspan=\"1\">Kevin</td><td colspan=\"1\" rowspan=\"1\">02/02/2024</td><td colspan=\"1\" rowspan=\"1\">22</td><td colspan=\"1\" rowspan=\"1\">02/24/2024</td><td colspan=\"1\" rowspan=\"1\">10%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Financial</td><td colspan=\"1\" rowspan=\"1\">Financial Reporting</td><td colspan=\"1\" rowspan=\"1\">Mark</td><td colspan=\"1\" rowspan=\"1\">02/13/2024</td><td colspan=\"1\" rowspan=\"1\">21</td><td colspan=\"1\" rowspan=\"1\">02/09/2024</td><td colspan=\"1\" rowspan=\"1\">78%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Financial</td><td colspan=\"1\" rowspan=\"1\">Investment Planning</td><td colspan=\"1\" rowspan=\"1\">Mark</td><td colspan=\"1\" rowspan=\"1\">03/19/2024</td><td colspan=\"1\" rowspan=\"1\">25</td><td colspan=\"1\" rowspan=\"1\">04/13/2024</td><td colspan=\"1\" rowspan=\"1\">100%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Research</td><td colspan=\"1\" rowspan=\"1\">Market Trends Analysis</td><td colspan=\"1\" rowspan=\"1\">Nathan</td><td colspan=\"1\" rowspan=\"1\">01/02/2024</td><td colspan=\"1\" rowspan=\"1\">23</td><td colspan=\"1\" rowspan=\"1\">01/25/2024</td><td colspan=\"1\" rowspan=\"1\">50%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Research</td><td colspan=\"1\" rowspan=\"1\">Data Collection</td><td colspan=\"1\" rowspan=\"1\">Olivia</td><td colspan=\"1\" rowspan=\"1\">01/26/2024</td><td colspan=\"1\" rowspan=\"1\">32</td><td colspan=\"1\" rowspan=\"1\">02/27/2024</td><td colspan=\"1\" rowspan=\"1\">0%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Research</td><td colspan=\"1\" rowspan=\"1\">Research Paper Writing</td><td colspan=\"1\" rowspan=\"1\">Peter</td><td colspan=\"1\" rowspan=\"1\">02/28/2024</td><td colspan=\"1\" rowspan=\"1\">27</td><td colspan=\"1\" rowspan=\"1\">03/26/2024</td><td colspan=\"1\" rowspan=\"1\">0%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Development</td><td colspan=\"1\" rowspan=\"1\">Software Development</td><td colspan=\"1\" rowspan=\"1\">Quinn</td><td colspan=\"1\" rowspan=\"1\">01/02/2024</td><td colspan=\"1\" rowspan=\"1\">36</td><td colspan=\"1\" rowspan=\"1\">02/07/2024</td><td colspan=\"1\" rowspan=\"1\">100%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Development</td><td colspan=\"1\" rowspan=\"1\">Feature Enhancement</td><td colspan=\"1\" rowspan=\"1\">Rachel</td><td colspan=\"1\" rowspan=\"1\">02/08/2024</td><td colspan=\"1\" rowspan=\"1\">34</td><td colspan=\"1\" rowspan=\"1\">03/13/2024</td><td colspan=\"1\" rowspan=\"1\">0%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Development</td><td colspan=\"1\" rowspan=\"1\">Code Review</td><td colspan=\"1\" rowspan=\"1\">Sam</td><td colspan=\"1\" rowspan=\"1\">03/14/2024</td><td colspan=\"1\" rowspan=\"1\">30</td><td colspan=\"1\" rowspan=\"1\">04/13/2024</td><td colspan=\"1\" rowspan=\"1\">0%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Production</td><td colspan=\"1\" rowspan=\"1\">Manufacturing</td><td colspan=\"1\" rowspan=\"1\">Tim</td><td colspan=\"1\" rowspan=\"1\">01/03/2024</td><td colspan=\"1\" rowspan=\"1\">47</td><td colspan=\"1\" rowspan=\"1\">02/19/2024</td><td colspan=\"1\" rowspan=\"1\">30%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Production</td><td colspan=\"1\" rowspan=\"1\">Quality Control</td><td colspan=\"1\" rowspan=\"1\">Ursula</td><td colspan=\"1\" rowspan=\"1\">02/17/2024</td><td colspan=\"1\" rowspan=\"1\">27</td><td colspan=\"1\" rowspan=\"1\">03/15/2024</td><td colspan=\"1\" rowspan=\"1\">0%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Production</td><td colspan=\"1\" rowspan=\"1\">Packaging Design</td><td colspan=\"1\" rowspan=\"1\">Victor</td><td colspan=\"1\" rowspan=\"1\">03/14/2024</td><td colspan=\"1\" rowspan=\"1\">22</td><td colspan=\"1\" rowspan=\"1\">04/05/2024</td><td colspan=\"1\" rowspan=\"1\">0%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Sales</td><td colspan=\"1\" rowspan=\"1\">Lead Generation</td><td colspan=\"1\" rowspan=\"1\">Wendy</td><td colspan=\"1\" rowspan=\"1\">01/03/2024</td><td colspan=\"1\" rowspan=\"1\">60</td><td colspan=\"1\" rowspan=\"1\">03/03/2024</td><td colspan=\"1\" rowspan=\"1\">70%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Sales</td><td colspan=\"1\" rowspan=\"1\">Client Meetings</td><td colspan=\"1\" rowspan=\"1\">Xavier</td><td colspan=\"1\" rowspan=\"1\">01/06/2024</td><td colspan=\"1\" rowspan=\"1\">20</td><td colspan=\"1\" rowspan=\"1\">01/26/2024</td><td colspan=\"1\" rowspan=\"1\">78%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Sales</td><td colspan=\"1\" rowspan=\"1\">Contract Negotiation</td><td colspan=\"1\" rowspan=\"1\">Yvette</td><td colspan=\"1\" rowspan=\"1\">02/03/2024</td><td colspan=\"1\" rowspan=\"1\">35</td><td colspan=\"1\" rowspan=\"1\">03/09/2024</td><td colspan=\"1\" rowspan=\"1\">0%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Support</td><td colspan=\"1\" rowspan=\"1\">Technical Support</td><td colspan=\"1\" rowspan=\"1\">Zoe</td><td colspan=\"1\" rowspan=\"1\">01/01/2024</td><td colspan=\"1\" rowspan=\"1\">25</td><td colspan=\"1\" rowspan=\"1\">01/26/2024</td><td colspan=\"1\" rowspan=\"1\">100%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Support</td><td colspan=\"1\" rowspan=\"1\">Bug Fixes</td><td colspan=\"1\" rowspan=\"1\">Aaron</td><td colspan=\"1\" rowspan=\"1\">01/27/2024</td><td colspan=\"1\" rowspan=\"1\">31</td><td colspan=\"1\" rowspan=\"1\">02/27/2024</td><td colspan=\"1\" rowspan=\"1\">100%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Support</td><td colspan=\"1\" rowspan=\"1\">Software Updates</td><td colspan=\"1\" rowspan=\"1\">Bella</td><td colspan=\"1\" rowspan=\"1\">03/02/2024</td><td colspan=\"1\" rowspan=\"1\">22</td><td colspan=\"1\" rowspan=\"1\">03/24/2024</td><td colspan=\"1\" rowspan=\"1\">0%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Operations</td><td colspan=\"1\" rowspan=\"1\">Process Optimization</td><td colspan=\"1\" rowspan=\"1\">Calvin</td><td colspan=\"1\" rowspan=\"1\">01/03/2024</td><td colspan=\"1\" rowspan=\"1\">30</td><td colspan=\"1\" rowspan=\"1\">02/02/2024</td><td colspan=\"1\" rowspan=\"1\">40%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Operations</td><td colspan=\"1\" rowspan=\"1\">Inventory Management</td><td colspan=\"1\" rowspan=\"1\">Diane</td><td colspan=\"1\" rowspan=\"1\">02/03/2024</td><td colspan=\"1\" rowspan=\"1\">25</td><td colspan=\"1\" rowspan=\"1\">02/28/2024</td><td colspan=\"1\" rowspan=\"1\">0%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Operations</td><td colspan=\"1\" rowspan=\"1\">Facility Maintenance</td><td colspan=\"1\" rowspan=\"1\">Edward</td><td colspan=\"1\" rowspan=\"1\">02/29/2024</td><td colspan=\"1\" rowspan=\"1\">20</td><td colspan=\"1\" rowspan=\"1\">03/20/2024</td><td colspan=\"1\" rowspan=\"1\">0%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Consulting</td><td colspan=\"1\" rowspan=\"1\">Strategic Planning</td><td colspan=\"1\" rowspan=\"1\">Fiona</td><td colspan=\"1\" rowspan=\"1\">01/02/2024</td><td colspan=\"1\" rowspan=\"1\">35</td><td colspan=\"1\" rowspan=\"1\">02/06/2024</td><td colspan=\"1\" rowspan=\"1\">60%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Consulting</td><td colspan=\"1\" rowspan=\"1\">Market Expansion</td><td colspan=\"1\" rowspan=\"1\">Gary</td><td colspan=\"1\" rowspan=\"1\">02/02/2024</td><td colspan=\"1\" rowspan=\"1\">32</td><td colspan=\"1\" rowspan=\"1\">03/05/2024</td><td colspan=\"1\" rowspan=\"1\">0%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Consulting</td><td colspan=\"1\" rowspan=\"1\">Client Advisory</td><td colspan=\"1\" rowspan=\"1\">Helen</td><td colspan=\"1\" rowspan=\"1\">03/06/2024</td><td colspan=\"1\" rowspan=\"1\">25</td><td colspan=\"1\" rowspan=\"1\">03/31/2024</td><td colspan=\"1\" rowspan=\"1\">0%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Training</td><td colspan=\"1\" rowspan=\"1\">Employee Training</td><td colspan=\"1\" rowspan=\"1\">Isaac</td><td colspan=\"1\" rowspan=\"1\">01/04/2024</td><td colspan=\"1\" rowspan=\"1\">27</td><td colspan=\"1\" rowspan=\"1\">01/31/2024</td><td colspan=\"1\" rowspan=\"1\">80%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Training</td><td colspan=\"1\" rowspan=\"1\">Certification Programs</td><td colspan=\"1\" rowspan=\"1\">Jane</td><td colspan=\"1\" rowspan=\"1\">01/28/2024</td><td colspan=\"1\" rowspan=\"1\">30</td><td colspan=\"1\" rowspan=\"1\">02/27/2024</td><td colspan=\"1\" rowspan=\"1\">0%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Training</td><td colspan=\"1\" rowspan=\"1\">Skill Development</td><td colspan=\"1\" rowspan=\"1\">Kyle</td><td colspan=\"1\" rowspan=\"1\">02/28/2024</td><td colspan=\"1\" rowspan=\"1\">22</td><td colspan=\"1\" rowspan=\"1\">03/21/2024</td><td colspan=\"1\" rowspan=\"1\">0%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Events</td><td colspan=\"1\" rowspan=\"1\">Event Planning</td><td colspan=\"1\" rowspan=\"1\">Laura</td><td colspan=\"1\" rowspan=\"1\">01/03/2024</td><td colspan=\"1\" rowspan=\"1\">25</td><td colspan=\"1\" rowspan=\"1\">01/28/2024</td><td colspan=\"1\" rowspan=\"1\">30%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Events</td><td colspan=\"1\" rowspan=\"1\">Conference Management</td><td colspan=\"1\" rowspan=\"1\">Mike</td><td colspan=\"1\" rowspan=\"1\">02/03/2024</td><td colspan=\"1\" rowspan=\"1\">20</td><td colspan=\"1\" rowspan=\"1\">02/23/2024</td><td colspan=\"1\" rowspan=\"1\">0%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Events</td><td colspan=\"1\" rowspan=\"1\">Sponsorship Coordinatio</td><td colspan=\"1\" rowspan=\"1\">n Nancy</td><td colspan=\"1\" rowspan=\"1\">02/24/2024</td><td colspan=\"1\" rowspan=\"1\">35</td><td colspan=\"1\" rowspan=\"1\">03/30/2024</td><td colspan=\"1\" rowspan=\"1\">0%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Logistics</td><td colspan=\"1\" rowspan=\"1\">Supply Chain Management</td><td colspan=\"1\" rowspan=\"1\">Oscar</td><td colspan=\"1\" rowspan=\"1\">01/03/2024</td><td colspan=\"1\" rowspan=\"1\">25</td><td colspan=\"1\" rowspan=\"1\">01/28/2024</td><td colspan=\"1\" rowspan=\"1\">50%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Logistics</td><td colspan=\"1\" rowspan=\"1\">Transportation Planning</td><td colspan=\"1\" rowspan=\"1\">Patricia</td><td colspan=\"1\" rowspan=\"1\">01/29/2024</td><td colspan=\"1\" rowspan=\"1\">30</td><td colspan=\"1\" rowspan=\"1\">02/28/2024</td><td colspan=\"1\" rowspan=\"1\">100%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Logistics</td><td colspan=\"1\" rowspan=\"1\">Inventory Optimization</td><td colspan=\"1\" rowspan=\"1\">Quentin</td><td colspan=\"1\" rowspan=\"1\">03/29/2024</td><td colspan=\"1\" rowspan=\"1\">20</td><td colspan=\"1\" rowspan=\"1\">04/18/2024</td><td colspan=\"1\" rowspan=\"1\">0%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Engineering</td><td colspan=\"1\" rowspan=\"1\">Product Design</td><td colspan=\"1\" rowspan=\"1\">Rachel</td><td colspan=\"1\" rowspan=\"1\">01/02/2024</td><td colspan=\"1\" rowspan=\"1\">25</td><td colspan=\"1\" rowspan=\"1\">01/27/2024</td><td colspan=\"1\" rowspan=\"1\">20%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Engineering</td><td colspan=\"1\" rowspan=\"1\">System Integration</td><td colspan=\"1\" rowspan=\"1\">Sam</td><td colspan=\"1\" rowspan=\"1\">02/02/2024</td><td colspan=\"1\" rowspan=\"1\">22</td><td colspan=\"1\" rowspan=\"1\">02/24/2024</td><td colspan=\"1\" rowspan=\"1\">0%</td></tr><tr><td colspan=\"1\" rowspan=\"1\">Engineering</td><td colspan=\"1\" rowspan=\"1\">Prototype Testing</td><td colspan=\"1\" rowspan=\"1\">Tom</td><td colspan=\"1\" rowspan=\"1\">02/23/2024</td><td colspan=\"1\" rowspan=\"1\">27</td><td colspan=\"1\" rowspan=\"1\">03/21/2024</td><td colspan=\"1\" rowspan=\"1\">0%</td></tr></table>",
+                                            "type": "table",
+                                            "image_path": "55fdeb1f644823e2ee28a65d0c1aade4a44cc3404b2750fc13eeb6fb37e2c63d.jpg"
+                                        }
+                                    ]
+                                }
+                            ],
+                            "index": 2,
+                            "virtual_lines": [
+                                {
+                                    "bbox": [
+                                        69,
+                                        141,
+                                        655,
+                                        274.0
+                                    ],
+                                    "spans": [],
+                                    "index": 1
+                                },
+                                {
+                                    "bbox": [
+                                        69,
+                                        274.0,
+                                        655,
+                                        407.0
+                                    ],
+                                    "spans": [],
+                                    "index": 2
+                                },
+                                {
+                                    "bbox": [
+                                        69,
+                                        407.0,
+                                        655,
+                                        540.0
+                                    ],
+                                    "spans": [],
+                                    "index": 3
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 2
+                }
+            ]
+        },
+        {
+            "preproc_blocks": [
+                {
+                    "type": "table",
+                    "bbox": [
+                        68,
+                        51,
+                        657,
+                        506
+                    ],
+                    "blocks": [
+                        {
+                            "type": "table_body",
+                            "bbox": [
+                                68,
+                                51,
+                                657,
+                                506
+                            ],
+                            "group_id": 0,
+                            "lines": [
+                                {
+                                    "bbox": [
+                                        68,
+                                        51,
+                                        657,
+                                        506
+                                    ],
+                                    "spans": [
+                                        {
+                                            "bbox": [
+                                                68,
+                                                51,
+                                                657,
+                                                506
+                                            ],
+                                            "score": 0.983,
+                                            "html": "<table><tr><td rowspan=1 colspan=1>Production</td><td rowspan=1 colspan=1>Packaging Design</td><td rowspan=1 colspan=1>Victor</td><td rowspan=1 colspan=1>03/14/2024</td><td rowspan=1 colspan=1>22</td><td rowspan=1 colspan=1>04/05/2024</td><td rowspan=1 colspan=1>0%</td></tr><tr><td rowspan=1 colspan=1>Sales</td><td rowspan=1 colspan=1>Lead Generation</td><td rowspan=1 colspan=1>Wendy</td><td rowspan=1 colspan=1>01/03/2024</td><td rowspan=1 colspan=1>60</td><td rowspan=1 colspan=1>03/03/2024</td><td rowspan=1 colspan=1>70%</td></tr><tr><td rowspan=1 colspan=1>Sales</td><td rowspan=1 colspan=1>Client Meetings</td><td rowspan=1 colspan=1>Xavier</td><td rowspan=1 colspan=1>01/06/2024</td><td rowspan=1 colspan=1>20</td><td rowspan=1 colspan=1>01/26/2024</td><td rowspan=1 colspan=1>78%</td></tr><tr><td rowspan=1 colspan=1>Sales</td><td rowspan=1 colspan=1>Contract Negotiation</td><td rowspan=1 colspan=1>Yvette</td><td rowspan=1 colspan=1>02/03/2024</td><td rowspan=1 colspan=1>35</td><td rowspan=1 colspan=1>03/09/2024</td><td rowspan=1 colspan=1>0%</td></tr><tr><td rowspan=1 colspan=1>Support</td><td rowspan=1 colspan=1>Technical Support</td><td rowspan=1 colspan=1>Zoe</td><td rowspan=1 colspan=1>01/01/2024</td><td rowspan=1 colspan=1>25</td><td rowspan=1 colspan=1>01/26/2024</td><td rowspan=1 colspan=1>100%</td></tr><tr><td rowspan=1 colspan=1>Support</td><td rowspan=1 colspan=1>Bug Fixes</td><td rowspan=1 colspan=1>Aaron</td><td rowspan=1 colspan=1>01/27/2024</td><td rowspan=1 colspan=1>31</td><td rowspan=1 colspan=1>02/27/2024</td><td rowspan=1 colspan=1>100%</td></tr><tr><td rowspan=1 colspan=1>Support</td><td rowspan=1 colspan=1>Software Updates</td><td rowspan=1 colspan=1>Bella</td><td rowspan=1 colspan=1>03/02/2024</td><td rowspan=1 colspan=1>22</td><td rowspan=1 colspan=1>03/24/2024</td><td rowspan=1 colspan=1>0%</td></tr><tr><td rowspan=1 colspan=1>Operations</td><td rowspan=1 colspan=1>Process Optimization</td><td rowspan=1 colspan=1>Calvin</td><td rowspan=1 colspan=1>01/03/2024</td><td rowspan=1 colspan=1>30</td><td rowspan=1 colspan=1>02/02/2024</td><td rowspan=1 colspan=1>40%</td></tr><tr><td rowspan=1 colspan=1>Operations</td><td rowspan=1 colspan=1>Inventory Management</td><td rowspan=1 colspan=1>Diane</td><td rowspan=1 colspan=1>02/03/2024</td><td rowspan=1 colspan=1>25</td><td rowspan=1 colspan=1>02/28/2024</td><td rowspan=1 colspan=1>0%</td></tr><tr><td rowspan=1 colspan=1>Operations</td><td rowspan=1 colspan=1>Facility Maintenance</td><td rowspan=1 colspan=1>Edward</td><td rowspan=1 colspan=1>02/29/2024</td><td rowspan=1 colspan=1>20</td><td rowspan=1 colspan=1>03/20/2024</td><td rowspan=1 colspan=1>0%</td></tr><tr><td rowspan=1 colspan=1>Consulting</td><td rowspan=1 colspan=1>Strategic Planning</td><td rowspan=1 colspan=1>Fiona</td><td rowspan=1 colspan=1>01/02/2024</td><td rowspan=1 colspan=1>35</td><td rowspan=1 colspan=1>02/06/2024</td><td rowspan=1 colspan=1>60%</td></tr><tr><td rowspan=1 colspan=1>Consulting</td><td rowspan=1 colspan=1>Market Expansion</td><td rowspan=1 colspan=1>Gary</td><td rowspan=1 colspan=1>02/02/2024</td><td rowspan=1 colspan=1>32</td><td rowspan=1 colspan=1>03/05/2024</td><td rowspan=1 colspan=1>0%</td></tr><tr><td rowspan=1 colspan=1>Consulting</td><td rowspan=1 colspan=1>Client Advisory</td><td rowspan=1 colspan=1>Helen</td><td rowspan=1 colspan=1>03/06/2024</td><td rowspan=1 colspan=1>25</td><td rowspan=1 colspan=1>03/31/2024</td><td rowspan=1 colspan=1>0%</td></tr><tr><td rowspan=1 colspan=1>Training</td><td rowspan=1 colspan=1>Employee Training</td><td rowspan=1 colspan=1>Isaac</td><td rowspan=1 colspan=1>01/04/2024</td><td rowspan=1 colspan=1>27</td><td rowspan=1 colspan=1>01/31/2024</td><td rowspan=1 colspan=1>80%</td></tr><tr><td rowspan=1 colspan=1>Training</td><td rowspan=1 colspan=1>Certification Programs</td><td rowspan=1 colspan=1>Jane</td><td rowspan=1 colspan=1>01/28/2024</td><td rowspan=1 colspan=1>30</td><td rowspan=1 colspan=1>02/27/2024</td><td rowspan=1 colspan=1>0%</td></tr><tr><td rowspan=1 colspan=1>Training</td><td rowspan=1 colspan=1>Skill Development</td><td rowspan=1 colspan=1>Kyle</td><td rowspan=1 colspan=1>02/28/2024</td><td rowspan=1 colspan=1>22</td><td rowspan=1 colspan=1>03/21/2024</td><td rowspan=1 colspan=1>0%</td></tr><tr><td rowspan=1 colspan=1>Events</td><td rowspan=1 colspan=1>Event Planning</td><td rowspan=1 colspan=1>Laura</td><td rowspan=1 colspan=1>01/03/2024</td><td rowspan=1 colspan=1>25</td><td rowspan=1 colspan=1>01/28/2024</td><td rowspan=1 colspan=1>30%</td></tr><tr><td rowspan=1 colspan=1>Events</td><td rowspan=1 colspan=1>Conference Management</td><td rowspan=1 colspan=1>Mike</td><td rowspan=1 colspan=1>02/03/2024</td><td rowspan=1 colspan=1>20</td><td rowspan=1 colspan=1>02/23/2024</td><td rowspan=1 colspan=1>0%</td></tr><tr><td rowspan=1 colspan=1>Events</td><td rowspan=1 colspan=1>Sponsorship Coordinatio</td><td rowspan=1 colspan=1>n Nancy</td><td rowspan=1 colspan=1>02/24/2024</td><td rowspan=1 colspan=1>35</td><td rowspan=1 colspan=1>03/30/2024</td><td rowspan=1 colspan=1>0%</td></tr><tr><td rowspan=1 colspan=1>Logistics</td><td rowspan=1 colspan=1>Supply Chain Management</td><td rowspan=1 colspan=1>Oscar</td><td rowspan=1 colspan=1>01/03/2024</td><td rowspan=1 colspan=1>25</td><td rowspan=1 colspan=1>01/28/2024</td><td rowspan=1 colspan=1>50%</td></tr><tr><td rowspan=1 colspan=1>Logistics</td><td rowspan=1 colspan=1>Transportation Planning</td><td rowspan=1 colspan=1>Patricia</td><td rowspan=1 colspan=1>01/29/2024</td><td rowspan=1 colspan=1>30</td><td rowspan=1 colspan=1>02/28/2024</td><td rowspan=1 colspan=1>100%</td></tr><tr><td rowspan=1 colspan=1>Logistics</td><td rowspan=1 colspan=1>Inventory Optimization</td><td rowspan=1 colspan=1>Quentin</td><td rowspan=1 colspan=1>03/29/2024</td><td rowspan=1 colspan=1>20</td><td rowspan=1 colspan=1>04/18/2024</td><td rowspan=1 colspan=1>0%</td></tr><tr><td rowspan=1 colspan=1>Engineering</td><td rowspan=1 colspan=1>Product Design</td><td rowspan=1 colspan=1>Rachel</td><td rowspan=1 colspan=1>01/02/2024</td><td rowspan=1 colspan=1>25</td><td rowspan=1 colspan=1>01/27/2024</td><td rowspan=1 colspan=1>20%</td></tr><tr><td rowspan=1 colspan=1>Engineering</td><td rowspan=1 colspan=1>System Integration</td><td rowspan=1 colspan=1>Sam</td><td rowspan=1 colspan=1>02/02/2024</td><td rowspan=1 colspan=1>22</td><td rowspan=1 colspan=1>02/24/2024</td><td rowspan=1 colspan=1>0%</td></tr><tr><td rowspan=1 colspan=1>Engineering</td><td rowspan=1 colspan=1>Prototype Testing</td><td rowspan=1 colspan=1>Tom</td><td rowspan=1 colspan=1>02/23/2024</td><td rowspan=1 colspan=1>27</td><td rowspan=1 colspan=1>03/21/2024</td><td rowspan=1 colspan=1>0%</td></tr></table>",
+                                            "type": "table",
+                                            "image_path": "2aba1267e8a7a5dd31ab47fd0be46414b5bb7c2fe7a205b60e987741db2b6209.jpg"
+                                        }
+                                    ]
+                                }
+                            ],
+                            "index": 1,
+                            "virtual_lines": [
+                                {
+                                    "bbox": [
+                                        68,
+                                        51,
+                                        657,
+                                        202.66666666666666
+                                    ],
+                                    "spans": [],
+                                    "index": 0
+                                },
+                                {
+                                    "bbox": [
+                                        68,
+                                        202.66666666666666,
+                                        657,
+                                        354.3333333333333
+                                    ],
+                                    "spans": [],
+                                    "index": 1
+                                },
+                                {
+                                    "bbox": [
+                                        68,
+                                        354.3333333333333,
+                                        657,
+                                        506.0
+                                    ],
+                                    "spans": [],
+                                    "index": 2
+                                }
+                            ]
+                        }
+                    ],
+                    "index": 1
+                }
+            ],
+            "page_idx": 1,
+            "page_size": [
+                841,
+                595
+            ],
+            "discarded_blocks": [],
+            "para_blocks": [
+                {
+                    "type": "table",
+                    "bbox": [
+                        68,
+                        51,
+                        657,
+                        506
+                    ],
+                    "blocks": [
+                        {
+                            "type": "table_body",
+                            "bbox": [
+                                68,
+                                51,
+                                657,
+                                506
+                            ],
+                            "group_id": 0,
+                            "lines": [],
+                            "index": 1,
+                            "virtual_lines": [
+                                {
+                                    "bbox": [
+                                        68,
+                                        51,
+                                        657,
+                                        202.66666666666666
+                                    ],
+                                    "spans": [],
+                                    "index": 0
+                                },
+                                {
+                                    "bbox": [
+                                        68,
+                                        202.66666666666666,
+                                        657,
+                                        354.3333333333333
+                                    ],
+                                    "spans": [],
+                                    "index": 1
+                                },
+                                {
+                                    "bbox": [
+                                        68,
+                                        354.3333333333333,
+                                        657,
+                                        506.0
+                                    ],
+                                    "spans": [],
+                                    "index": 2
+                                }
+                            ],
+                            "lines_deleted": true
+                        }
+                    ],
+                    "index": 1
+                }
+            ]
+        }
+    ],
+    "_backend": "pipeline",
+    "_version_name": "2.7.6"
+}

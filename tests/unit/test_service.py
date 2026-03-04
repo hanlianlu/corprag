@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from corprag.config import CorpragConfig
-from corprag.service import RAGService, _detect_mineru_backend
+from dlightrag.config import DlightragConfig
+from dlightrag.service import RAGService, _detect_mineru_backend
 
 # ---------------------------------------------------------------------------
 # TestRAGServiceInit
@@ -18,7 +18,7 @@ from corprag.service import RAGService, _detect_mineru_backend
 class TestRAGServiceInit:
     """Test RAGService construction and configuration."""
 
-    def test_ensure_initialized_raises(self, test_config: CorpragConfig) -> None:
+    def test_ensure_initialized_raises(self, test_config: DlightragConfig) -> None:
         service = RAGService(config=test_config)
         with pytest.raises(RuntimeError, match="not initialized"):
             service._ensure_initialized()
@@ -36,7 +36,7 @@ class TestRAGServiceInit:
 class TestRAGServiceAingest:
     """Test ingestion logic — replace defaults, azure lifecycle."""
 
-    def _make_initialized_service(self, config: CorpragConfig) -> RAGService:
+    def _make_initialized_service(self, config: DlightragConfig) -> RAGService:
         service = RAGService(config=config)
         service._initialized = True
         service.ingestion = MagicMock()
@@ -50,12 +50,12 @@ class TestRAGServiceAingest:
         service.rag_vision = MagicMock()
         return service
 
-    async def test_aingest_not_initialized_raises(self, test_config: CorpragConfig) -> None:
+    async def test_aingest_not_initialized_raises(self, test_config: DlightragConfig) -> None:
         service = RAGService(config=test_config)
         with pytest.raises(RuntimeError, match="not initialized"):
             await service.aingest(source_type="local", path="/tmp/f.pdf")
 
-    async def test_aingest_replace_default_from_config(self, test_config: CorpragConfig) -> None:
+    async def test_aingest_replace_default_from_config(self, test_config: DlightragConfig) -> None:
         test_config.ingestion_replace_default = True
         service = self._make_initialized_service(test_config)
         await service.aingest(source_type="local", path="/tmp/file.pdf")
@@ -63,7 +63,7 @@ class TestRAGServiceAingest:
         assert call_kwargs.kwargs["replace"] is True
 
     async def test_aingest_replace_explicit_overrides_config(
-        self, test_config: CorpragConfig
+        self, test_config: DlightragConfig
     ) -> None:
         test_config.ingestion_replace_default = True
         service = self._make_initialized_service(test_config)
@@ -74,7 +74,7 @@ class TestRAGServiceAingest:
     # -- Azure blob lifecycle --
 
     async def test_aingest_azure_defaults_prefix_when_neither_set(
-        self, test_config: CorpragConfig
+        self, test_config: DlightragConfig
     ) -> None:
         """When neither blob_path nor prefix provided, prefix defaults to '' (entire container)."""
         service = self._make_initialized_service(test_config)
@@ -84,14 +84,14 @@ class TestRAGServiceAingest:
         assert call_kwargs["prefix"] == ""
         assert call_kwargs.get("blob_path") is None
 
-    async def test_aingest_azure_calls_aclose(self, test_config: CorpragConfig) -> None:
+    async def test_aingest_azure_calls_aclose(self, test_config: DlightragConfig) -> None:
         """source.aclose() is called after successful ingestion."""
         service = self._make_initialized_service(test_config)
         mock_source = AsyncMock()
         await service.aingest(source_type="azure_blob", source=mock_source, container_name="c")
         mock_source.aclose.assert_awaited_once()
 
-    async def test_aingest_azure_calls_aclose_on_error(self, test_config: CorpragConfig) -> None:
+    async def test_aingest_azure_calls_aclose_on_error(self, test_config: DlightragConfig) -> None:
         """source.aclose() is called even when ingestion raises."""
         service = self._make_initialized_service(test_config)
         service.ingestion.aingest_from_azure_blob = AsyncMock(
@@ -111,7 +111,7 @@ class TestRAGServiceAingest:
 class TestRAGServiceRerank:
     """Test _rerank_chunks with mocked LLM."""
 
-    async def test_rerank_sorts_by_relevance(self, test_config: CorpragConfig) -> None:
+    async def test_rerank_sorts_by_relevance(self, test_config: DlightragConfig) -> None:
         service = RAGService(config=test_config)
         service._initialized = True
 
@@ -123,13 +123,13 @@ class TestRAGServiceRerank:
         async def mock_rerank(**kwargs):
             return [{"index": 1}, {"index": 0}]
 
-        with patch("corprag.service.get_rerank_func", return_value=mock_rerank):
+        with patch("dlightrag.service.get_rerank_func", return_value=mock_rerank):
             result = await service._rerank_chunks(chunks, "query")
 
         assert result[0]["content"] == "high relevance"
         assert result[1]["content"] == "low relevance"
 
-    async def test_rerank_failure_returns_original(self, test_config: CorpragConfig) -> None:
+    async def test_rerank_failure_returns_original(self, test_config: DlightragConfig) -> None:
         service = RAGService(config=test_config)
         service._initialized = True
 
@@ -138,12 +138,12 @@ class TestRAGServiceRerank:
         async def mock_rerank(**kwargs):
             raise RuntimeError("LLM error")
 
-        with patch("corprag.service.get_rerank_func", return_value=mock_rerank):
+        with patch("dlightrag.service.get_rerank_func", return_value=mock_rerank):
             result = await service._rerank_chunks(chunks, "query")
 
         assert result == chunks
 
-    async def test_rerank_empty_chunks(self, test_config: CorpragConfig) -> None:
+    async def test_rerank_empty_chunks(self, test_config: DlightragConfig) -> None:
         service = RAGService(config=test_config)
         service._initialized = True
         result = await service._rerank_chunks([], "query")
@@ -158,7 +158,7 @@ class TestRAGServiceRerank:
 class TestRAGServiceClose:
     """Test cleanup logic."""
 
-    async def test_close_handles_errors(self, test_config: CorpragConfig) -> None:
+    async def test_close_handles_errors(self, test_config: DlightragConfig) -> None:
         service = RAGService(config=test_config)
         service._initialized = True
         mock_ingestion = MagicMock()

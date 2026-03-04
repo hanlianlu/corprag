@@ -24,9 +24,9 @@ async def _pg_available() -> bool:
         conn = await asyncpg.connect(
             host="localhost",
             port=5432,
-            user="corprag",
-            password="corprag",
-            database="corprag",
+            user="dlightrag",
+            password="dlightrag",
+            database="dlightrag",
         )
         await conn.fetchval("SELECT 1")
         await conn.close()
@@ -49,14 +49,14 @@ class TestPGHashIndex:
         """Test register and lookup with real PostgreSQL."""
         import asyncpg
 
-        from corprag.ingestion.hash_index import PGHashIndex
+        from dlightrag.ingestion.hash_index import PGHashIndex
 
         pool = await asyncpg.create_pool(
             host="localhost",
             port=5432,
-            user="corprag",
-            password="corprag",
-            database="corprag",
+            user="dlightrag",
+            password="dlightrag",
+            database="dlightrag",
         )
         try:
             index = PGHashIndex(pool=pool, workspace="test")

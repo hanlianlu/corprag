@@ -8,10 +8,10 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from corprag.api.server import _get_config, app
-from corprag.config import CorpragConfig
-from corprag.pool import RAGServiceUnavailableError
-from corprag.retrieval.engine import RetrievalResult
+from dlightrag.api.server import _get_config, app
+from dlightrag.config import DlightragConfig
+from dlightrag.pool import RAGServiceUnavailableError
+from dlightrag.retrieval.engine import RetrievalResult
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -19,7 +19,7 @@ from corprag.retrieval.engine import RetrievalResult
 
 
 @pytest.fixture
-def mock_config(test_config: CorpragConfig):
+def mock_config(test_config: DlightragConfig):
     """Override FastAPI config dependency."""
     app.dependency_overrides[_get_config] = lambda: test_config
     yield test_config
@@ -54,7 +54,7 @@ def _patch_service(mock_service):
     async def _fake_get():
         return mock_service
 
-    with patch("corprag.api.server._get_rag_service", new=_fake_get):
+    with patch("dlightrag.api.server._get_rag_service", new=_fake_get):
         yield
 
 
@@ -75,14 +75,14 @@ class TestAuthMiddleware:
     """Test _verify_auth bearer token validation."""
 
     async def test_no_token_configured_passes(
-        self, client: AsyncClient, mock_config: CorpragConfig
+        self, client: AsyncClient, mock_config: DlightragConfig
     ) -> None:
         resp = await client.get("/health")
         assert resp.status_code == 200
 
     @pytest.mark.usefixtures("_patch_service")
     async def test_valid_token_passes(
-        self, client: AsyncClient, mock_config: CorpragConfig
+        self, client: AsyncClient, mock_config: DlightragConfig
     ) -> None:
         mock_config.api_auth_token = "secret-token"
         resp = await client.get(
@@ -93,14 +93,14 @@ class TestAuthMiddleware:
 
     @pytest.mark.usefixtures("_patch_service")
     async def test_missing_auth_header_401(
-        self, client: AsyncClient, mock_config: CorpragConfig
+        self, client: AsyncClient, mock_config: DlightragConfig
     ) -> None:
         mock_config.api_auth_token = "secret-token"
         resp = await client.get("/files")
         assert resp.status_code == 401
 
     @pytest.mark.usefixtures("_patch_service")
-    async def test_wrong_scheme_401(self, client: AsyncClient, mock_config: CorpragConfig) -> None:
+    async def test_wrong_scheme_401(self, client: AsyncClient, mock_config: DlightragConfig) -> None:
         mock_config.api_auth_token = "secret-token"
         resp = await client.get(
             "/files",
@@ -109,7 +109,7 @@ class TestAuthMiddleware:
         assert resp.status_code == 401
 
     @pytest.mark.usefixtures("_patch_service")
-    async def test_invalid_token_403(self, client: AsyncClient, mock_config: CorpragConfig) -> None:
+    async def test_invalid_token_403(self, client: AsyncClient, mock_config: DlightragConfig) -> None:
         mock_config.api_auth_token = "secret-token"
         resp = await client.get(
             "/files",
@@ -118,28 +118,28 @@ class TestAuthMiddleware:
         assert resp.status_code == 403
 
     async def test_ingest_requires_auth(
-        self, client: AsyncClient, mock_config: CorpragConfig
+        self, client: AsyncClient, mock_config: DlightragConfig
     ) -> None:
         mock_config.api_auth_token = "secret-token"
         resp = await client.post("/ingest", json={"source_type": "local", "path": "/tmp/f.pdf"})
         assert resp.status_code == 401
 
     async def test_retrieve_requires_auth(
-        self, client: AsyncClient, mock_config: CorpragConfig
+        self, client: AsyncClient, mock_config: DlightragConfig
     ) -> None:
         mock_config.api_auth_token = "secret-token"
         resp = await client.post("/retrieve", json={"query": "hello"})
         assert resp.status_code == 401
 
     async def test_answer_requires_auth(
-        self, client: AsyncClient, mock_config: CorpragConfig
+        self, client: AsyncClient, mock_config: DlightragConfig
     ) -> None:
         mock_config.api_auth_token = "secret-token"
         resp = await client.post("/answer", json={"query": "hello"})
         assert resp.status_code == 401
 
     async def test_delete_requires_auth(
-        self, client: AsyncClient, mock_config: CorpragConfig
+        self, client: AsyncClient, mock_config: DlightragConfig
     ) -> None:
         mock_config.api_auth_token = "secret-token"
         resp = await client.request("DELETE", "/files", json={"filenames": ["f.pdf"]})
@@ -156,32 +156,32 @@ class TestIngestEndpoint:
 
     @pytest.mark.usefixtures("_patch_service")
     async def test_local_requires_path(
-        self, client: AsyncClient, mock_config: CorpragConfig
+        self, client: AsyncClient, mock_config: DlightragConfig
     ) -> None:
         resp = await client.post("/ingest", json={"source_type": "local"})
         assert resp.status_code == 400
 
     @pytest.mark.usefixtures("_patch_service")
     async def test_azure_blob_requires_container(
-        self, client: AsyncClient, mock_config: CorpragConfig
+        self, client: AsyncClient, mock_config: DlightragConfig
     ) -> None:
         resp = await client.post("/ingest", json={"source_type": "azure_blob"})
         assert resp.status_code == 400
 
     @pytest.mark.usefixtures("_patch_service")
     async def test_snowflake_requires_query(
-        self, client: AsyncClient, mock_config: CorpragConfig
+        self, client: AsyncClient, mock_config: DlightragConfig
     ) -> None:
         resp = await client.post("/ingest", json={"source_type": "snowflake"})
         assert resp.status_code == 400
 
     async def test_local_success(
-        self, client: AsyncClient, mock_config: CorpragConfig, mock_service
+        self, client: AsyncClient, mock_config: DlightragConfig, mock_service
     ) -> None:
         async def _fake_get():
             return mock_service
 
-        with patch("corprag.api.server._get_rag_service", new=_fake_get):
+        with patch("dlightrag.api.server._get_rag_service", new=_fake_get):
             resp = await client.post(
                 "/ingest",
                 json={"source_type": "local", "path": "/data/file.pdf"},
@@ -191,12 +191,12 @@ class TestIngestEndpoint:
         mock_service.aingest.assert_awaited_once()
 
     async def test_azure_blob_success(
-        self, client: AsyncClient, mock_config: CorpragConfig, mock_service
+        self, client: AsyncClient, mock_config: DlightragConfig, mock_service
     ) -> None:
         async def _fake_get():
             return mock_service
 
-        with patch("corprag.api.server._get_rag_service", new=_fake_get):
+        with patch("dlightrag.api.server._get_rag_service", new=_fake_get):
             resp = await client.post(
                 "/ingest",
                 json={
@@ -210,7 +210,7 @@ class TestIngestEndpoint:
 
     @pytest.mark.usefixtures("_patch_service")
     async def test_azure_blob_path_and_prefix_mutually_exclusive(
-        self, client: AsyncClient, mock_config: CorpragConfig
+        self, client: AsyncClient, mock_config: DlightragConfig
     ) -> None:
         resp = await client.post(
             "/ingest",
@@ -224,12 +224,12 @@ class TestIngestEndpoint:
         assert resp.status_code == 400
 
     async def test_rag_unavailable_503(
-        self, client: AsyncClient, mock_config: CorpragConfig
+        self, client: AsyncClient, mock_config: DlightragConfig
     ) -> None:
         async def _fail():
             raise RAGServiceUnavailableError("RAG not ready")
 
-        with patch("corprag.api.server._get_rag_service", new=_fail):
+        with patch("dlightrag.api.server._get_rag_service", new=_fail):
             resp = await client.post(
                 "/ingest",
                 json={"source_type": "local", "path": "/data/file.pdf"},
@@ -247,12 +247,12 @@ class TestRetrieveEndpoint:
     """Test /retrieve endpoint."""
 
     async def test_retrieve_success(
-        self, client: AsyncClient, mock_config: CorpragConfig, mock_service
+        self, client: AsyncClient, mock_config: DlightragConfig, mock_service
     ) -> None:
         async def _fake_get():
             return mock_service
 
-        with patch("corprag.api.server._get_rag_service", new=_fake_get):
+        with patch("dlightrag.api.server._get_rag_service", new=_fake_get):
             resp = await client.post("/retrieve", json={"query": "What is RAG?"})
 
         assert resp.status_code == 200
@@ -262,12 +262,12 @@ class TestRetrieveEndpoint:
         assert "raw" in body
 
     async def test_retrieve_with_custom_mode(
-        self, client: AsyncClient, mock_config: CorpragConfig, mock_service
+        self, client: AsyncClient, mock_config: DlightragConfig, mock_service
     ) -> None:
         async def _fake_get():
             return mock_service
 
-        with patch("corprag.api.server._get_rag_service", new=_fake_get):
+        with patch("dlightrag.api.server._get_rag_service", new=_fake_get):
             resp = await client.post(
                 "/retrieve",
                 json={"query": "hello", "mode": "local"},
@@ -287,7 +287,7 @@ class TestHealthEndpoint:
     """Test /health endpoint."""
 
     async def test_health_returns_status(
-        self, client: AsyncClient, mock_config: CorpragConfig
+        self, client: AsyncClient, mock_config: DlightragConfig
     ) -> None:
         resp = await client.get("/health")
         assert resp.status_code == 200
@@ -306,12 +306,12 @@ class TestDeleteEndpoint:
     """Test DELETE /files endpoint."""
 
     async def test_delete_by_filenames(
-        self, client: AsyncClient, mock_config: CorpragConfig, mock_service
+        self, client: AsyncClient, mock_config: DlightragConfig, mock_service
     ) -> None:
         async def _fake_get():
             return mock_service
 
-        with patch("corprag.api.server._get_rag_service", new=_fake_get):
+        with patch("dlightrag.api.server._get_rag_service", new=_fake_get):
             resp = await client.request(
                 "DELETE",
                 "/files",
@@ -322,12 +322,12 @@ class TestDeleteEndpoint:
         mock_service.adelete_files.assert_awaited_once()
 
     async def test_delete_by_file_paths(
-        self, client: AsyncClient, mock_config: CorpragConfig, mock_service
+        self, client: AsyncClient, mock_config: DlightragConfig, mock_service
     ) -> None:
         async def _fake_get():
             return mock_service
 
-        with patch("corprag.api.server._get_rag_service", new=_fake_get):
+        with patch("dlightrag.api.server._get_rag_service", new=_fake_get):
             resp = await client.request(
                 "DELETE",
                 "/files",
@@ -346,12 +346,12 @@ class TestAnswerEndpoint:
     """Test /answer endpoint."""
 
     async def test_answer_success(
-        self, client: AsyncClient, mock_config: CorpragConfig, mock_service
+        self, client: AsyncClient, mock_config: DlightragConfig, mock_service
     ) -> None:
         async def _fake_get():
             return mock_service
 
-        with patch("corprag.api.server._get_rag_service", new=_fake_get):
+        with patch("dlightrag.api.server._get_rag_service", new=_fake_get):
             resp = await client.post("/answer", json={"query": "What is RAG?"})
 
         assert resp.status_code == 200
@@ -362,7 +362,7 @@ class TestAnswerEndpoint:
         assert body["answer"] == "The answer is 42"
 
     async def test_answer_with_conversation_history(
-        self, client: AsyncClient, mock_config: CorpragConfig, mock_service
+        self, client: AsyncClient, mock_config: DlightragConfig, mock_service
     ) -> None:
         async def _fake_get():
             return mock_service
@@ -371,7 +371,7 @@ class TestAnswerEndpoint:
             {"role": "user", "content": "Hello"},
             {"role": "assistant", "content": "Hi there"},
         ]
-        with patch("corprag.api.server._get_rag_service", new=_fake_get):
+        with patch("dlightrag.api.server._get_rag_service", new=_fake_get):
             resp = await client.post(
                 "/answer",
                 json={"query": "Follow up", "conversation_history": history},
@@ -382,12 +382,12 @@ class TestAnswerEndpoint:
         assert call_kwargs["conversation_history"] == history
 
     async def test_answer_service_unavailable_503(
-        self, client: AsyncClient, mock_config: CorpragConfig
+        self, client: AsyncClient, mock_config: DlightragConfig
     ) -> None:
         async def _fail():
             raise RAGServiceUnavailableError("RAG not ready")
 
-        with patch("corprag.api.server._get_rag_service", new=_fail):
+        with patch("dlightrag.api.server._get_rag_service", new=_fail):
             resp = await client.post("/answer", json={"query": "hello"})
 
         assert resp.status_code == 503
@@ -403,7 +403,7 @@ class TestFilesEndpoint:
 
     @pytest.mark.usefixtures("_patch_service")
     async def test_list_files_success(
-        self, client: AsyncClient, mock_config: CorpragConfig
+        self, client: AsyncClient, mock_config: DlightragConfig
     ) -> None:
         resp = await client.get("/files")
         assert resp.status_code == 200
@@ -412,14 +412,14 @@ class TestFilesEndpoint:
         assert "count" in body
 
     async def test_list_files_count_matches(
-        self, client: AsyncClient, mock_config: CorpragConfig, mock_service
+        self, client: AsyncClient, mock_config: DlightragConfig, mock_service
     ) -> None:
         mock_service.alist_ingested_files = AsyncMock(return_value=["a.pdf", "b.pdf", "c.pdf"])
 
         async def _fake_get():
             return mock_service
 
-        with patch("corprag.api.server._get_rag_service", new=_fake_get):
+        with patch("dlightrag.api.server._get_rag_service", new=_fake_get):
             resp = await client.get("/files")
 
         assert resp.status_code == 200

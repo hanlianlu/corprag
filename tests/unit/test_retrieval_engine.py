@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
-from corprag.retrieval.engine import (
+from dlightrag.retrieval.engine import (
     RetrievalResult,
     _extract_rag_relative,
     _to_download_url,
@@ -23,15 +23,15 @@ class TestExtractRagRelative:
 
     def test_with_working_dir(self) -> None:
         result = _extract_rag_relative(
-            "/abs/corprag_storage/sources/local/file.pdf",
-            working_dir="/abs/corprag_storage",
+            "/abs/dlightrag_storage/sources/local/file.pdf",
+            working_dir="/abs/dlightrag_storage",
         )
         assert result == "sources/local/file.pdf"
 
     def test_with_working_dir_trailing_slash(self) -> None:
         result = _extract_rag_relative(
-            "/abs/corprag_storage/sources/local/file.pdf",
-            working_dir="/abs/corprag_storage/",
+            "/abs/dlightrag_storage/sources/local/file.pdf",
+            working_dir="/abs/dlightrag_storage/",
         )
         assert result == "sources/local/file.pdf"
 
@@ -74,8 +74,8 @@ class TestToDownloadUrl:
 
     def test_file_scheme_stripped(self) -> None:
         result = _to_download_url(
-            "file:///abs/corprag_storage/sources/local/file.pdf",
-            working_dir="/abs/corprag_storage",
+            "file:///abs/dlightrag_storage/sources/local/file.pdf",
+            working_dir="/abs/dlightrag_storage",
         )
         assert result == "file://sources/local/file.pdf"
 
@@ -85,8 +85,8 @@ class TestToDownloadUrl:
 
     def test_relative_extraction_no_transformer(self) -> None:
         result = _to_download_url(
-            "/abs/corprag_storage/sources/local/file.pdf",
-            working_dir="/abs/corprag_storage",
+            "/abs/dlightrag_storage/sources/local/file.pdf",
+            working_dir="/abs/dlightrag_storage",
         )
         assert result == "file://sources/local/file.pdf"
 

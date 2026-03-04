@@ -9,8 +9,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from corprag.config import CorpragConfig
-from corprag.ingestion.pipeline import (
+from dlightrag.config import DlightragConfig
+from dlightrag.ingestion.pipeline import (
     IngestionCancelledError,
     IngestionPipeline,
 )
@@ -21,7 +21,7 @@ from corprag.ingestion.pipeline import (
 
 
 def _make_pipeline(
-    test_config: CorpragConfig,
+    test_config: DlightragConfig,
     *,
     cancel_checker=None,
     mineru_backend=None,
@@ -60,38 +60,38 @@ def _make_pipeline(
 class TestIngestionPipelineHelpers:
     """Pure function / synchronous helper tests."""
 
-    def test_extract_relative_source_path_standard(self, test_config: CorpragConfig) -> None:
+    def test_extract_relative_source_path_standard(self, test_config: DlightragConfig) -> None:
         pipeline = _make_pipeline(test_config)
         result = pipeline._extract_relative_source_path(
-            "/abs/path/corprag_storage/sources/local/file.pdf"
+            "/abs/path/dlightrag_storage/sources/local/file.pdf"
         )
         assert result == "local/file.pdf"
 
-    def test_extract_relative_source_path_no_marker(self, test_config: CorpragConfig) -> None:
+    def test_extract_relative_source_path_no_marker(self, test_config: DlightragConfig) -> None:
         pipeline = _make_pipeline(test_config)
         result = pipeline._extract_relative_source_path("/some/random/path/file.pdf")
         assert result is None
 
-    def test_extract_relative_source_path_azure_blobs(self, test_config: CorpragConfig) -> None:
+    def test_extract_relative_source_path_azure_blobs(self, test_config: DlightragConfig) -> None:
         pipeline = _make_pipeline(test_config)
         result = pipeline._extract_relative_source_path(
-            "/abs/corprag_storage/sources/azure_blobs/c1/sub/file.pdf"
+            "/abs/dlightrag_storage/sources/azure_blobs/c1/sub/file.pdf"
         )
         assert result == "azure_blobs/c1/sub/file.pdf"
 
     def test_resolve_source_file_absolute_exists(
-        self, test_config: CorpragConfig, tmp_path: Path
+        self, test_config: DlightragConfig, tmp_path: Path
     ) -> None:
         pipeline = _make_pipeline(test_config)
         f = tmp_path / "test_file.txt"
         f.write_text("data")
         assert pipeline._resolve_source_file(str(f)) == f
 
-    def test_resolve_source_file_absolute_not_found(self, test_config: CorpragConfig) -> None:
+    def test_resolve_source_file_absolute_not_found(self, test_config: DlightragConfig) -> None:
         pipeline = _make_pipeline(test_config)
         assert pipeline._resolve_source_file("/nonexistent/file.pdf") is None
 
-    def test_resolve_source_file_basename_glob_fallback(self, test_config: CorpragConfig) -> None:
+    def test_resolve_source_file_basename_glob_fallback(self, test_config: DlightragConfig) -> None:
         pipeline = _make_pipeline(test_config)
         # Create file nested inside sources dir
         nested = test_config.sources_dir / "local" / "report.pdf"
@@ -101,7 +101,7 @@ class TestIngestionPipelineHelpers:
         assert result is not None
         assert result.name == "report.pdf"
 
-    def test_get_storage_dir_creates_path(self, test_config: CorpragConfig) -> None:
+    def test_get_storage_dir_creates_path(self, test_config: DlightragConfig) -> None:
         pipeline = _make_pipeline(test_config)
         d = pipeline._get_storage_dir(test_config.sources_dir, "custom_type", "sub1", "sub2")
         assert d.exists()
@@ -109,7 +109,7 @@ class TestIngestionPipelineHelpers:
         assert "custom_type" in str(d)
 
     async def test_acopy_to_sources_local_new_file(
-        self, test_config: CorpragConfig, tmp_path: Path
+        self, test_config: DlightragConfig, tmp_path: Path
     ) -> None:
         pipeline = _make_pipeline(test_config)
         src = tmp_path / "new_doc.pdf"
@@ -120,7 +120,7 @@ class TestIngestionPipelineHelpers:
         assert dest.read_text() == "pdf bytes"
 
     async def test_acopy_to_sources_local_conflict_resolution(
-        self, test_config: CorpragConfig, tmp_path: Path
+        self, test_config: DlightragConfig, tmp_path: Path
     ) -> None:
         from datetime import date
 
@@ -138,7 +138,7 @@ class TestIngestionPipelineHelpers:
         assert dest.read_text() == "new version"
 
     async def test_acopy_to_sources_local_already_in_place(
-        self, test_config: CorpragConfig
+        self, test_config: DlightragConfig
     ) -> None:
         pipeline = _make_pipeline(test_config)
         # File already in sources/local
@@ -156,7 +156,7 @@ class TestIngestionPipelineHelpers:
 class TestIngestSingleFileWithPolicy:
     """Core parse -> filter -> insert pipeline."""
 
-    async def test_successful_ingest(self, test_config: CorpragConfig, tmp_path: Path) -> None:
+    async def test_successful_ingest(self, test_config: DlightragConfig, tmp_path: Path) -> None:
         pipeline = _make_pipeline(test_config)
         file_path = tmp_path / "doc.pdf"
         file_path.write_text("content")
@@ -175,7 +175,7 @@ class TestIngestSingleFileWithPolicy:
         assert pipeline._hash_index.lookup("sha256:abc123") is not None
 
     async def test_all_content_filtered_by_policy(
-        self, test_config: CorpragConfig, tmp_path: Path
+        self, test_config: DlightragConfig, tmp_path: Path
     ) -> None:
         pipeline = _make_pipeline(test_config)
         # Return only discarded blocks
@@ -196,7 +196,7 @@ class TestIngestSingleFileWithPolicy:
         assert result.stats.indexed == 0
         pipeline.rag.insert_content_list.assert_not_awaited()
 
-    async def test_parse_document_error(self, test_config: CorpragConfig, tmp_path: Path) -> None:
+    async def test_parse_document_error(self, test_config: DlightragConfig, tmp_path: Path) -> None:
         pipeline = _make_pipeline(test_config)
         pipeline.rag.parse_document.side_effect = RuntimeError("parse failed")
         file_path = tmp_path / "bad.pdf"
@@ -210,7 +210,7 @@ class TestIngestSingleFileWithPolicy:
         assert "parse failed" in result.error
 
     async def test_no_hash_registration_when_hash_is_none(
-        self, test_config: CorpragConfig, tmp_path: Path
+        self, test_config: DlightragConfig, tmp_path: Path
     ) -> None:
         pipeline = _make_pipeline(test_config)
         file_path = tmp_path / "doc.pdf"
@@ -227,7 +227,7 @@ class TestIngestSingleFileWithPolicy:
         assert await pipeline._hash_index.list_all() == []
 
     async def test_mineru_backend_passed_to_parse_kwargs(
-        self, test_config: CorpragConfig, tmp_path: Path
+        self, test_config: DlightragConfig, tmp_path: Path
     ) -> None:
         pipeline = _make_pipeline(test_config, mineru_backend="hybrid-auto-engine")
         file_path = tmp_path / "doc.pdf"
@@ -249,7 +249,7 @@ class TestIngestSingleFileWithPolicy:
 class TestAingestFromLocal:
     """Local ingestion workflow: dedup, copy, process."""
 
-    async def test_single_file_new(self, test_config: CorpragConfig, tmp_path: Path) -> None:
+    async def test_single_file_new(self, test_config: DlightragConfig, tmp_path: Path) -> None:
         pipeline = _make_pipeline(test_config)
         src = tmp_path / "new.pdf"
         src.write_text("content")
@@ -262,7 +262,7 @@ class TestAingestFromLocal:
         assert result.skipped == 0
 
     async def test_single_file_duplicate_skipped(
-        self, test_config: CorpragConfig, tmp_path: Path
+        self, test_config: DlightragConfig, tmp_path: Path
     ) -> None:
         pipeline = _make_pipeline(test_config)
         src = tmp_path / "dup.pdf"
@@ -277,13 +277,13 @@ class TestAingestFromLocal:
         assert result.processed == 0
         assert result.skipped == 1
 
-    async def test_path_not_found(self, test_config: CorpragConfig) -> None:
+    async def test_path_not_found(self, test_config: DlightragConfig) -> None:
         pipeline = _make_pipeline(test_config)
         with pytest.raises(FileNotFoundError, match="Path not found"):
             await pipeline.aingest_from_local(Path("/nonexistent/file.pdf"))
 
     async def test_directory_multiple_files(
-        self, test_config: CorpragConfig, tmp_path: Path
+        self, test_config: DlightragConfig, tmp_path: Path
     ) -> None:
         pipeline = _make_pipeline(test_config)
         d = tmp_path / "docs"
@@ -298,7 +298,7 @@ class TestAingestFromLocal:
         assert result.processed == 3
         assert result.skipped == 0
 
-    async def test_directory_empty(self, test_config: CorpragConfig, tmp_path: Path) -> None:
+    async def test_directory_empty(self, test_config: DlightragConfig, tmp_path: Path) -> None:
         pipeline = _make_pipeline(test_config)
         d = tmp_path / "empty_dir"
         d.mkdir()
@@ -317,23 +317,23 @@ class TestAingestFromLocal:
 class TestCheckCancelled:
     """Test cancellation detection."""
 
-    async def test_no_checker_no_error(self, test_config: CorpragConfig) -> None:
+    async def test_no_checker_no_error(self, test_config: DlightragConfig) -> None:
         pipeline = _make_pipeline(test_config, cancel_checker=None)
         # Should not raise
         await pipeline._check_cancelled()
 
-    async def test_checker_returns_false(self, test_config: CorpragConfig) -> None:
+    async def test_checker_returns_false(self, test_config: DlightragConfig) -> None:
         checker = AsyncMock(return_value=False)
         pipeline = _make_pipeline(test_config, cancel_checker=checker)
         await pipeline._check_cancelled()
 
-    async def test_checker_returns_true(self, test_config: CorpragConfig) -> None:
+    async def test_checker_returns_true(self, test_config: DlightragConfig) -> None:
         checker = AsyncMock(return_value=True)
         pipeline = _make_pipeline(test_config, cancel_checker=checker)
         with pytest.raises(IngestionCancelledError, match="cancelled by caller"):
             await pipeline._check_cancelled()
 
-    async def test_asyncio_cancellation(self, test_config: CorpragConfig) -> None:
+    async def test_asyncio_cancellation(self, test_config: DlightragConfig) -> None:
         pipeline = _make_pipeline(test_config)
 
         async def run():

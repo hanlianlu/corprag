@@ -2,66 +2,66 @@
 # Credentials come from .env (not tracked in git).
 
 x-common-env: &common-env
-  CORPRAG_POSTGRES_HOST: postgres
-  CORPRAG_POSTGRES_PORT: "5432"
-  CORPRAG_POSTGRES_DATABASE: ${CORPRAG_POSTGRES_DATABASE:-corprag}
-  CORPRAG_POSTGRES_USER: ${CORPRAG_POSTGRES_USER:-corprag}
-  CORPRAG_POSTGRES_PASSWORD: ${CORPRAG_POSTGRES_PASSWORD:-corprag}
-  CORPRAG_POSTGRES_WORKSPACE: ${CORPRAG_POSTGRES_WORKSPACE:-default}
-  CORPRAG_WORKING_DIR: /app/corprag_storage
+  DLIGHTRAG_POSTGRES_HOST: postgres
+  DLIGHTRAG_POSTGRES_PORT: "5432"
+  DLIGHTRAG_POSTGRES_DATABASE: ${DLIGHTRAG_POSTGRES_DATABASE:-dlightrag}
+  DLIGHTRAG_POSTGRES_USER: ${DLIGHTRAG_POSTGRES_USER:-dlightrag}
+  DLIGHTRAG_POSTGRES_PASSWORD: ${DLIGHTRAG_POSTGRES_PASSWORD:-dlightrag}
+  DLIGHTRAG_POSTGRES_WORKSPACE: ${DLIGHTRAG_POSTGRES_WORKSPACE:-default}
+  DLIGHTRAG_WORKING_DIR: /app/dlightrag_storage
 
 services:
-  corprag-api:
+  dlightrag-api:
     build: .
     ports:
       - "8100:8100"
     environment:
       <<: *common-env
-      CORPRAG_API_HOST: "0.0.0.0"
-      CORPRAG_API_PORT: "8100"
+      DLIGHTRAG_API_HOST: "0.0.0.0"
+      DLIGHTRAG_API_PORT: "8100"
     env_file: .env
     volumes:
-      - corprag_data:/app/corprag_storage
+      - dlightrag_data:/app/dlightrag_storage
       - ./src:/app/src:ro
     depends_on:
       postgres:
         condition: service_healthy
-    command: ["corprag-api"]
+    command: ["dlightrag-api"]
 
-  corprag-mcp:
+  dlightrag-mcp:
     build: .
     ports:
       - "8101:8101"
     environment:
       <<: *common-env
-      CORPRAG_MCP_TRANSPORT: streamable-http
-      CORPRAG_MCP_HOST: "0.0.0.0"
-      CORPRAG_MCP_PORT: "8101"
+      DLIGHTRAG_MCP_TRANSPORT: streamable-http
+      DLIGHTRAG_MCP_HOST: "0.0.0.0"
+      DLIGHTRAG_MCP_PORT: "8101"
     env_file: .env
     volumes:
-      - corprag_data:/app/corprag_storage
+      - dlightrag_data:/app/dlightrag_storage
       - ./src:/app/src:ro
     depends_on:
       postgres:
         condition: service_healthy
-    command: ["corprag-mcp"]
+    command: ["dlightrag-mcp"]
 
   postgres:
     build: postgres/
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_DB: ${CORPRAG_POSTGRES_DATABASE:-corprag}
-      POSTGRES_USER: ${CORPRAG_POSTGRES_USER:-corprag}
-      POSTGRES_PASSWORD: ${CORPRAG_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${DLIGHTRAG_POSTGRES_DATABASE:-dlightrag}
+      POSTGRES_USER: ${DLIGHTRAG_POSTGRES_USER:-dlightrag}
+      POSTGRES_PASSWORD: ${DLIGHTRAG_POSTGRES_PASSWORD}
     volumes:
       - pg_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${CORPRAG_POSTGRES_USER:-corprag} -d ${CORPRAG_POSTGRES_DATABASE:-corprag}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DLIGHTRAG_POSTGRES_USER:-dlightrag} -d ${DLIGHTRAG_POSTGRES_DATABASE:-dlightrag}"]
       interval: 5s
       timeout: 3s
       retries: 10
 
 volumes:
-  corprag_data:
+  dlightrag_data:
   pg_data:

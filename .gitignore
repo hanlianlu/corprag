@@ -28,7 +28,7 @@ Thumbs.db
 !.env.example
 
 # Storage
-corprag_storage/
+dlightrag_storage/
 *.db
 
 # Testing

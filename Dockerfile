@@ -1,5 +1,5 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
-# Corporate RAG service - multimodal document ingestion & retrieval
+# Corporate RAG service - multimodal RAG
 
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
 LABEL maintainer="HanlianLyu"
@@ -40,10 +40,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ENV PATH="/app/.venv/bin:$PATH"
 
 # Default storage directory
-RUN mkdir -p /app/corprag_storage
-VOLUME /app/corprag_storage
+RUN mkdir -p /app/dlightrag_storage
+VOLUME /app/dlightrag_storage
 
 EXPOSE 8100 8101
 
 # Default: start the REST API server
-CMD ["corprag-api"]
+CMD ["dlightrag-api"]

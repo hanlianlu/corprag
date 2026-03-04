@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
-"""Reset corprag RAG storage — clears PostgreSQL data, AGE graphs, and local files.
+"""Reset dlightrag RAG storage — clears PostgreSQL data, AGE graphs, and local files.
 
 Usage:
     uv run scripts/reset.py                      # reset all (with confirmation)
@@ -22,7 +22,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Table prefixes to discover and reset
-_TABLE_PREFIXES = ("lightrag_", "corprag_")
+_TABLE_PREFIXES = ("lightrag_", "dlightrag_")
 
 
 def _format_size(n: float) -> str:
@@ -46,7 +46,7 @@ async def _reset_tables(
     *,
     dry_run: bool,
 ) -> dict[str, int]:
-    """Delete all rows scoped to workspace from LightRAG + corprag tables."""
+    """Delete all rows scoped to workspace from LightRAG + dlightrag tables."""
     import asyncpg  # type: ignore[import-not-found]
 
     stats: dict[str, int] = {}
@@ -181,17 +181,17 @@ def _load_env() -> dict[str, str]:
     env = {**dotenv_values(dotenv_path), **dict(os.environ)}
 
     # Resolve working_dir relative to the .env file location (project root)
-    working_dir = env.get("CORPRAG_WORKING_DIR", "./corprag_storage")
+    working_dir = env.get("DLIGHTRAG_WORKING_DIR", "./dlightrag_storage")
     if dotenv_path and not Path(working_dir).is_absolute():
         working_dir = str(Path(dotenv_path).parent / working_dir)
 
     return {
-        "host": env.get("CORPRAG_POSTGRES_HOST", "localhost"),
-        "port": env.get("CORPRAG_POSTGRES_PORT", "5432"),
-        "user": env.get("CORPRAG_POSTGRES_USER", "corprag"),
-        "password": env.get("CORPRAG_POSTGRES_PASSWORD", "corprag"),
-        "database": env.get("CORPRAG_POSTGRES_DATABASE", "corprag"),
-        "workspace": env.get("CORPRAG_POSTGRES_WORKSPACE", "default"),
+        "host": env.get("DLIGHTRAG_POSTGRES_HOST", "localhost"),
+        "port": env.get("DLIGHTRAG_POSTGRES_PORT", "5432"),
+        "user": env.get("DLIGHTRAG_POSTGRES_USER", "dlightrag"),
+        "password": env.get("DLIGHTRAG_POSTGRES_PASSWORD", "dlightrag"),
+        "database": env.get("DLIGHTRAG_POSTGRES_DATABASE", "dlightrag"),
+        "workspace": env.get("DLIGHTRAG_POSTGRES_WORKSPACE", "default"),
         "working_dir": working_dir,
     }
 
@@ -248,8 +248,8 @@ async def reset_all(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        prog="corprag-reset",
-        description="Reset corprag RAG storage",
+        prog="dlightrag-reset",
+        description="Reset dlightrag RAG storage",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--dry-run", action="store_true", help="Preview without deleting")

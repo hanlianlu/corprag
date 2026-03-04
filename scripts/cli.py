@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
-"""CLI for corprag — ingestion runs locally, queries go through the REST API.
+"""CLI for dlightrag — ingestion runs locally, queries go through the REST API.
 
 Usage:
     # Local ingestion (runs directly via RAGService, no API server needed)
@@ -17,7 +17,7 @@ Usage:
     uv run scripts/cli.py ingest --source snowflake --query "SELECT * FROM reports"
     uv run scripts/cli.py ingest --source snowflake --query "SELECT * FROM t" --table reports
 
-    # Query & answer (requires API server: docker compose up corprag-api)
+    # Query & answer (requires API server: docker compose up dlightrag-api)
     uv run scripts/cli.py query "What are the key findings?"
     uv run scripts/cli.py query "Revenue trends" --mode mix --top-k 30
     uv run scripts/cli.py answer "What are the key findings?"
@@ -41,18 +41,18 @@ DEFAULT_API_URL = "http://localhost:8100"
 
 
 def _get_api_url() -> str:
-    return os.environ.get("CORPRAG_API_URL", DEFAULT_API_URL)
+    return os.environ.get("DLIGHTRAG_API_URL", DEFAULT_API_URL)
 
 
 def _get_auth_token() -> str | None:
-    token = os.environ.get("CORPRAG_API_AUTH_TOKEN")
+    token = os.environ.get("DLIGHTRAG_API_AUTH_TOKEN")
     if token:
         return token
 
     from dotenv import dotenv_values, find_dotenv
 
     env = dotenv_values(find_dotenv(usecwd=True))
-    return env.get("CORPRAG_API_AUTH_TOKEN")
+    return env.get("DLIGHTRAG_API_AUTH_TOKEN")
 
 
 def _headers() -> dict[str, str]:
@@ -83,7 +83,7 @@ def _validate_ingest_args(args: argparse.Namespace) -> None:
         if not args.path:
             _die(
                 "local source requires a path argument.\n"
-                "Usage: corprag-cli ingest <path> [--replace] [--sync-hashes]"
+                "Usage: dlightrag-cli ingest <path> [--replace] [--sync-hashes]"
             )
         if args.container_name or args.blob_path or args.prefix:
             _die("--container, --blob-path, --prefix are only for azure_blob source")
@@ -99,7 +99,7 @@ def _validate_ingest_args(args: argparse.Namespace) -> None:
         if not args.container_name:
             _die(
                 "azure_blob source requires --container.\n"
-                "Usage: corprag-cli ingest --source azure_blob --container <name> "
+                "Usage: dlightrag-cli ingest --source azure_blob --container <name> "
                 "[--blob-path <path> | --prefix <pfx>]"
             )
         if args.blob_path and args.prefix:
@@ -113,7 +113,7 @@ def _validate_ingest_args(args: argparse.Namespace) -> None:
         if not args.query:
             _die(
                 "snowflake source requires --query.\n"
-                "Usage: corprag-cli ingest --source snowflake --query '<SQL>'"
+                "Usage: dlightrag-cli ingest --source snowflake --query '<SQL>'"
             )
         if args.container_name or args.blob_path or args.prefix:
             _die("--container, --blob-path, --prefix are only for azure_blob source")
@@ -128,7 +128,7 @@ def _validate_ingest_args(args: argparse.Namespace) -> None:
 
 async def _run_ingest(args: argparse.Namespace) -> None:
     """Run ingestion directly via RAGService (no API server needed)."""
-    from corprag.service import RAGService
+    from dlightrag.service import RAGService
 
     source = args.source_type
     kwargs: dict[str, Any] = {}
@@ -210,7 +210,7 @@ def cmd_chat(args: argparse.Namespace) -> None:
     url = f"{_get_api_url()}/answer"
     history: list[dict[str, str]] = []
 
-    print(f"corprag chat (mode={args.mode}, API={_get_api_url()})")
+    print(f"dlightrag chat (mode={args.mode}, API={_get_api_url()})")
     print("Type your question, or: /clear to reset history, /quit to exit\n")
 
     while True:
@@ -268,8 +268,8 @@ def cmd_chat(args: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="corprag-cli",
-        description="corprag CLI — ingestion runs locally, queries go through the REST API",
+        prog="dlightrag-cli",
+        description="dlightrag CLI — ingestion runs locally, queries go through the REST API",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

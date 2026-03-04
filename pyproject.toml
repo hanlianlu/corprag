@@ -1,9 +1,9 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
 
 [project]
-name = "corprag"
-version = "0.2.2"
-description = "Corporate RAG - multimodal document ingestion & retrieval service"
+name = "dlightrag"
+version = "0.2.3"
+description = "DlightRAG - Dual-mode multi-modal RAG service"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = "Apache-2.0"
@@ -52,20 +52,20 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/hanlianlu/corprag"
-Repository = "https://github.com/hanlianlu/corprag"
-Issues = "https://github.com/hanlianlu/corprag/issues"
+Homepage = "https://github.com/hanlianlu/dlightrag"
+Repository = "https://github.com/hanlianlu/dlightrag"
+Issues = "https://github.com/hanlianlu/dlightrag/issues"
 
 [project.scripts]
-corprag-mcp = "corprag.mcp.server:main"
-corprag-api = "corprag.api.server:main"
+dlightrag-mcp = "dlightrag.mcp.server:main"
+dlightrag-api = "dlightrag.api.server:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/corprag"]
+packages = ["src/dlightrag"]
 
 [tool.uv.sources]
 raganything = { git = "https://github.com/HKUDS/RAG-Anything.git", rev = "main" }
@@ -81,5 +81,5 @@ ignore = ["E501", "B008"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "--cov=corprag --cov-report=term-missing"
+addopts = "--cov=dlightrag --cov-report=term-missing"
 markers = ["integration: requires running PostgreSQL"]

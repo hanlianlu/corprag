@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import pytest
 
-from corprag.config import CorpragConfig
-from corprag.models.llm import _build_chat_model, _ensure_bytes
+from dlightrag.config import DlightragConfig
+from dlightrag.models.llm import _build_chat_model, _ensure_bytes
 
 
 class TestEnsureBytes:
@@ -34,7 +34,7 @@ class TestEnsureBytes:
 class TestBuildChatModel:
     """Test _build_chat_model dispatching."""
 
-    def _make_config(self, **overrides) -> CorpragConfig:
+    def _make_config(self, **overrides) -> DlightragConfig:
         """Create a config with minimal required fields.
 
         Always includes openai_api_key since many providers fall back to
@@ -45,7 +45,7 @@ class TestBuildChatModel:
             "llm_provider": "openai",
         }
         defaults.update(overrides)
-        return CorpragConfig(**defaults)  # type: ignore[call-arg]
+        return DlightragConfig(**defaults)  # type: ignore[call-arg]
 
     def test_openai_returns_chat_openai(self) -> None:
         config = self._make_config(llm_provider="openai")
@@ -161,9 +161,9 @@ class TestGetVisionModelFunc:
     """Test vision model factory dispatching."""
 
     def test_no_vision_model_returns_none(self) -> None:
-        from corprag.models.llm import get_vision_model_func
+        from dlightrag.models.llm import get_vision_model_func
 
-        config = CorpragConfig(  # type: ignore[call-arg]
+        config = DlightragConfig(  # type: ignore[call-arg]
             llm_provider="openai",
             openai_api_key="test-key",
             vision_model=None,
@@ -177,9 +177,9 @@ class TestGetEmbeddingFunc:
     """Test embedding factory dispatching."""
 
     def test_openai_embedding(self) -> None:
-        from corprag.models.llm import get_embedding_func
+        from dlightrag.models.llm import get_embedding_func
 
-        config = CorpragConfig(  # type: ignore[call-arg]
+        config = DlightragConfig(  # type: ignore[call-arg]
             llm_provider="openai",
             openai_api_key="test-key",
         )
@@ -189,9 +189,9 @@ class TestGetEmbeddingFunc:
 
     def test_explicit_embedding_provider(self) -> None:
         """Test explicit embedding_provider uses its own credentials."""
-        from corprag.models.llm import get_embedding_func
+        from dlightrag.models.llm import get_embedding_func
 
-        config = CorpragConfig(  # type: ignore[call-arg]
+        config = DlightragConfig(  # type: ignore[call-arg]
             llm_provider="anthropic",
             anthropic_api_key="ant-key",
             embedding_provider="openai",
@@ -206,7 +206,7 @@ class TestConvertOpenaiToAnthropicMessages:
     """Test message format conversion."""
 
     def test_system_message_extracted(self) -> None:
-        from corprag.models.llm import _convert_openai_to_anthropic_messages
+        from dlightrag.models.llm import _convert_openai_to_anthropic_messages
 
         msgs = [
             {"role": "system", "content": "You are helpful."},
@@ -220,7 +220,7 @@ class TestConvertOpenaiToAnthropicMessages:
     def test_image_url_converted_to_base64_source(self) -> None:
         import base64
 
-        from corprag.models.llm import _convert_openai_to_anthropic_messages
+        from dlightrag.models.llm import _convert_openai_to_anthropic_messages
 
         b64 = base64.b64encode(b"fake png").decode()
         msgs = [

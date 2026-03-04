@@ -1,0 +1,23 @@
+# Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
+"""Data source adapters for document ingestion."""
+
+from dlightrag.sourcing.base import AsyncDataSource, DataSource
+
+__all__ = ["AsyncDataSource", "DataSource"]
+
+
+def __getattr__(name: str):
+    """Lazy import optional sourcing adapters."""
+    if name == "AzureBlobDataSource":
+        from dlightrag.sourcing.azure_blob import AzureBlobDataSource
+
+        return AzureBlobDataSource
+    if name == "SnowflakeDataSource":
+        from dlightrag.sourcing.snowflake import SnowflakeDataSource
+
+        return SnowflakeDataSource
+    if name == "LocalDataSource":
+        from dlightrag.sourcing.local import LocalDataSource
+
+        return LocalDataSource
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
