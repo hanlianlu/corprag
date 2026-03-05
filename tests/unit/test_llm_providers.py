@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import pytest
 
+from functools import partial
+
 from dlightrag.config import DlightragConfig
-from dlightrag.models.llm import _build_chat_model, _ensure_bytes
+from dlightrag.models.llm import _ensure_bytes, get_ingestion_llm_model_func, get_llm_model_func
 
 
 class TestEnsureBytes:
@@ -31,15 +33,10 @@ class TestEnsureBytes:
         assert _ensure_bytes("not base64!!!") is None
 
 
-class TestBuildChatModel:
-    """Test _build_chat_model dispatching."""
+class TestGetLlmModelFunc:
+    """Test get_llm_model_func returns correct partial for each provider."""
 
     def _make_config(self, **overrides) -> DlightragConfig:
-        """Create a config with minimal required fields.
-
-        Always includes openai_api_key since many providers fall back to
-        OpenAI for vision/embeddings.
-        """
         defaults = {
             "openai_api_key": "test-key",
             "llm_provider": "openai",
@@ -47,114 +44,84 @@ class TestBuildChatModel:
         defaults.update(overrides)
         return DlightragConfig(**defaults)  # type: ignore[call-arg]
 
-    def test_openai_returns_chat_openai(self) -> None:
-        config = self._make_config(llm_provider="openai")
-        model = _build_chat_model(config, "gpt-4.1-mini")
+    def test_openai_returns_partial(self) -> None:
+        config = self._make_config(llm_provider="openai", chat_model="gpt-4.1-mini")
+        func = get_llm_model_func(config)
+        assert isinstance(func, partial)
+        assert func.func.__module__ == "lightrag.llm.openai"
+        assert func.keywords["model"] == "gpt-4.1-mini"
 
-        from langchain_openai import ChatOpenAI
+    def test_qwen_returns_openai_partial(self) -> None:
+        config = self._make_config(llm_provider="qwen", qwen_api_key="qwen-key")
+        func = get_llm_model_func(config)
+        assert isinstance(func, partial)
+        assert func.func.__module__ == "lightrag.llm.openai"
 
-        assert isinstance(model, ChatOpenAI)
+    def test_minimax_returns_openai_partial(self) -> None:
+        config = self._make_config(llm_provider="minimax", minimax_api_key="mm-key")
+        func = get_llm_model_func(config)
+        assert isinstance(func, partial)
+        assert func.func.__module__ == "lightrag.llm.openai"
 
-    def test_qwen_returns_chat_openai_with_base_url(self) -> None:
-        config = self._make_config(
-            llm_provider="qwen",
-            qwen_api_key="qwen-key",
-        )
-        model = _build_chat_model(config, "qwen3.5-plus")
-
-        from langchain_openai import ChatOpenAI
-
-        assert isinstance(model, ChatOpenAI)
-
-    def test_minimax_returns_chat_openai_with_base_url(self) -> None:
-        config = self._make_config(
-            llm_provider="minimax",
-            minimax_api_key="mm-key",
-        )
-        model = _build_chat_model(config, "MiniMax-M2.5")
-
-        from langchain_openai import ChatOpenAI
-
-        assert isinstance(model, ChatOpenAI)
-
-    def test_ollama_returns_chat_openai(self) -> None:
+    def test_ollama_returns_ollama_partial(self) -> None:
         config = self._make_config(llm_provider="ollama")
-        model = _build_chat_model(config, "llama3.1")
-
-        from langchain_openai import ChatOpenAI
-
-        assert isinstance(model, ChatOpenAI)
-
-    def test_openrouter_returns_chat_openai(self) -> None:
-        config = self._make_config(
-            llm_provider="openrouter",
-            openrouter_api_key="sk-or-key",
-        )
-        model = _build_chat_model(config, "anthropic/claude-sonnet-4-6")
-
-        from langchain_openai import ChatOpenAI
-
-        assert isinstance(model, ChatOpenAI)
-
-    def test_anthropic_returns_chat_anthropic(self) -> None:
-        config = self._make_config(
-            llm_provider="anthropic",
-            anthropic_api_key="ant-key",
-        )
-
         try:
-            model = _build_chat_model(config, "claude-sonnet-4-6")
-            # If langchain-anthropic is installed, verify type
-            from langchain_anthropic import ChatAnthropic
+            func = get_llm_model_func(config)
+        except ModuleNotFoundError:
+            pytest.skip("ollama package not installed")
+        assert isinstance(func, partial)
+        assert func.func.__module__ == "lightrag.llm.ollama"
+        # Host should have /v1 stripped
+        assert func.keywords.get("host", "").endswith("/v1") is False
 
-            assert isinstance(model, ChatAnthropic)
-        except ImportError:
-            pytest.skip("langchain-anthropic not installed")
-
-    def test_google_returns_chat_google(self) -> None:
+    def test_openrouter_returns_openai_partial(self) -> None:
         config = self._make_config(
-            llm_provider="google_gemini",
-            google_gemini_api_key="google-key",
+            llm_provider="openrouter", openrouter_api_key="sk-or-key"
         )
+        func = get_llm_model_func(config)
+        assert isinstance(func, partial)
+        assert func.func.__module__ == "lightrag.llm.openai"
 
+    def test_xinference_returns_openai_partial(self) -> None:
+        config = self._make_config(llm_provider="xinference")
+        func = get_llm_model_func(config)
+        assert isinstance(func, partial)
+        assert func.func.__module__ == "lightrag.llm.openai"
+
+    def test_anthropic_returns_anthropic_partial(self) -> None:
+        config = self._make_config(
+            llm_provider="anthropic", anthropic_api_key="ant-key"
+        )
         try:
-            model = _build_chat_model(config, "gemini-2.5-flash")
-            from langchain_google_genai import ChatGoogleGenerativeAI
+            func = get_llm_model_func(config)
+        except ModuleNotFoundError:
+            pytest.skip("anthropic/voyageai package not installed")
+        assert isinstance(func, partial)
+        assert func.func.__module__ == "lightrag.llm.anthropic"
 
-            assert isinstance(model, ChatGoogleGenerativeAI)
-        except ImportError:
-            pytest.skip("langchain-google-genai not installed")
-
-    def test_explicit_provider_overrides_config(self) -> None:
-        """When provider is passed, it overrides config.llm_provider."""
+    def test_google_gemini_returns_gemini_partial(self) -> None:
         config = self._make_config(
-            llm_provider="openai",
-            qwen_api_key="qwen-key",
+            llm_provider="google_gemini", google_gemini_api_key="google-key"
         )
-        model = _build_chat_model(config, "qwen3.5-plus", provider="qwen")
-
-        from langchain_openai import ChatOpenAI
-
-        assert isinstance(model, ChatOpenAI)
+        func = get_llm_model_func(config)
+        assert isinstance(func, partial)
+        assert func.func.__module__ == "lightrag.llm.gemini"
 
     def test_unsupported_provider_raises(self) -> None:
         config = self._make_config()
-
         with pytest.raises(ValueError, match="Unsupported LLM provider"):
-            _build_chat_model(config, "some-model", provider="unsupported")
+            get_llm_model_func(config, provider="unsupported")
 
-    def test_temperature_override(self) -> None:
-        config = self._make_config(llm_temperature=0.8)
-        model = _build_chat_model(config, "gpt-4.1-mini", temperature=0.1)
+    def test_ingestion_uses_ingestion_model(self) -> None:
+        config = self._make_config(ingestion_model="gpt-4.1-nano")
+        func = get_ingestion_llm_model_func(config)
+        assert isinstance(func, partial)
+        assert func.keywords["model"] == "gpt-4.1-nano"
 
-        # Temperature should be the override, not config default
-        assert model.temperature == 0.1
-
-    def test_default_temperature_from_config(self) -> None:
-        config = self._make_config(llm_temperature=0.7)
-        model = _build_chat_model(config, "gpt-4.1-mini")
-
-        assert model.temperature == 0.7
+    def test_model_name_override(self) -> None:
+        config = self._make_config()
+        func = get_llm_model_func(config, model_name="gpt-4.1")
+        assert func.keywords["model"] == "gpt-4.1"
 
 
 class TestGetVisionModelFunc:

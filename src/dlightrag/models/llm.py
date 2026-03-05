@@ -16,10 +16,10 @@ import base64
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from functools import partial
 from typing import Any
 
 import numpy as np
-from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from lightrag.utils import EmbeddingFunc
 from pydantic import SecretStr
@@ -74,7 +74,7 @@ def _build_chat_model(
     temperature: float | None = None,
     provider: str | None = None,
     model_kwargs: dict[str, Any] | None = None,
-) -> BaseChatModel:
+) -> Any:
     """Build a LangChain chat model instance from config.
 
     Args:
@@ -135,64 +135,65 @@ def _build_chat_model(
     raise ValueError(f"Unsupported LLM provider: {provider}")
 
 
-def _build_llm_model_func(
-    config: DlightragConfig,
-    deployment: str,
-    temperature: float | None = None,
-    model_kwargs: dict[str, Any] | None = None,
+def get_llm_model_func(
+    config: DlightragConfig | None = None,
+    model_name: str | None = None,
+    provider: str | None = None,
 ) -> LLMFunc:
-    """Build a LightRAG-compatible LLM function from config."""
-    llm = _build_chat_model(config, deployment, temperature, model_kwargs=model_kwargs)
+    """Build a LightRAG-compatible LLM function using native _if_cache functions.
 
-    async def llm_model_func(
-        prompt: str,
-        *,
-        system_prompt: str | None = None,
-        max_tokens: int | None = None,
-        **_: Any,
-    ) -> str:
-        """LLM func accepted by LightRAG & RAGAnything."""
-        messages = []
-        if system_prompt:
-            messages.append(SystemMessage(content=system_prompt))
-        messages.append(HumanMessage(content=prompt))
-
-        t0 = time.perf_counter()
-        try:
-            model = llm.bind(max_tokens=max_tokens) if max_tokens else llm
-            resp = await model.ainvoke(messages)
-            result = str(resp.content) if resp.content else ""
-            elapsed = time.perf_counter() - t0
-            preview = result[:120].replace("\n", " ")
-            logger.info("LLM %.1fs %dc [%s]", elapsed, len(result), preview)
-            return result
-        except Exception:
-            elapsed = time.perf_counter() - t0
-            logger.exception("LLM failed %.1fs", elapsed)
-            return ""
-
-    return llm_model_func
-
-
-def get_llm_model_func(config: DlightragConfig | None = None) -> LLMFunc:
-    """Primary chat LLM (retrieval/generation)."""
+    Returns a partial() with model/api_key/base_url bound. Works both when
+    called directly (RAGAnything modal processing) and when called through
+    LightRAG's pipeline (which injects hashing_kv).
+    """
     from dlightrag.config import get_config
 
     cfg = config or get_config()
-    return _build_llm_model_func(cfg, cfg.chat_model_name, model_kwargs=cfg.chat_model_kwargs)
+    prov = provider or cfg.llm_provider
+    model = model_name or cfg.chat_model_name
+    api_key = cfg._get_provider_api_key(prov)
+    base_url = cfg._get_url(f"{prov}_base_url")
+
+    if prov in ("openai", "qwen", "minimax", "openrouter", "xinference"):
+        from lightrag.llm.openai import openai_complete_if_cache
+
+        return partial(openai_complete_if_cache, model=model, api_key=api_key, base_url=base_url)
+
+    if prov == "azure_openai":
+        from lightrag.llm.azure_openai import azure_openai_complete_if_cache
+
+        return partial(
+            azure_openai_complete_if_cache,
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+        )
+
+    if prov == "anthropic":
+        from lightrag.llm.anthropic import anthropic_complete_if_cache
+
+        return partial(anthropic_complete_if_cache, model=model, api_key=api_key)
+
+    if prov == "google_gemini":
+        from lightrag.llm.gemini import gemini_complete_if_cache
+
+        return partial(gemini_complete_if_cache, model=model, api_key=api_key)
+
+    if prov == "ollama":
+        from lightrag.llm.ollama import _ollama_model_if_cache
+
+        host = (cfg.ollama_base_url or "http://localhost:11434").removesuffix("/v1")
+        return partial(_ollama_model_if_cache, model=model, host=host)
+
+    raise ValueError(f"Unsupported LLM provider: {prov}")
 
 
 def get_ingestion_llm_model_func(config: DlightragConfig | None = None) -> LLMFunc:
-    """Dedicated ingestion LLM with lower temperature for deterministic extraction."""
+    """Dedicated ingestion LLM — uses ingestion_model_name."""
     from dlightrag.config import get_config
 
     cfg = config or get_config()
-    return _build_llm_model_func(
-        cfg,
-        cfg.ingestion_model_name,
-        temperature=cfg.ingestion_temperature,
-        model_kwargs=cfg.ingestion_model_kwargs,
-    )
+    return get_llm_model_func(cfg, model_name=cfg.ingestion_model_name)
 
 
 # ═══════════════════════════════════════════════════════════════════
