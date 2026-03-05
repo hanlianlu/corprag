@@ -87,14 +87,17 @@ def get_llm_model_func(
     if prov in ("openai", "qwen", "minimax", "openrouter", "xinference"):
         from lightrag.llm.openai import openai_complete_if_cache
 
-        return partial(openai_complete_if_cache, model=model, api_key=api_key, base_url=base_url)
+        # model must be positional (1st arg) so that callers passing
+        # prompt as 1st positional arg (e.g. RAGAnything modal processors)
+        # don't collide with a keyword `model`.
+        return partial(openai_complete_if_cache, model, api_key=api_key, base_url=base_url)
 
     if prov == "azure_openai":
         from lightrag.llm.azure_openai import azure_openai_complete_if_cache
 
         return partial(
             azure_openai_complete_if_cache,
-            model=model,
+            model,
             api_key=api_key,
             base_url=base_url,
         )
@@ -102,18 +105,18 @@ def get_llm_model_func(
     if prov == "anthropic":
         from lightrag.llm.anthropic import anthropic_complete_if_cache
 
-        return partial(anthropic_complete_if_cache, model=model, api_key=api_key)
+        return partial(anthropic_complete_if_cache, model, api_key=api_key)
 
     if prov == "google_gemini":
         from lightrag.llm.gemini import gemini_complete_if_cache
 
-        return partial(gemini_complete_if_cache, model=model, api_key=api_key)
+        return partial(gemini_complete_if_cache, model, api_key=api_key)
 
     if prov == "ollama":
         from lightrag.llm.ollama import _ollama_model_if_cache
 
         host = (cfg.ollama_base_url or "http://localhost:11434").removesuffix("/v1")
-        return partial(_ollama_model_if_cache, model=model, host=host)
+        return partial(_ollama_model_if_cache, model, host=host)
 
     raise ValueError(f"Unsupported LLM provider: {prov}")
 

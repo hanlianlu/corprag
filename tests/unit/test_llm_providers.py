@@ -48,7 +48,7 @@ class TestGetLlmModelFunc:
         config = self._make_config(llm_provider="openai", chat_model="gpt-4.1-mini")
         func = get_llm_model_func(config)
         assert isinstance(func, partial)
-        assert func.keywords["model"] == "gpt-4.1-mini"
+        assert func.args[0] == "gpt-4.1-mini"
 
     def test_qwen_returns_partial(self) -> None:
         config = self._make_config(llm_provider="qwen", qwen_api_key="qwen-key")
@@ -102,12 +102,12 @@ class TestGetLlmModelFunc:
         config = self._make_config(ingestion_model="gpt-4.1-nano")
         func = get_ingestion_llm_model_func(config)
         assert isinstance(func, partial)
-        assert func.keywords["model"] == "gpt-4.1-nano"
+        assert func.args[0] == "gpt-4.1-nano"
 
     def test_model_name_override(self) -> None:
         config = self._make_config()
         func = get_llm_model_func(config, model_name="gpt-4.1")
-        assert func.keywords["model"] == "gpt-4.1"
+        assert func.args[0] == "gpt-4.1"
 
 
 class TestGetVisionModelFunc:
