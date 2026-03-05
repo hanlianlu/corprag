@@ -254,7 +254,7 @@ Five backends are available. The `cohere`, `jina`, and `aliyun` backends use Lig
 
 | Backend | Default model | Provider-specific key |
 |---|---|---|
-| `llm` | (follows `INGESTION_MODEL`) | (follows `LLM_PROVIDER` credentials) |
+| `llm` | (follows `CHAT_MODEL`) | (follows `LLM_PROVIDER` credentials) |
 | `cohere` | `rerank-v4.0-pro` | `DLIGHTRAG_COHERE_API_KEY` |
 | `jina` | `jina-reranker-v3` | `DLIGHTRAG_JINA_API_KEY` |
 | `aliyun` | `qwen3-rerank` | `DLIGHTRAG_ALIYUN_RERANK_API_KEY` |
@@ -307,7 +307,7 @@ Set `DLIGHTRAG_API_AUTH_TOKEN` to enable bearer token authentication.
                           │
                  ┌────────▼────────┐
                  │   RAGService    │  one per workspace
-                 └────┬───┬───┬───┘
+                 └────┬───┬───┬───-┘
                       │   │   │
           ┌───────────▼┐  │  ┌▼──────────────┐
           │ Ingestion  │  │  │  Retrieval    │
@@ -316,14 +316,14 @@ Set `DLIGHTRAG_API_AUTH_TOKEN` to enable bearer token authentication.
           │ local      │  │  │  retrieve()   │
           │ azure blob │  │  │  answer()     │
           │ snowflake  │  │  └───────┬───────┘
-          └──────┬─────┘  │         │
-                 │  ┌─────▼─────┐   │
-                 └──│RAGAnything│───┘  single shared instance
+          └──────┬─────┘  │          │
+                 │  ┌─────▼─────┐    │
+                 └──│RAGAnything│───-┘  single shared instance
                     │ (LightRAG)│
                     └─────┬─────┘
                           │
-            ┌─────────────┴──────────────────┐
-            │                                │
+            ┌─────────────┴─────────────────┐
+            │                               │
   ┌─────────▼─────────┐      ┌──────────────▼───────┐
   │   LLM Providers   │      │      Storage         │
   │  Chat · Embed     │      │  PostgreSQL          │

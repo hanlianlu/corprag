@@ -2,8 +2,8 @@
 
 [project]
 name = "dlightrag"
-version = "0.2.3"
-description = "DlightRAG - Dual-mode multi-modal RAG service"
+version = "0.2.4"
+description = "DlightRAG - Dual-mode multi-modal RAG service based on LightRAG"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = "Apache-2.0"

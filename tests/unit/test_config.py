@@ -263,3 +263,66 @@ class TestDlightragConfig:
         reset_config()
         config2 = get_config()
         assert config1 is not config2
+
+    def test_vector_db_kwargs_default_empty(self, test_config: DlightragConfig) -> None:
+        """Test vector_db_kwargs defaults to empty dict."""
+        assert test_config.vector_db_kwargs == {}
+
+    def test_vector_db_kwargs_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test vector_db_kwargs parsed from JSON env var."""
+        monkeypatch.setenv("DLIGHTRAG_OPENAI_API_KEY", "test-key")
+        monkeypatch.setenv(
+            "DLIGHTRAG_VECTOR_DB_KWARGS",
+            '{"index_type": "HNSW_SQ", "sq_type": "SQ8", "hnsw_m": 32}',
+        )
+        config = DlightragConfig()  # type: ignore[call-arg]
+        assert config.vector_db_kwargs == {
+            "index_type": "HNSW_SQ",
+            "sq_type": "SQ8",
+            "hnsw_m": 32,
+        }
+
+    def test_qdrant_env_bridge(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test Qdrant env vars are bridged when QdrantVectorDBStorage is used."""
+        monkeypatch.delenv("QDRANT_URL", raising=False)
+        monkeypatch.delenv("QDRANT_API_KEY", raising=False)
+        monkeypatch.setenv("DLIGHTRAG_OPENAI_API_KEY", "test-key")
+        monkeypatch.setenv("DLIGHTRAG_VECTOR_STORAGE", "QdrantVectorDBStorage")
+        monkeypatch.setenv("DLIGHTRAG_QDRANT_URL", "http://qdrant:6333")
+        monkeypatch.setenv("DLIGHTRAG_QDRANT_API_KEY", "qdrant-secret")
+        # Use non-PG backends to avoid PG bridging
+        monkeypatch.setenv("DLIGHTRAG_KV_STORAGE", "JsonKVStorage")
+        monkeypatch.setenv("DLIGHTRAG_DOC_STATUS_STORAGE", "JsonDocStatusStorage")
+        monkeypatch.setenv("DLIGHTRAG_GRAPH_STORAGE", "NetworkXStorage")
+
+        DlightragConfig()  # type: ignore[call-arg]
+
+        assert os.environ.get("QDRANT_URL") == "http://qdrant:6333"
+        assert os.environ.get("QDRANT_API_KEY") == "qdrant-secret"
+
+    def test_milvus_env_bridge_full(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test Milvus env vars are fully bridged."""
+        for key in (
+            "MILVUS_URI",
+            "MILVUS_USER",
+            "MILVUS_PASSWORD",
+            "MILVUS_TOKEN",
+            "MILVUS_DB_NAME",
+        ):
+            monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv("DLIGHTRAG_OPENAI_API_KEY", "test-key")
+        monkeypatch.setenv("DLIGHTRAG_VECTOR_STORAGE", "MilvusVectorDBStorage")
+        monkeypatch.setenv("DLIGHTRAG_MILVUS_URI", "http://milvus:19530")
+        monkeypatch.setenv("DLIGHTRAG_MILVUS_USER", "milvus_user")
+        monkeypatch.setenv("DLIGHTRAG_MILVUS_PASSWORD", "milvus_pass")
+        monkeypatch.setenv("DLIGHTRAG_MILVUS_DB_NAME", "mydb")
+        monkeypatch.setenv("DLIGHTRAG_KV_STORAGE", "JsonKVStorage")
+        monkeypatch.setenv("DLIGHTRAG_DOC_STATUS_STORAGE", "JsonDocStatusStorage")
+        monkeypatch.setenv("DLIGHTRAG_GRAPH_STORAGE", "NetworkXStorage")
+
+        DlightragConfig()  # type: ignore[call-arg]
+
+        assert os.environ.get("MILVUS_URI") == "http://milvus:19530"
+        assert os.environ.get("MILVUS_USER") == "milvus_user"
+        assert os.environ.get("MILVUS_PASSWORD") == "milvus_pass"
+        assert os.environ.get("MILVUS_DB_NAME") == "mydb"

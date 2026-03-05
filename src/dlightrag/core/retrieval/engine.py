@@ -44,6 +44,7 @@ class RetrievalEngine:
     def __init__(self, rag: Any, config: Any) -> None:
         self.rag = rag
         self.config = config
+        self._url_transformer: Callable[[str], str] | None = None
 
     async def aretrieve(
         self,

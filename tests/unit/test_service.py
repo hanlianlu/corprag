@@ -250,3 +250,33 @@ class TestRAGServiceFileManagement:
         assert result == [{"status": "deleted"}]
         call_kwargs = service.ingestion.adelete_files.call_args.kwargs
         assert call_kwargs["filenames"] == ["a.pdf"]
+
+
+# ---------------------------------------------------------------------------
+# TestBuildVectorDbKwargs
+# ---------------------------------------------------------------------------
+
+
+class TestBuildVectorDbKwargs:
+    """Test _build_vector_db_kwargs passthrough."""
+
+    def test_default_has_cosine_threshold(self, test_config: DlightragConfig) -> None:
+        result = RAGService._build_vector_db_kwargs(test_config)
+        assert result == {"cosine_better_than_threshold": 0.3}
+
+    def test_passthrough_merges_kwargs(self, test_config: DlightragConfig) -> None:
+        test_config.vector_db_kwargs = {
+            "index_type": "HNSW_SQ",
+            "sq_type": "SQ8",
+            "hnsw_m": 32,
+        }
+        result = RAGService._build_vector_db_kwargs(test_config)
+        assert result["cosine_better_than_threshold"] == 0.3
+        assert result["index_type"] == "HNSW_SQ"
+        assert result["sq_type"] == "SQ8"
+        assert result["hnsw_m"] == 32
+
+    def test_passthrough_overrides_default(self, test_config: DlightragConfig) -> None:
+        test_config.vector_db_kwargs = {"cosine_better_than_threshold": 0.5}
+        result = RAGService._build_vector_db_kwargs(test_config)
+        assert result["cosine_better_than_threshold"] == 0.5

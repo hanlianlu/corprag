@@ -68,7 +68,7 @@ class DlightragConfig(BaseSettings):
         default=300, description="HNSW ef_construction (index build quality)"
     )
     pg_hnsw_ef_search: int = Field(
-        default=300, description="HNSW ef_search (query exploration, pgvector default is 40)"
+        default=256, description="HNSW ef_search (query exploration, pgvector default is 40)"
     )
 
     # ===== Storage Backends (configurable, default PostgreSQL) =====
@@ -105,9 +105,18 @@ class DlightragConfig(BaseSettings):
     milvus_password: str = Field(default="")
     milvus_token: str | None = Field(default=None)
     milvus_db_name: str = Field(default="default")
-    milvus_hnsw_m: int = Field(default=32)
-    milvus_hnsw_ef: int = Field(default=256)
-    milvus_hnsw_ef_construction: int = Field(default=300)
+
+    # ===== Optional: Qdrant (if vector_storage=QdrantVectorDBStorage) =====
+    qdrant_url: str = Field(default="http://localhost:6333")
+    qdrant_api_key: str | None = Field(default=None)
+
+    # ===== Vector DB Backend Kwargs (passthrough to LightRAG) =====
+    vector_db_kwargs: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Extra parameters forwarded to LightRAG vector_db_storage_cls_kwargs. "
+        "Backend-specific — see .env.example for per-backend options. "
+        'Example: DLIGHTRAG_VECTOR_DB_KWARGS=\'{"index_type": "HNSW_SQ", "sq_type": "SQ8"}\'',
+    )
 
     # ===== LLM Provider Configuration =====
     llm_provider: LLMProvider = Field(default="openai")
@@ -124,6 +133,10 @@ class DlightragConfig(BaseSettings):
 
     # ----- Unified Model Fields -----
     chat_model: str = Field(default="gpt-4.1-mini")
+    # NOTE: ingestion_model is reserved for future use. LightRAG currently uses
+    # a single llm_model_func for both ingestion and query; switching at runtime
+    # would cause race conditions. Until LightRAG supports dual-LLM, this field
+    # has no effect — chat_model is used for all LLM operations.
     ingestion_model: str = Field(default="gpt-4.1-mini")
     vision_model: str | None = Field(default="gpt-4.1-mini")
 
@@ -133,7 +146,7 @@ class DlightragConfig(BaseSettings):
         description="Extra parameters forwarded to the chat model API call. "
         "Example: DLIGHTRAG_CHAT_MODEL_KWARGS='{\"think\": false}'",
     )
-    ingestion_model_kwargs: dict[str, Any] = Field(
+    ingestion_model_kwargs: dict[str, Any] = Field(  # reserved, not yet active
         default_factory=dict,
         description="Extra parameters forwarded to the ingestion model API call. "
         "Example: DLIGHTRAG_INGESTION_MODEL_KWARGS='{\"think\": false}'",
@@ -192,7 +205,7 @@ class DlightragConfig(BaseSettings):
     )
     rerank_model: str | None = Field(
         default=None,
-        description="Model name for reranking. For 'llm' backend defaults to ingestion_model. "
+        description="Model name for reranking. For 'llm' backend defaults to chat_model. "
         "For API backends (cohere/jina/aliyun) this is the model identifier sent to the endpoint.",
     )
     rerank_base_url: str | None = Field(
@@ -342,7 +355,7 @@ class DlightragConfig(BaseSettings):
         """Resolve rerank model based on backend.
 
         For API backends, falls back to sensible defaults.
-        For LLM backend, falls back to ingestion_model.
+        For LLM backend, falls back to chat_model.
         """
         if self.rerank_model:
             return self.rerank_model
@@ -352,7 +365,7 @@ class DlightragConfig(BaseSettings):
             "aliyun": "qwen3-rerank",
             "azure_cohere": "Cohere-rerank-v4.0-pro",
         }
-        return defaults.get(self.rerank_backend, self.ingestion_model)
+        return defaults.get(self.rerank_backend, self.chat_model)
 
     @property
     def effective_rerank_api_key(self) -> str | None:
@@ -369,7 +382,7 @@ class DlightragConfig(BaseSettings):
         return url.rstrip("/") if url else None
 
     def model_post_init(self, __context) -> None:
-        """Bridge DLIGHTRAG_* to backend-specific env vars for LightRAG."""
+        """Pydantic lifecycle hook: bridge DLIGHTRAG_* → backend env vars."""
         # Bridge PostgreSQL env vars for LightRAG (only when PG backends are used)
         _storage_fields = (
             self.vector_storage,
@@ -424,8 +437,28 @@ class DlightragConfig(BaseSettings):
 
         # Bridge Milvus env vars if using MilvusVectorDBStorage
         if self.vector_storage == "MilvusVectorDBStorage":
-            if "MILVUS_DB_NAME" not in os.environ:
-                os.environ["MILVUS_DB_NAME"] = self.milvus_db_name
+            milvus_env_map: dict[str, str] = {
+                "MILVUS_URI": self.milvus_uri,
+                "MILVUS_DB_NAME": self.milvus_db_name,
+            }
+            if self.milvus_user:
+                milvus_env_map["MILVUS_USER"] = self.milvus_user
+            if self.milvus_password:
+                milvus_env_map["MILVUS_PASSWORD"] = self.milvus_password
+            if self.milvus_token:
+                milvus_env_map["MILVUS_TOKEN"] = self.milvus_token
+            for key, value in milvus_env_map.items():
+                if key not in os.environ:
+                    os.environ[key] = value
+
+        # Bridge Qdrant env vars if using QdrantVectorDBStorage
+        if self.vector_storage == "QdrantVectorDBStorage":
+            qdrant_env_map: dict[str, str] = {"QDRANT_URL": self.qdrant_url}
+            if self.qdrant_api_key:
+                qdrant_env_map["QDRANT_API_KEY"] = self.qdrant_api_key
+            for key, value in qdrant_env_map.items():
+                if key not in os.environ:
+                    os.environ[key] = value
 
         # Resolve working_dir to absolute path
         path = Path(self.working_dir)

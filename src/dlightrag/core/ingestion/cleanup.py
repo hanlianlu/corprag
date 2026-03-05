@@ -10,7 +10,10 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from dlightrag.core.ingestion.hash_index import HashIndexProtocol
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +31,7 @@ class DeletionContext:
 
 async def collect_deletion_context(
     identifier: str,
-    rag_working_dir: Path,
-    hash_index: Any,
+    hash_index: HashIndexProtocol | None,
     lightrag: Any = None,
 ) -> DeletionContext:
     """Find doc_id(s) for a file using hash index and LightRAG doc_status.

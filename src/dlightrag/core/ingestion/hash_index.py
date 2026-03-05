@@ -17,9 +17,32 @@ import json
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class HashIndexProtocol(Protocol):
+    """Common interface for all hash index backends.
+
+    Implemented by HashIndex (JSON), PGHashIndex, RedisHashIndex, MongoHashIndex.
+    """
+
+    async def check_exists(self, content_hash: str) -> tuple[bool, str | None]: ...
+    async def register(self, content_hash: str, doc_id: str, file_path: str) -> None: ...
+    async def remove(self, content_hash: str) -> bool: ...
+    async def should_skip_file(
+        self, file_path: Path, replace: bool
+    ) -> tuple[bool, str | None, str | None]: ...
+    async def clear(self) -> None: ...
+    async def list_all(self) -> list[dict[str, Any]]: ...
+    def invalidate(self) -> None: ...
+    def find_by_name(self, filename: str) -> tuple[str | None, str | None, str | None]: ...
+    def find_by_path(self, file_path: str) -> tuple[str | None, str | None, str | None]: ...
+
+    @staticmethod
+    def generate_doc_id_from_path(file_path: Path) -> str: ...
 
 
 def derive_source_type(file_path: str) -> str:
@@ -224,7 +247,7 @@ class HashIndex:
             index_path.unlink()
         logger.info("HashIndex cleared")
 
-    def check_exists(self, content_hash: str) -> tuple[bool, str | None]:
+    async def check_exists(self, content_hash: str) -> tuple[bool, str | None]:
         index = self._load()
         entry = index.get(content_hash)
         if entry:
@@ -261,7 +284,7 @@ class HashIndex:
         content_hash = await asyncio.to_thread(compute_file_hash, file_path)
         if replace:
             return (False, content_hash, None)
-        exists, doc_id = self.check_exists(content_hash)
+        exists, doc_id = await self.check_exists(content_hash)
         if exists:
             logger.info(f"Skipping duplicate: {file_path.name} (hash matches doc_id={doc_id})")
             return (True, content_hash, f"Duplicate of {doc_id}")
@@ -526,20 +549,7 @@ class RedisHashIndex:
         pool = RedisConnectionManager.get_pool(self._redis_url)
         self._redis = Redis(connection_pool=pool)
 
-    def check_exists(self, content_hash: str) -> tuple[bool, str | None]:
-        # Sync wrapper — run async version if loop available
-        import asyncio as _aio
-
-        try:
-            loop = _aio.get_running_loop()
-        except RuntimeError:
-            loop = None
-        if loop and loop.is_running():
-            # In sync deletion context, return not-found (matches PGHashIndex pattern)
-            return (False, None)
-        return _aio.run(self._async_check_exists(content_hash))
-
-    async def _async_check_exists(self, content_hash: str) -> tuple[bool, str | None]:
+    async def check_exists(self, content_hash: str) -> tuple[bool, str | None]:
         data = await self._get_redis().hget(self._key(), content_hash)
         if data:
             entry = json.loads(data)
@@ -571,7 +581,7 @@ class RedisHashIndex:
         content_hash = await asyncio.to_thread(compute_file_hash, file_path)
         if replace:
             return (False, content_hash, None)
-        exists, doc_id = await self._async_check_exists(content_hash)
+        exists, doc_id = await self.check_exists(content_hash)
         if exists:
             logger.info(f"Skipping duplicate: {file_path.name} (hash matches doc_id={doc_id})")
             return (True, content_hash, f"Duplicate of {doc_id}")
@@ -638,10 +648,7 @@ class MongoHashIndex:
         # Ensure index on workspace for efficient queries
         await self._get_collection().create_index("workspace")
 
-    def check_exists(self, content_hash: str) -> tuple[bool, str | None]:
-        return (False, None)  # Sync context fallback
-
-    async def _async_check_exists(self, content_hash: str) -> tuple[bool, str | None]:
+    async def check_exists(self, content_hash: str) -> tuple[bool, str | None]:
         doc = await self._get_collection().find_one(
             {"_id": content_hash, "workspace": self._workspace}
         )
@@ -680,7 +687,7 @@ class MongoHashIndex:
         content_hash = await asyncio.to_thread(compute_file_hash, file_path)
         if replace:
             return (False, content_hash, None)
-        exists, doc_id = await self._async_check_exists(content_hash)
+        exists, doc_id = await self.check_exists(content_hash)
         if exists:
             logger.info(f"Skipping duplicate: {file_path.name} (hash matches doc_id={doc_id})")
             return (True, content_hash, f"Duplicate of {doc_id}")
@@ -719,6 +726,7 @@ class MongoHashIndex:
 
 
 __all__ = [
+    "HashIndexProtocol",
     "HashIndex",
     "PGHashIndex",
     "RedisHashIndex",

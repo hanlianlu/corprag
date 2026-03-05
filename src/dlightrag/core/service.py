@@ -17,7 +17,10 @@ import platform
 import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from dlightrag.core.ingestion.hash_index import HashIndexProtocol
 
 from dlightrag.config import DlightragConfig, get_config
 
@@ -147,6 +150,13 @@ class RAGService:
         self.rag: RAGAnything | None = None
         self.ingestion: IngestionPipeline | None = None
         self.retrieval: RetrievalEngine | None = None
+
+    @staticmethod
+    def _build_vector_db_kwargs(config: DlightragConfig) -> dict[str, Any]:
+        """Build vector_db_storage_cls_kwargs from config.vector_db_kwargs passthrough."""
+        kwargs: dict[str, Any] = {"cosine_better_than_threshold": 0.3}
+        kwargs.update(config.vector_db_kwargs)
+        return kwargs
 
     def _unregister_atexit_cleanup(self, rag_obj: Any) -> None:
         """Prevent double-close logging errors by removing raganything atexit hooks."""
@@ -313,9 +323,7 @@ class RAGService:
             "kv_storage": config.kv_storage,
             "doc_status_storage": config.doc_status_storage,
             "rerank_model_func": rerank_func,
-            "vector_db_storage_cls_kwargs": {
-                "cosine_better_than_threshold": 0.3,
-            },
+            "vector_db_storage_cls_kwargs": self._build_vector_db_kwargs(config),
             "addon_params": {
                 "entity_types": config.kg_entity_types,
                 "language": "English",
@@ -360,7 +368,7 @@ class RAGService:
 
         logger.info("RAG pipelines initialized successfully")
 
-    async def _create_hash_index(self, config: DlightragConfig) -> Any:
+    async def _create_hash_index(self, config: DlightragConfig) -> HashIndexProtocol:
         """Create the appropriate hash index backend based on KV storage config.
 
         Uses the same backend as the configured KV storage for consistency.

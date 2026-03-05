@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -64,11 +63,10 @@ def _make_lightrag(docs: dict[str, str] | None = None):
 class TestCollectDeletionContext:
     """Test multi-strategy doc_id lookup for deletion."""
 
-    async def test_hash_index_finds_by_name(self, tmp_path: Path) -> None:
+    async def test_hash_index_finds_by_name(self) -> None:
         index = _make_hash_index(find_by_name_result=("doc-001", "sha256:abc", "/path/file.pdf"))
         ctx = await collect_deletion_context(
             identifier="file.pdf",
-            rag_working_dir=tmp_path,
             hash_index=index,
         )
         assert "doc-001" in ctx.doc_ids
@@ -76,65 +74,60 @@ class TestCollectDeletionContext:
         assert "/path/file.pdf" in ctx.file_paths
         assert "hash_index" in ctx.sources_used
 
-    async def test_hash_index_finds_by_path(self, tmp_path: Path) -> None:
+    async def test_hash_index_finds_by_path(self) -> None:
         index = _make_hash_index(
             find_by_name_result=(None, None, None),
             find_by_path_result=("doc-002", "sha256:def", "/full/path/doc.pdf"),
         )
         ctx = await collect_deletion_context(
             identifier="/full/path/doc.pdf",
-            rag_working_dir=tmp_path,
             hash_index=index,
         )
         assert "doc-002" in ctx.doc_ids
         assert "hash_index" in ctx.sources_used
 
-    async def test_lightrag_doc_status_fallback(self, tmp_path: Path) -> None:
+    async def test_lightrag_doc_status_fallback(self) -> None:
         index = _make_hash_index()  # Returns nothing
         lightrag = _make_lightrag({"doc-003": "/storage/sources/local/report.pdf"})
         ctx = await collect_deletion_context(
             identifier="report.pdf",
-            rag_working_dir=tmp_path,
             hash_index=index,
             lightrag=lightrag,
         )
         assert "doc-003" in ctx.doc_ids
         assert "doc_status" in ctx.sources_used
 
-    async def test_both_strategies_merge(self, tmp_path: Path) -> None:
+    async def test_both_strategies_merge(self) -> None:
         index = _make_hash_index(find_by_name_result=("doc-001", "sha256:abc", "/path/file.pdf"))
         lightrag = _make_lightrag({"doc-002": "/storage/sources/local/file.pdf"})
         ctx = await collect_deletion_context(
             identifier="file.pdf",
-            rag_working_dir=tmp_path,
             hash_index=index,
             lightrag=lightrag,
         )
         assert ctx.doc_ids == {"doc-001", "doc-002"}
 
-    async def test_no_matches(self, tmp_path: Path) -> None:
+    async def test_no_matches(self) -> None:
         index = _make_hash_index()
         ctx = await collect_deletion_context(
             identifier="nonexistent.pdf",
-            rag_working_dir=tmp_path,
             hash_index=index,
         )
         assert ctx.doc_ids == set()
         assert ctx.file_paths == set()
 
-    async def test_stem_match_via_doc_status(self, tmp_path: Path) -> None:
+    async def test_stem_match_via_doc_status(self) -> None:
         index = _make_hash_index()
         lightrag = _make_lightrag({"doc-004": "/storage/report.pdf"})
         # Query with different extension but same stem
         ctx = await collect_deletion_context(
             identifier="report.xlsx",
-            rag_working_dir=tmp_path,
             hash_index=index,
             lightrag=lightrag,
         )
         assert "doc-004" in ctx.doc_ids
 
-    async def test_doc_status_exception_handled(self, tmp_path: Path) -> None:
+    async def test_doc_status_exception_handled(self) -> None:
         index = _make_hash_index(find_by_name_result=("doc-001", "sha256:abc", "/path/file.pdf"))
         lightrag = MagicMock()
         lightrag.doc_status = MagicMock()
@@ -143,28 +136,25 @@ class TestCollectDeletionContext:
         )
         ctx = await collect_deletion_context(
             identifier="file.pdf",
-            rag_working_dir=tmp_path,
             hash_index=index,
             lightrag=lightrag,
         )
         # Hash index result should still be present despite doc_status failure
         assert "doc-001" in ctx.doc_ids
 
-    async def test_no_lightrag(self, tmp_path: Path) -> None:
+    async def test_no_lightrag(self) -> None:
         index = _make_hash_index(find_by_name_result=("doc-001", None, None))
         ctx = await collect_deletion_context(
             identifier="file.pdf",
-            rag_working_dir=tmp_path,
             hash_index=index,
             lightrag=None,
         )
         assert "doc-001" in ctx.doc_ids
 
-    async def test_no_hash_index_uses_doc_status(self, tmp_path: Path) -> None:
+    async def test_no_hash_index_uses_doc_status(self) -> None:
         lightrag = _make_lightrag({"doc-005": "/storage/data.pdf"})
         ctx = await collect_deletion_context(
             identifier="data.pdf",
-            rag_working_dir=tmp_path,
             hash_index=None,
             lightrag=lightrag,
         )

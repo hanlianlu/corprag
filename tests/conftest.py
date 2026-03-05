@@ -23,7 +23,6 @@ def _reset_config_singleton():
 def tmp_working_dir(tmp_path: Path) -> Path:
     """Create a temporary working directory structure."""
     working_dir = tmp_path / "dlightrag_storage"
-    (working_dir / "sources" / "local").mkdir(parents=True)
     (working_dir / "artifacts" / "local").mkdir(parents=True)
     return working_dir
 

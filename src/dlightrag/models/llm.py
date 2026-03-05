@@ -119,7 +119,12 @@ def get_llm_model_func(
 
 
 def get_ingestion_llm_model_func(config: DlightragConfig | None = None) -> LLMFunc:
-    """Dedicated ingestion LLM — uses ingestion_model_name."""
+    """Dedicated ingestion LLM — uses ingestion_model_name.
+
+    NOTE: Currently unused. LightRAG uses a single llm_model_func for both
+    ingestion and query; switching at runtime would cause race conditions.
+    Reserved for future dual-LLM support.
+    """
     from dlightrag.config import get_config
 
     cfg = config or get_config()

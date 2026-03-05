@@ -14,8 +14,15 @@ from dlightrag.core.servicemanager import RAGServiceManager, RAGServiceUnavailab
 
 
 @pytest.fixture()
-def test_cfg() -> DlightragConfig:
-    cfg = DlightragConfig(openai_api_key="test")  # type: ignore[call-arg]
+def test_cfg(tmp_path) -> DlightragConfig:
+    cfg = DlightragConfig(
+        openai_api_key="test",
+        working_dir=str(tmp_path / "dlightrag_storage"),
+        kv_storage="JsonKVStorage",
+        doc_status_storage="JsonDocStatusStorage",
+        vector_storage="NanoVectorDBStorage",
+        graph_storage="NetworkXStorage",
+    )  # type: ignore[call-arg]
     set_config(cfg)
     return cfg
 

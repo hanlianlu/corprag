@@ -26,6 +26,7 @@ from dlightrag.core.ingestion.policy import IngestionPolicy, PolicyStats
 
 if TYPE_CHECKING:
     from dlightrag.config import DlightragConfig
+    from dlightrag.core.ingestion.hash_index import HashIndexProtocol
     from dlightrag.sourcing.base import AsyncDataSource
 
 logger = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ class IngestionPipeline:
         policy: IngestionPolicy | None = None,
         mineru_backend: str | None = None,
         cancel_checker: Callable[[], Awaitable[bool]] | None = None,
-        hash_index: Any | None = None,
+        hash_index: HashIndexProtocol | None = None,
     ) -> None:
         self.rag = rag_instance
         self.config = config
@@ -681,11 +682,11 @@ class IngestionPipeline:
             logger.warning("Empty content list provided for ingestion")
             return IngestionResult(status="success", processed=0)
 
-        # Generate doc_id from content
+        # Generate doc_id from content — sample head + tail + length for uniqueness
         from lightrag.utils import compute_mdhash_id
 
-        content_str = str(content_list[:10])
-        doc_id = compute_mdhash_id(content_str, prefix="doc-")
+        content_repr = f"{file_path}|n={len(content_list)}|{content_list[:5]}|{content_list[-1:]}"
+        doc_id = compute_mdhash_id(content_repr, prefix="doc-")
 
         # Apply policy
         result = self.policy.apply(content_list)
@@ -838,7 +839,6 @@ class IngestionPipeline:
             # Phase 1: Multi-strategy context collection
             ctx = await collect_deletion_context(
                 identifier=identifier,
-                rag_working_dir=self.config.working_dir_path,
                 hash_index=self._hash_index,
                 lightrag=lightrag,
             )

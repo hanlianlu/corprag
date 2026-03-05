@@ -164,8 +164,8 @@ class TestHashIndex:
         await index.clear()
 
         assert not index_path.exists()
-        assert index.check_exists("sha256:aaa") == (False, None)
-        assert index.check_exists("sha256:bbb") == (False, None)
+        assert await index.check_exists("sha256:aaa") == (False, None)
+        assert await index.check_exists("sha256:bbb") == (False, None)
 
     async def test_should_skip_file_new(self, tmp_path: Path) -> None:
         """Test should_skip_file for a new file."""
@@ -298,7 +298,7 @@ class TestHashIndexWorkspace:
         await index_a.register("sha256:same", "doc-a", "/path/a.pdf")
 
         # ws-b should NOT see ws-a's hash
-        exists, _ = index_b.check_exists("sha256:same")
+        exists, _ = await index_b.check_exists("sha256:same")
         assert not exists
 
 
@@ -417,12 +417,12 @@ class TestRedisHashIndex:
 
     async def test_register_and_check_exists(self, redis_index):
         await redis_index.register("sha256:aaa", "doc-001", "/path/a.pdf")
-        exists, doc_id = await redis_index._async_check_exists("sha256:aaa")
+        exists, doc_id = await redis_index.check_exists("sha256:aaa")
         assert exists is True
         assert doc_id == "doc-001"
 
     async def test_check_exists_missing(self, redis_index):
-        exists, doc_id = await redis_index._async_check_exists("sha256:missing")
+        exists, doc_id = await redis_index.check_exists("sha256:missing")
         assert exists is False
         assert doc_id is None
 
@@ -430,7 +430,7 @@ class TestRedisHashIndex:
         await redis_index.register("sha256:aaa", "doc-001", "/path/a.pdf")
         removed = await redis_index.remove("sha256:aaa")
         assert removed is True
-        exists, _ = await redis_index._async_check_exists("sha256:aaa")
+        exists, _ = await redis_index.check_exists("sha256:aaa")
         assert exists is False
 
     async def test_clear(self, redis_index):
@@ -527,12 +527,12 @@ class TestMongoHashIndex:
 
     async def test_register_and_check_exists(self, mongo_index):
         await mongo_index.register("sha256:aaa", "doc-001", "/path/a.pdf")
-        exists, doc_id = await mongo_index._async_check_exists("sha256:aaa")
+        exists, doc_id = await mongo_index.check_exists("sha256:aaa")
         assert exists is True
         assert doc_id == "doc-001"
 
     async def test_check_exists_missing(self, mongo_index):
-        exists, doc_id = await mongo_index._async_check_exists("sha256:missing")
+        exists, doc_id = await mongo_index.check_exists("sha256:missing")
         assert exists is False
 
     async def test_remove(self, mongo_index):
