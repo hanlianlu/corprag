@@ -128,7 +128,7 @@ def _validate_ingest_args(args: argparse.Namespace) -> None:
 async def _run_ingest(args: argparse.Namespace) -> None:
     """Run ingestion directly via RAGService (no API server needed)."""
     from dlightrag.config import get_config
-    from dlightrag.service import RAGService
+    from dlightrag.core.service import RAGService
 
     source = args.source_type
     kwargs: dict[str, Any] = {}

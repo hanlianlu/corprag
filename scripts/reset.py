@@ -125,7 +125,7 @@ async def reset_all(
     *, workspace: str | None = None, do_local: bool = True, dry_run: bool = False
 ) -> dict[str, int]:
     from dlightrag.config import get_config
-    from dlightrag.service import RAGService
+    from dlightrag.core.service import RAGService
 
     config = get_config()
     if workspace:
