@@ -344,19 +344,29 @@ class PGHashIndex:
 
     Multi-worker safe — uses PostgreSQL transactions instead of file locks.
     Table: dlightrag_file_hashes (created by init.sql or auto-created).
+    Uses LightRAG's shared ClientManager for connection pooling.
     """
 
     TABLE = "dlightrag_file_hashes"
 
     def __init__(
-        self, pool: Any, workspace: str = "default", sources_dir: Path | None = None
+        self,
+        workspace: str = "default",
+        sources_dir: Path | None = None,
+        pool: Any = None,
     ) -> None:
-        self._pool = pool  # asyncpg.Pool
+        self._pool = pool  # asyncpg.Pool — set via initialize() or passed directly
         self._workspace = workspace
         self._sources_dir = sources_dir
 
     async def initialize(self) -> None:
-        """Create hash table if not exists (idempotent)."""
+        """Get shared pool from LightRAG ClientManager and create table."""
+        if self._pool is None:
+            from lightrag.kg.postgres_impl import ClientManager
+
+            db = await ClientManager.get_client()
+            self._pool = db.pool
+
         async with self._pool.acquire() as conn:
             await conn.execute(f"""
                 CREATE TABLE IF NOT EXISTS {self.TABLE} (
