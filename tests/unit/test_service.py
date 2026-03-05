@@ -1,5 +1,5 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
-"""Tests for RAGService facade."""
+"""Tests for RAGService facade (core/service.py)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from dlightrag.config import DlightragConfig
-from dlightrag.service import RAGService
+from dlightrag.core.service import RAGService
 
 # ---------------------------------------------------------------------------
 # TestRAGServiceAingest
@@ -16,7 +16,7 @@ from dlightrag.service import RAGService
 
 
 class TestRAGServiceAingest:
-    """Test ingestion logic — replace defaults, azure lifecycle."""
+    """Test ingestion logic -- replace defaults, azure lifecycle."""
 
     def _make_initialized_service(self, config: DlightragConfig) -> RAGService:
         service = RAGService(config=config)
@@ -28,8 +28,8 @@ class TestRAGServiceAingest:
         service.ingestion.aingest_from_azure_blob = AsyncMock(
             return_value=MagicMock(model_dump=MagicMock(return_value={"status": "success"}))
         )
-        service.rag_text = MagicMock()
-        service.rag_vision = MagicMock()
+        service.rag = MagicMock()
+        service.retrieval = MagicMock()
         return service
 
     async def test_aingest_not_initialized_raises(self, test_config: DlightragConfig) -> None:
@@ -105,7 +105,7 @@ class TestRAGServiceRerank:
         async def mock_rerank(**kwargs):
             return [{"index": 1}, {"index": 0}]
 
-        with patch("dlightrag.service.get_rerank_func", return_value=mock_rerank):
+        with patch("dlightrag.core.service.get_rerank_func", return_value=mock_rerank):
             result = await service._rerank_chunks(chunks, "query")
 
         assert result[0]["content"] == "high relevance"
@@ -120,7 +120,7 @@ class TestRAGServiceRerank:
         async def mock_rerank(**kwargs):
             raise RuntimeError("LLM error")
 
-        with patch("dlightrag.service.get_rerank_func", return_value=mock_rerank):
+        with patch("dlightrag.core.service.get_rerank_func", return_value=mock_rerank):
             result = await service._rerank_chunks(chunks, "query")
 
         assert result == chunks
@@ -137,12 +137,10 @@ class TestRAGServiceClose:
     async def test_close_handles_errors(self, test_config: DlightragConfig) -> None:
         service = RAGService(config=test_config)
         service._initialized = True
-        mock_ingestion = MagicMock()
-        mock_ingestion.rag = MagicMock()
-        mock_ingestion.rag.finalize_storages = AsyncMock(side_effect=RuntimeError("cleanup failed"))
-        service.ingestion = mock_ingestion
-        service.rag_text = None
-        service.rag_vision = None
+        service.rag = MagicMock()
+        service.rag.finalize_storages = AsyncMock(side_effect=RuntimeError("cleanup failed"))
+        service.ingestion = None
+        service.retrieval = None
 
         # Should not raise
         await service.close()
@@ -154,47 +152,29 @@ class TestRAGServiceClose:
 
 
 class TestRAGServiceRetrieve:
-    """Test aretrieve and aanswer dispatch logic."""
+    """Test aretrieve and aanswer delegation to RetrievalEngine."""
 
     def _make_retrieval_service(self, config: DlightragConfig) -> RAGService:
         service = RAGService(config=config)
         service._initialized = True
-        service.enable_rerank = False
-
-        rag_text = MagicMock()
-        rag_text.aquery_data_with_multimodal = AsyncMock(return_value=MagicMock())
-        rag_text.lightrag = MagicMock()
-
-        rag_vision = MagicMock()
-        rag_vision.aquery_data_with_multimodal = AsyncMock(return_value=MagicMock())
-        rag_vision.lightrag = MagicMock()
-
-        service.rag_text = rag_text
-        service.rag_vision = rag_vision
+        service.retrieval = MagicMock()
+        service.retrieval.aretrieve = AsyncMock(return_value=MagicMock())
+        service.retrieval.aanswer = AsyncMock(return_value=MagicMock())
+        service.rag = MagicMock()
         service.ingestion = MagicMock()
         return service
 
-    @patch(
-        "dlightrag.service.augment_retrieval_result",
-        new_callable=AsyncMock,
-        return_value=MagicMock(),
-    )
-    async def test_aretrieve_uses_text_rag_by_default(self, mock_augment, test_config):
+    async def test_aretrieve_delegates_to_retrieval(self, test_config):
         service = self._make_retrieval_service(test_config)
         await service.aretrieve("test query")
-        service.rag_text.aquery_data_with_multimodal.assert_awaited_once()
-        service.rag_vision.aquery_data_with_multimodal.assert_not_awaited()
+        service.retrieval.aretrieve.assert_awaited_once()
 
-    @patch(
-        "dlightrag.service.augment_retrieval_result",
-        new_callable=AsyncMock,
-        return_value=MagicMock(),
-    )
-    async def test_aretrieve_uses_vision_rag_with_multimodal(self, mock_augment, test_config):
+    async def test_aretrieve_passes_multimodal_content(self, test_config):
         service = self._make_retrieval_service(test_config)
-        await service.aretrieve("test query", multimodal_content=[{"type": "image"}])
-        service.rag_vision.aquery_data_with_multimodal.assert_awaited_once()
-        service.rag_text.aquery_data_with_multimodal.assert_not_awaited()
+        mc = [{"type": "image"}]
+        await service.aretrieve("test query", multimodal_content=mc)
+        call_kwargs = service.retrieval.aretrieve.call_args.kwargs
+        assert call_kwargs["multimodal_content"] == mc
 
     async def test_aretrieve_not_initialized_raises(self, test_config):
         service = RAGService(config=test_config)
@@ -208,51 +188,30 @@ class TestRAGServiceRetrieve:
 
 
 class TestConversationHistoryTruncation:
-    """Test aanswer conversation history truncation logic."""
+    """Test aanswer delegates to RetrievalEngine (truncation now lives there)."""
 
-    def _make_answer_service(self, config: DlightragConfig) -> RAGService:
+    def _make_retrieval_service(self, config: DlightragConfig) -> RAGService:
         service = RAGService(config=config)
         service._initialized = True
-        service.enable_rerank = False
-
-        rag = MagicMock()
-        rag.aquery_llm_with_multimodal = AsyncMock(return_value=MagicMock())
-        rag.lightrag = MagicMock()
-
-        service.rag_text = rag
-        service.rag_vision = rag
+        service.retrieval = MagicMock()
+        service.retrieval.aretrieve = AsyncMock(return_value=MagicMock())
+        service.retrieval.aanswer = AsyncMock(return_value=MagicMock())
+        service.rag = MagicMock()
         service.ingestion = MagicMock()
         return service
 
-    @patch(
-        "dlightrag.service.augment_retrieval_result",
-        new_callable=AsyncMock,
-        return_value=MagicMock(),
-    )
-    async def test_history_truncated_by_turns(self, mock_augment, test_config):
-        """History exceeding max_conversation_turns*2 is truncated from front."""
-        test_config.max_conversation_turns = 2  # max 4 messages
-        service = self._make_answer_service(test_config)
+    async def test_aanswer_delegates_to_retrieval(self, test_config):
+        service = self._make_retrieval_service(test_config)
+        await service.aanswer("query", conversation_history=[{"role": "user", "content": "hi"}])
+        service.retrieval.aanswer.assert_awaited_once()
+        call_kwargs = service.retrieval.aanswer.call_args.kwargs
+        assert "conversation_history" in call_kwargs
 
-        history = [{"role": "user", "content": f"msg{i}"} for i in range(10)]
-        await service.aanswer("query", conversation_history=history)
-
-        call_kwargs = service.rag_text.aquery_llm_with_multimodal.call_args.kwargs
-        passed_history = call_kwargs.get("conversation_history", [])
-        assert len(passed_history) <= 4
-
-    @patch(
-        "dlightrag.service.augment_retrieval_result",
-        new_callable=AsyncMock,
-        return_value=MagicMock(),
-    )
-    async def test_none_history_passes_through(self, mock_augment, test_config):
-        """None history does not add conversation_history kwarg."""
-        service = self._make_answer_service(test_config)
+    async def test_aanswer_none_history_delegates(self, test_config):
+        """None history is passed through to retrieval engine."""
+        service = self._make_retrieval_service(test_config)
         await service.aanswer("query", conversation_history=None)
-
-        call_kwargs = service.rag_text.aquery_llm_with_multimodal.call_args.kwargs
-        assert "conversation_history" not in call_kwargs
+        service.retrieval.aanswer.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
