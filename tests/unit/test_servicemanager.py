@@ -161,9 +161,7 @@ class TestRouting:
 
     @patch("dlightrag.core.servicemanager.federated_answer", new_callable=AsyncMock)
     @patch("dlightrag.core.servicemanager.RAGService.create", new_callable=AsyncMock)
-    async def test_aanswer_multi_workspace_federates(
-        self, mock_create, mock_fed, test_cfg
-    ) -> None:
+    async def test_aanswer_multi_workspace_federates(self, mock_create, mock_fed, test_cfg) -> None:
         mock_fed.return_value = MagicMock()
         manager = RAGServiceManager(config=test_cfg)
         await manager.aanswer("query", workspaces=["ws-a", "ws-b"])

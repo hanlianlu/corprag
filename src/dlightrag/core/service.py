@@ -235,7 +235,9 @@ class RAGService:
             try:
                 await conn.execute(sql)
             except Exception as e:
-                logger.warning(f"Extension setup skipped (may need superuser): {sql[:50]}... -- {e}")
+                logger.warning(
+                    f"Extension setup skipped (may need superuser): {sql[:50]}... -- {e}"
+                )
 
         # Verify extensions are actually available (regardless of who installed them)
         installed = {r["extname"] for r in await conn.fetch("SELECT extname FROM pg_extension")}
