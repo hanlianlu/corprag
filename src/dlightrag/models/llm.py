@@ -19,7 +19,6 @@ from collections.abc import Awaitable, Callable
 from functools import partial
 from typing import Any
 
-import numpy as np
 from lightrag.utils import EmbeddingFunc
 
 from dlightrag.config import DlightragConfig

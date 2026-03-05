@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
-import pytest
-
 from functools import partial
+
+import pytest
 
 from dlightrag.config import DlightragConfig
 from dlightrag.models.llm import _ensure_bytes, get_ingestion_llm_model_func, get_llm_model_func
