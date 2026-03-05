@@ -556,7 +556,7 @@ def _build_google_vision_func(
 
 
 def get_embedding_func(config: DlightragConfig | None = None) -> EmbeddingFunc:
-    """Get embedding function for RAGAnything.
+    """Get embedding function using LightRAG native embed functions.
 
     Dispatches based on effective_embedding_provider.
     """
@@ -564,41 +564,28 @@ def get_embedding_func(config: DlightragConfig | None = None) -> EmbeddingFunc:
 
     cfg = config or get_config()
     emb_provider = cfg.effective_embedding_provider
+    api_key = cfg._get_provider_api_key(emb_provider)
+    base_url = cfg._get_url(f"{emb_provider}_base_url")
 
     if emb_provider == "google_gemini":
-        from langchain_google_genai import GoogleGenerativeAIEmbeddings
-
-        embeddings = GoogleGenerativeAIEmbeddings(  # type: ignore[call-arg]
-            model=cfg.embedding_model,
-            google_api_key=cfg.google_gemini_api_key,
-        )
+        from lightrag.llm.gemini import gemini_embed
+        raw_fn = partial(gemini_embed.func, model=cfg.embedding_model, api_key=api_key)
+    elif emb_provider == "ollama":
+        from lightrag.llm.ollama import ollama_embed
+        host = (cfg.ollama_base_url or "http://localhost:11434").removesuffix("/v1")
+        raw_fn = partial(ollama_embed.func, embed_model=cfg.embedding_model, host=host)
     else:
-        # All OpenAI-compatible providers
-        from langchain_openai import OpenAIEmbeddings
-
-        api_key = cfg._get_provider_api_key(emb_provider)
-        base_url = cfg._get_url(f"{emb_provider}_base_url")
-
-        embeddings = OpenAIEmbeddings(  # type: ignore[call-arg]
-            model=cfg.embedding_model,
-            api_key=SecretStr(api_key),
-            base_url=base_url,
-            dimensions=cfg.embedding_dim,
-            check_embedding_ctx_length=emb_provider not in ("ollama", "xinference"),
+        # OpenAI-compatible: openai, qwen, minimax, xinference, openrouter, azure_openai
+        from lightrag.llm.openai import openai_embed
+        raw_fn = partial(
+            openai_embed.func, model=cfg.embedding_model,
+            api_key=api_key, base_url=base_url,
         )
-
-    async def embed_func(texts: list[str]) -> np.ndarray:
-        try:
-            vectors = await embeddings.aembed_documents(texts)
-            return np.asarray(vectors, dtype=np.float32)
-        except Exception:
-            logger.exception("Embedding call failed")
-            return np.array([])
 
     return EmbeddingFunc(
         embedding_dim=cfg.embedding_dim,
         max_token_size=8192,
-        func=embed_func,
+        func=raw_fn,
         model_name=cfg.embedding_model,
     )
 

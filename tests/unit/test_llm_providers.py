@@ -143,22 +143,27 @@ class TestGetVisionModelFunc:
 class TestGetEmbeddingFunc:
     """Test embedding factory dispatching."""
 
+    def _make_config(self, **overrides) -> DlightragConfig:
+        defaults = {
+            "openai_api_key": "test-key",
+            "llm_provider": "openai",
+        }
+        defaults.update(overrides)
+        return DlightragConfig(**defaults)  # type: ignore[call-arg]
+
     def test_openai_embedding(self) -> None:
         from dlightrag.models.llm import get_embedding_func
 
-        config = DlightragConfig(  # type: ignore[call-arg]
-            llm_provider="openai",
-            openai_api_key="test-key",
-        )
+        config = self._make_config()
         func = get_embedding_func(config)
         assert func is not None
         assert func.embedding_dim == 1024
+        assert isinstance(func.func, partial)
 
     def test_explicit_embedding_provider(self) -> None:
-        """Test explicit embedding_provider uses its own credentials."""
         from dlightrag.models.llm import get_embedding_func
 
-        config = DlightragConfig(  # type: ignore[call-arg]
+        config = self._make_config(
             llm_provider="anthropic",
             anthropic_api_key="ant-key",
             embedding_provider="openai",
@@ -167,6 +172,7 @@ class TestGetEmbeddingFunc:
         func = get_embedding_func(config)
         assert func is not None
         assert func.embedding_dim == 1024
+        assert isinstance(func.func, partial)
 
 
 class TestConvertOpenaiToAnthropicMessages:
