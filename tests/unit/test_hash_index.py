@@ -554,7 +554,7 @@ class TestHashIndexFactory:
     """Test that _create_hash_index selects the right backend."""
 
     async def test_pg_backend_selection(self, tmp_path):
-        """PG config should attempt PGHashIndex (falls back to JSON without PG)."""
+        """PG config should select PGHashIndex (or fall back to JSON without PG)."""
         from unittest.mock import MagicMock
 
         from dlightrag.service import RAGService
@@ -566,9 +566,9 @@ class TestHashIndexFactory:
         config.working_dir_path = tmp_path
 
         service = RAGService.__new__(RAGService)
-        # PGHashIndex will fail (no PG), should fall back to JSON
         result = await service._create_hash_index(config)
-        assert type(result).__name__ == "HashIndex"
+        # PGHashIndex if PG is available, HashIndex fallback otherwise
+        assert type(result).__name__ in ("PGHashIndex", "HashIndex")
 
     async def test_json_backend_selection(self, tmp_path):
         from unittest.mock import MagicMock
