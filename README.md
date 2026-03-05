@@ -124,7 +124,7 @@ Example MCP client configuration (works with Claude Desktop, VS Code, Cursor, or
 }
 ```
 
-Available MCP tools: `retrieve`, `answer`, `ingest`, `list_files`, `delete_files`, `list_workspaces`.
+Available MCP tools: `retrieve`, `answer`, `ingest`, `list_files`, `delete_files`, `list_workspaces`. All tools support workspace isolation — `ingest`/`list_files`/`delete_files` accept optional `workspace`, while `retrieve`/`answer` accept optional `workspaces` list for cross-workspace federated search.
 
 > **Note:** Like the SDK, the MCP server requires PostgreSQL with pgvector + AGE, or JSON fallback storage (see [Configuration](#configuration)). Use `--env-file` to point to your `.env` with `DLIGHTRAG_*` variables (API keys, database, etc.).
 
@@ -218,13 +218,27 @@ See [.env.example](.env.example) for all available configuration options.
 
 ### Workspaces
 
-Workspaces provide data isolation within the same storage backend. Each workspace has its own knowledge graph, vector store, and document index.
+Workspaces provide data isolation — each workspace has its own knowledge graph, vector store, and document index. Isolation works across all storage backend combinations:
+
+| Backend type | Isolation mechanism |
+|---|---|
+| PostgreSQL (PG*) | `workspace` column / graph name in same database |
+| Neo4j / Memgraph | Label prefix via `NEO4J_WORKSPACE` / `MEMGRAPH_WORKSPACE` env var |
+| Milvus / Qdrant | Collection prefix via LightRAG constructor `workspace` param |
+| MongoDB / Redis | Collection scope via `MONGODB_WORKSPACE` / `REDIS_WORKSPACE` env var |
+| JSON / Nano / NetworkX / Faiss | Subdirectory under `working_dir/<workspace>/` |
 
 | Variable | Default | Description |
 |---|---|---|
 | `DLIGHTRAG_WORKSPACE` | `default` | Default workspace name |
 
-All API/MCP endpoints accept an optional `workspace` (for write operations) or `workspaces` (for retrieval) parameter. When omitted, the default workspace is used.
+DlightRAG automatically bridges `DLIGHTRAG_WORKSPACE` to the backend-specific env var (e.g. `POSTGRES_WORKSPACE`, `NEO4J_WORKSPACE`) and passes it via LightRAG's constructor — no manual env var setup needed.
+
+**Usage in endpoints:**
+- Write operations (`/ingest`, `/files` DELETE) accept an optional `workspace` parameter
+- Read operations (`/retrieve`, `/answer`) accept an optional `workspaces` list for cross-workspace federated search (round-robin result merging)
+- `GET /workspaces` discovers available workspaces (PG: queries database, filesystem backends: scans `working_dir` subdirectories)
+- When omitted, the default workspace is used
 
 ### Reranking
 
