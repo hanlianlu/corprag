@@ -701,10 +701,147 @@ class RedisHashIndex:
         return synced
 
 
+class MongoHashIndex:
+    """MongoDB-backed content hash index for deduplication.
+
+    Multi-worker safe — uses MongoDB atomic operations.
+    Requires: motor package (installed with LightRAG MongoKVStorage).
+    """
+
+    COLLECTION = "dlightrag_file_hashes"
+
+    def __init__(self, workspace: str = "default", sources_dir: Path | None = None) -> None:
+        self._workspace = workspace
+        self._sources_dir = sources_dir
+        self._collection: Any = None
+        self._db: Any = None
+
+    async def initialize(self) -> None:
+        """Connect to MongoDB using LightRAG's shared client."""
+        from lightrag.kg.mongo_impl import ClientManager
+
+        self._db = await ClientManager.get_client()
+        self._collection = self._db[self.COLLECTION]
+        # Ensure index on workspace for efficient queries
+        await self._collection.create_index("workspace")
+
+    def check_exists(self, content_hash: str) -> tuple[bool, str | None]:
+        return (False, None)  # Sync context fallback
+
+    async def _async_check_exists(self, content_hash: str) -> tuple[bool, str | None]:
+        doc = await self._collection.find_one({"_id": content_hash, "workspace": self._workspace})
+        if doc:
+            return (True, doc.get("doc_id"))
+        return (False, None)
+
+    async def register(self, content_hash: str, doc_id: str, file_path: str) -> None:
+        await self._collection.update_one(
+            {"_id": content_hash},
+            {
+                "$set": {
+                    "doc_id": doc_id,
+                    "file_path": file_path,
+                    "workspace": self._workspace,
+                    "created_at": datetime.now(UTC).isoformat(),
+                }
+            },
+            upsert=True,
+        )
+
+    async def remove(self, content_hash: str) -> bool:
+        result = await self._collection.delete_one(
+            {"_id": content_hash, "workspace": self._workspace}
+        )
+        return result.deleted_count > 0
+
+    async def clear(self) -> None:
+        """Remove all hash entries for this workspace."""
+        await self._collection.delete_many({"workspace": self._workspace})
+        logger.info("MongoHashIndex cleared for workspace %s", self._workspace)
+
+    async def should_skip_file(
+        self, file_path: Path, replace: bool
+    ) -> tuple[bool, str | None, str | None]:
+        content_hash = await asyncio.to_thread(compute_file_hash, file_path)
+        if replace:
+            return (False, content_hash, None)
+        exists, doc_id = await self._async_check_exists(content_hash)
+        if exists:
+            logger.info(f"Skipping duplicate: {file_path.name} (hash matches doc_id={doc_id})")
+            return (True, content_hash, f"Duplicate of {doc_id}")
+        return (False, content_hash, None)
+
+    @staticmethod
+    def generate_doc_id_from_path(file_path: Path) -> str:
+        return file_path.stem
+
+    def invalidate(self) -> None:
+        pass
+
+    def find_by_name(self, filename: str) -> tuple[str | None, str | None, str | None]:
+        return (None, None, None)
+
+    def find_by_path(self, file_path: str) -> tuple[str | None, str | None, str | None]:
+        return (None, None, None)
+
+    async def list_all(self) -> list[dict[str, Any]]:
+        cursor = self._collection.find({"workspace": self._workspace})
+        results = []
+        async for doc in cursor:
+            fp = doc.get("file_path", "")
+            source_type = "unknown"
+            path_parts = Path(fp).parts
+            sources_idx = next((i for i, p in enumerate(path_parts) if p == "sources"), -1)
+            if sources_idx >= 0 and len(path_parts) > sources_idx + 1:
+                source_type = path_parts[sources_idx + 1]
+            results.append(
+                {
+                    "file_path": fp,
+                    "doc_id": doc.get("doc_id", ""),
+                    "source_type": source_type,
+                    "file_name": Path(fp).name,
+                    "content_hash": doc["_id"],
+                    "created_at": doc.get("created_at", ""),
+                }
+            )
+        return results
+
+    async def sync_existing(self) -> int:
+        if not self._sources_dir or not self._sources_dir.exists():
+            return 0
+        existing_docs = await self.list_all()
+        existing_hashes = {d["content_hash"] for d in existing_docs}
+        existing_paths = {d["file_path"] for d in existing_docs}
+        synced = 0
+        for fp in self._sources_dir.rglob("*"):
+            if fp.is_dir() or fp.name.startswith("."):
+                continue
+            if fp.suffix.lower() not in SUPPORTED_EXTENSIONS:
+                continue
+            if str(fp) in existing_paths:
+                continue
+            try:
+                h = await asyncio.to_thread(compute_file_hash, fp)
+            except Exception as exc:
+                logger.warning(f"Failed to hash {fp}: {exc}")
+                continue
+            if h in existing_hashes:
+                continue
+            doc_id = self.generate_doc_id_from_path(fp)
+            await self.register(h, doc_id, str(fp))
+            existing_hashes.add(h)
+            existing_paths.add(str(fp))
+            synced += 1
+        if synced:
+            logger.info(f"Synced {synced} hashes from sources directory")
+        return synced
+
+
 __all__ = [
     "HashIndex",
     "PGHashIndex",
     "RedisHashIndex",
+    "MongoHashIndex",
     "compute_file_hash",
     "SUPPORTED_EXTENSIONS",
 ]

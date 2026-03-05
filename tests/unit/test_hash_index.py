@@ -441,3 +441,110 @@ class TestRedisHashIndex:
         entries = await redis_index.list_all()
         assert len(entries) == 1
         assert entries[0]["doc_id"] == "doc-001"
+
+
+class FakeDeleteResult:
+    def __init__(self, count: int):
+        self.deleted_count = count
+
+
+class FakeMongoCollection:
+    """Minimal async MongoDB collection mock."""
+
+    def __init__(self):
+        self._docs: dict[str, dict] = {}
+
+    async def find_one(self, filter: dict) -> dict | None:
+        _id = filter.get("_id")
+        workspace = filter.get("workspace")
+        doc = self._docs.get(_id)
+        if doc and doc.get("workspace") == workspace:
+            return doc
+        return None
+
+    async def update_one(self, filter: dict, update: dict, upsert: bool = False):
+        _id = filter["_id"]
+        if _id in self._docs:
+            self._docs[_id].update(update.get("$set", {}))
+        elif upsert:
+            self._docs[_id] = {"_id": _id, **update.get("$set", {})}
+
+    async def delete_one(self, filter: dict) -> FakeDeleteResult:
+        _id = filter.get("_id")
+        workspace = filter.get("workspace")
+        doc = self._docs.get(_id)
+        if doc and doc.get("workspace") == workspace:
+            del self._docs[_id]
+            return FakeDeleteResult(1)
+        return FakeDeleteResult(0)
+
+    async def delete_many(self, filter: dict) -> FakeDeleteResult:
+        workspace = filter.get("workspace")
+        to_del = [k for k, v in self._docs.items() if v.get("workspace") == workspace]
+        for k in to_del:
+            del self._docs[k]
+        return FakeDeleteResult(len(to_del))
+
+    def find(self, filter: dict):
+        workspace = filter.get("workspace")
+        docs = [v for v in self._docs.values() if v.get("workspace") == workspace]
+        return FakeAsyncCursor(docs)
+
+    async def create_index(self, field: str):
+        pass
+
+
+class FakeAsyncCursor:
+    def __init__(self, docs: list):
+        self._docs = docs
+        self._idx = 0
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._idx >= len(self._docs):
+            raise StopAsyncIteration
+        doc = self._docs[self._idx]
+        self._idx += 1
+        return doc
+
+
+class TestMongoHashIndex:
+    """Tests for MongoHashIndex using a mock collection."""
+
+    @pytest.fixture
+    def mongo_index(self):
+        from dlightrag.ingestion.hash_index import MongoHashIndex
+
+        idx = MongoHashIndex(workspace="test", sources_dir=None)
+        idx._collection = FakeMongoCollection()
+        return idx
+
+    async def test_register_and_check_exists(self, mongo_index):
+        await mongo_index.register("sha256:aaa", "doc-001", "/path/a.pdf")
+        exists, doc_id = await mongo_index._async_check_exists("sha256:aaa")
+        assert exists is True
+        assert doc_id == "doc-001"
+
+    async def test_check_exists_missing(self, mongo_index):
+        exists, doc_id = await mongo_index._async_check_exists("sha256:missing")
+        assert exists is False
+
+    async def test_remove(self, mongo_index):
+        await mongo_index.register("sha256:aaa", "doc-001", "/path/a.pdf")
+        removed = await mongo_index.remove("sha256:aaa")
+        assert removed is True
+
+    async def test_clear(self, mongo_index):
+        await mongo_index.register("sha256:aaa", "doc-001", "/a.pdf")
+        await mongo_index.register("sha256:bbb", "doc-002", "/b.pdf")
+        await mongo_index.clear()
+        entries = await mongo_index.list_all()
+        assert len(entries) == 0
+
+    async def test_list_all(self, mongo_index):
+        await mongo_index.register("sha256:aaa", "doc-001", "/a.pdf")
+        entries = await mongo_index.list_all()
+        assert len(entries) == 1
+        assert entries[0]["doc_id"] == "doc-001"
