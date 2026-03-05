@@ -191,7 +191,9 @@ def _load_env() -> dict[str, str]:
         "user": env.get("DLIGHTRAG_POSTGRES_USER", "dlightrag"),
         "password": env.get("DLIGHTRAG_POSTGRES_PASSWORD", "dlightrag"),
         "database": env.get("DLIGHTRAG_POSTGRES_DATABASE", "dlightrag"),
-        "workspace": env.get("DLIGHTRAG_WORKSPACE", env.get("DLIGHTRAG_POSTGRES_WORKSPACE", "default")),
+        "workspace": env.get(
+            "DLIGHTRAG_WORKSPACE", env.get("DLIGHTRAG_POSTGRES_WORKSPACE", "default")
+        ),
         "working_dir": working_dir,
     }
 

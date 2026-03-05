@@ -25,7 +25,7 @@ from dlightrag.config import DlightragConfig
 
 logger = logging.getLogger(__name__)
 
-LLMFunc = Callable[..., Awaitable[str]]
+LLMFunc = Callable[..., Any]
 
 # OpenAI-compatible providers that can use ChatOpenAI with custom base_url
 _OPENAI_COMPATIBLE_PROVIDERS = {
@@ -63,7 +63,6 @@ def _ensure_bytes(data: bytes | bytearray | str) -> bytes | None:
 # ═══════════════════════════════════════════════════════════════════
 # Chat Model Factory
 # ═══════════════════════════════════════════════════════════════════
-
 
 
 def get_llm_model_func(
@@ -500,17 +499,22 @@ def get_embedding_func(config: DlightragConfig | None = None) -> EmbeddingFunc:
 
     if emb_provider == "google_gemini":
         from lightrag.llm.gemini import gemini_embed
+
         raw_fn = partial(gemini_embed.func, model=cfg.embedding_model, api_key=api_key)
     elif emb_provider == "ollama":
         from lightrag.llm.ollama import ollama_embed
+
         host = (cfg.ollama_base_url or "http://localhost:11434").removesuffix("/v1")
         raw_fn = partial(ollama_embed.func, embed_model=cfg.embedding_model, host=host)
     else:
         # OpenAI-compatible: openai, qwen, minimax, xinference, openrouter, azure_openai
         from lightrag.llm.openai import openai_embed
+
         raw_fn = partial(
-            openai_embed.func, model=cfg.embedding_model,
-            api_key=api_key, base_url=base_url,
+            openai_embed.func,
+            model=cfg.embedding_model,
+            api_key=api_key,
+            base_url=base_url,
         )
 
     return EmbeddingFunc(

@@ -203,9 +203,7 @@ class TestFederatedRetrieve:
         async def deny_all(requested: list[str]) -> list[str]:
             return []
 
-        result = await federated_retrieve(
-            "query", ["ws-a"], get_svc, workspace_filter=deny_all
-        )
+        result = await federated_retrieve("query", ["ws-a"], get_svc, workspace_filter=deny_all)
 
         svc.aretrieve.assert_not_awaited()
         assert result.contexts["chunks"] == []
@@ -226,9 +224,7 @@ class TestFederatedAnswer:
     @pytest.mark.asyncio
     async def test_single_workspace_uses_aanswer(self) -> None:
         mock_svc = AsyncMock()
-        mock_svc.aanswer.return_value = _make_result(
-            chunks=[{"id": "c1"}], answer="The answer"
-        )
+        mock_svc.aanswer.return_value = _make_result(chunks=[{"id": "c1"}], answer="The answer")
 
         async def get_svc(ws: str):
             return mock_svc

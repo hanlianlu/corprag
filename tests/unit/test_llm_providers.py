@@ -75,9 +75,7 @@ class TestGetLlmModelFunc:
         assert func.keywords.get("host", "").endswith("/v1") is False
 
     def test_openrouter_returns_openai_partial(self) -> None:
-        config = self._make_config(
-            llm_provider="openrouter", openrouter_api_key="sk-or-key"
-        )
+        config = self._make_config(llm_provider="openrouter", openrouter_api_key="sk-or-key")
         func = get_llm_model_func(config)
         assert isinstance(func, partial)
         assert func.func.__module__ == "lightrag.llm.openai"
@@ -89,9 +87,7 @@ class TestGetLlmModelFunc:
         assert func.func.__module__ == "lightrag.llm.openai"
 
     def test_anthropic_returns_anthropic_partial(self) -> None:
-        config = self._make_config(
-            llm_provider="anthropic", anthropic_api_key="ant-key"
-        )
+        config = self._make_config(llm_provider="anthropic", anthropic_api_key="ant-key")
         try:
             func = get_llm_model_func(config)
         except ModuleNotFoundError:
@@ -100,9 +96,7 @@ class TestGetLlmModelFunc:
         assert func.func.__module__ == "lightrag.llm.anthropic"
 
     def test_google_gemini_returns_gemini_partial(self) -> None:
-        config = self._make_config(
-            llm_provider="google_gemini", google_gemini_api_key="google-key"
-        )
+        config = self._make_config(llm_provider="google_gemini", google_gemini_api_key="google-key")
         func = get_llm_model_func(config)
         assert isinstance(func, partial)
         assert func.func.__module__ == "lightrag.llm.gemini"
