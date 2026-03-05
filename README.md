@@ -3,7 +3,7 @@
 [![PyPI](https://img.shields.io/pypi/v/dlightrag)](https://pypi.org/project/dlightrag/)
 [![CI](https://github.com/hanlianlu/dlightrag/actions/workflows/ci.yml/badge.svg)](https://github.com/hanlianlu/dlightrag/actions/workflows/ci.yml)
 
-Dual mode (Caption based & Unified representation based) RAG built upon [LightRAG](https://github.com/HKUDS/LightRAG) with additional enhancements as the unified service.
+Multimodal RAG package built upon [LightRAG](https://github.com/HKUDS/LightRAG) with additional enhancements as the production ready unified service.
 
 ## Features
 
@@ -12,7 +12,9 @@ Dual mode (Caption based & Unified representation based) RAG built upon [LightRA
 - 🤖 **Multi-provider LLM** -- OpenAI, Azure OpenAI, Anthropic, Google Gemini, Qwen, MiniMax, Ollama, OpenRouter, xInference
 - 🔭 **Knowledge graph + Vector semantic** -- Retrieval with Apache AGE (graph) and pgvector (vector) in a single PostgreSQL instance
 - ↕️ **Reranking** -- LLM-based listwise OR Reranker from Cohere, Jina, Aliyun, Azure Cohere; Point any backend at a custom endpoint (Xinference, Ollama etc.)
-- ✨ **Retrieval enrichment** -- Enhanced answer and retrieval formation for better citation and reference.
+- ✨ **Retrieval enrichment** -- Enhanced answer and retrieval formation for better citation and reference
+- 🔗 **Cross-workspace federation** -- Query across multiple workspaces in a single request with round-robin result merging and RBAC-ready interface
+- 🔍 **Content-aware deduplication** -- Files are hashed by content, preventing duplicate ingestion when only metadata changes
 - 🔌 **Three interfaces** -- Python SDK, REST API, and MCP server
 
 ## Quick Start
@@ -70,20 +72,33 @@ Everything is included: PostgreSQL (pgvector + AGE), REST API (`:8100`), and MCP
 # Health check
 curl http://localhost:8100/health
 
-# Ingest documents
+# Ingest documents (into default workspace)
 curl -X POST http://localhost:8100/ingest \
   -H "Content-Type: application/json" \
   -d '{"source_type": "local", "path": "/app/dlightrag_storage/sources"}'
+
+# Ingest into a specific workspace
+curl -X POST http://localhost:8100/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"source_type": "local", "path": "/data/project-a", "workspace": "project-a"}'
 
 # Retrieve (contexts + sources, no LLM answer)
 curl -X POST http://localhost:8100/retrieve \
   -H "Content-Type: application/json" \
   -d '{"query": "What are the key findings?"}'
 
+# Cross-workspace retrieval
+curl -X POST http://localhost:8100/retrieve \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What are the key findings?", "workspaces": ["project-a", "project-b"]}'
+
 # Answer (LLM-generated answer + contexts + sources)
 curl -X POST http://localhost:8100/answer \
   -H "Content-Type: application/json" \
   -d '{"query": "What are the key findings?"}'
+
+# List available workspaces
+curl http://localhost:8100/workspaces
 ```
 
 
@@ -109,7 +124,7 @@ Example MCP client configuration (works with Claude Desktop, VS Code, Cursor, or
 }
 ```
 
-Available MCP tools: `retrieve`, `answer`, `ingest`, `list_files`, `delete_files`.
+Available MCP tools: `retrieve`, `answer`, `ingest`, `list_files`, `delete_files`, `list_workspaces`.
 
 > **Note:** Like the SDK, the MCP server requires PostgreSQL with pgvector + AGE, or JSON fallback storage (see [Configuration](#configuration)). Use `--env-file` to point to your `.env` with `DLIGHTRAG_*` variables (API keys, database, etc.).
 
@@ -132,7 +147,7 @@ uv sync
 docker compose up postgres -d        # via Docker
 
 # starts all services including PostgreSQL, API, and MCP
-docker compose up  -d  
+docker compose up  -d
 ```
 
 
@@ -152,8 +167,8 @@ uv run pytest --cov-report=html             # + HTML report → htmlcov/index.ht
 uv run ruff check src/ tests/ scripts/              # lint check
 uv run ruff format --check src/ tests/ scripts/     # format check
 
-uv run ruff check --fix src/ tests/ scripts/        
-uv run ruff format src/ tests/ scripts/             
+uv run ruff check --fix src/ tests/ scripts/
+uv run ruff format src/ tests/ scripts/
 ```
 
 > **Tip:** To skip PostgreSQL entirely during development, set these in your `.env`:
@@ -201,6 +216,16 @@ See [.env.example](.env.example) for all provider-specific variables.
 
 See [.env.example](.env.example) for all available configuration options.
 
+### Workspaces
+
+Workspaces provide data isolation within the same storage backend. Each workspace has its own knowledge graph, vector store, and document index.
+
+| Variable | Default | Description |
+|---|---|---|
+| `DLIGHTRAG_WORKSPACE` | `default` | Default workspace name |
+
+All API/MCP endpoints accept an optional `workspace` (for write operations) or `workspaces` (for retrieval) parameter. When omitted, the default workspace is used.
+
 ### Reranking
 
 Five backends are available. The `cohere`, `jina`, and `aliyun` backends use LightRAG's built-in rerank functions and can target any API-compatible service via `RERANK_BASE_URL`.
@@ -245,12 +270,13 @@ See [.env.example](.env.example) for all reranking options.
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/ingest` | Ingest documents from local, Azure Blob, or Snowflake |
-| `POST` | `/retrieve` | Retrieve contexts and sources (no LLM answer) |
-| `POST` | `/answer` | LLM-generated answer with contexts and sources |
-| `GET` | `/files` | List ingested documents |
-| `DELETE` | `/files` | Delete documents |
-| `GET` | `/health` | Health check with storage status |
+| `POST` | `/ingest` | Ingest documents from local, Azure Blob, or Snowflake. Optional `workspace` param. |
+| `POST` | `/retrieve` | Retrieve contexts and sources (no LLM answer). Optional `workspaces` list for cross-workspace search. |
+| `POST` | `/answer` | LLM-generated answer with contexts and sources. Optional `workspaces` list for cross-workspace search. |
+| `GET` | `/files` | List ingested documents. Optional `?workspace=` query param. |
+| `DELETE` | `/files` | Delete documents. Optional `workspace` param. |
+| `GET` | `/workspaces` | List all available workspaces. |
+| `GET` | `/health` | Health check with storage status. |
 
 Set `DLIGHTRAG_API_AUTH_TOKEN` to enable bearer token authentication.
 
@@ -261,9 +287,14 @@ Set `DLIGHTRAG_API_AUTH_TOKEN` to enable bearer token authentication.
 ┌──────────────────────────────────────────────────────┐
 │   Python SDK  ·  REST API (:8100)  ·  MCP (:8101)    │
 └─────────────────────────┬────────────────────────────┘
-                          │  DlightragConfig
+                          │  workspace(s) param
+               ┌──────────▼──────────┐
+               │   WorkspacePool     │  lazy per-workspace RAGService cache
+               │   + Federation      │  round-robin merge for multi-workspace
+               └──────────┬──────────┘
+                          │
                  ┌────────▼────────┐
-                 │   RAGService    │
+                 │   RAGService    │  one instance per workspace
                  └────┬───────┬────┘
                       │       │
           ┌───────────▼─┐  ┌──▼─────────────┐
