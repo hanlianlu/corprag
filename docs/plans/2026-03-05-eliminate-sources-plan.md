@@ -95,7 +95,7 @@ def derive_source_type(file_path: str) -> str:
     if idx >= 0 and len(parts) > idx + 1:
         return parts[idx + 1]
     # Default for local absolute/relative paths
-    if file_path.startswith("/") or file_path.startswith(".") or not "://" in file_path:
+    if file_path.startswith("/") or file_path.startswith(".") or "://" not in file_path:
         return "local"
     return "unknown"
 ```
@@ -103,7 +103,7 @@ def derive_source_type(file_path: str) -> str:
 Add it to `__all__` at the end of the file.
 
 Now update all four `list_all()` methods in HashIndex, PGHashIndex, RedisHashIndex, MongoHashIndex:
-Replace the inline source_type derivation block with `source_type = derive_source_type(file_path)` (or `derive_source_type(fp)`).
+Replace the inline source_type derivation block (the 5-line `source_type = "unknown" ... sources_idx ...` pattern) with a single call: `source_type = derive_source_type(file_path)` (or `derive_source_type(fp)`).
 
 In `src/dlightrag/config.py`, add after `sources_dir` property (line 307):
 
@@ -131,73 +131,121 @@ git commit -m "feat: add derive_source_type helper and temp_dir config property"
 
 ---
 
-### Task 2: Drop `sources_dir` from all HashIndex backends
+### Task 2: Delete `sources_dir`, `sync_existing`, and `sync_hashes` from entire chain
 
-Remove `sources_dir` parameter from all 4 HashIndex backends. Make `sync_existing()` a no-op (returns 0 with a deprecation log). Update callers in `service.py` and `pipeline.py`.
+Cleanly remove the entire `sync_existing` → `sync_hashes` → `sources_dir` chain. These have zero value without a `sources/` directory.
 
-**Files:**
-- Modify: `src/dlightrag/ingestion/hash_index.py` (all backends)
-- Modify: `src/dlightrag/service.py:389-439`
-- Modify: `src/dlightrag/ingestion/pipeline.py:96-100`
-- Test: `tests/unit/test_hash_index.py`
-- Test: `tests/unit/test_pipeline.py`
-
-**Step 1: Write the failing tests**
-
-In `tests/unit/test_hash_index.py`, update the existing `TestHashIndex` fixture and add a new test:
-
-```python
-def test_sync_existing_noop(self, hash_index):
-    """sync_existing is a no-op after sources/ removal."""
-    import asyncio
-    result = asyncio.get_event_loop().run_until_complete(hash_index.sync_existing())
-    assert result == 0
+**The full chain to delete:**
+```
+api/server.py    sync_hashes field in IngestRequest
+    ↓
+service.py       sync_hashes kwarg passing
+    ↓
+pipeline.py      sync_hashes param in aingest_from_local / aingest_from_azure_blob
+    ↓
+hash_index.py    sync_existing() method in all 4 backends + sources_dir param
+    ↓
+cli.py           --sync-hashes flag
 ```
 
-Update the `TestHashIndexFactory` tests to remove `sources_dir` from factory calls.
+**Files:**
+- Modify: `src/dlightrag/ingestion/hash_index.py` (all 4 backends)
+- Modify: `src/dlightrag/ingestion/pipeline.py:96-100,366,387-388,529,548-549`
+- Modify: `src/dlightrag/service.py:389-439,477-478,495,506,536`
+- Modify: `src/dlightrag/api/server.py:89,131`
+- Modify: `scripts/cli.py:122,139,149,322`
+- Test: `tests/unit/test_hash_index.py`
+- Test: `tests/unit/test_pipeline.py`
+- Test: `tests/unit/test_cli.py:154`
+- Test: `tests/unit/test_api_server.py`
+
+**Step 1: Write tests that verify the clean removal**
+
+In `tests/unit/test_hash_index.py`, add:
+
+```python
+class TestSyncExistingRemoved:
+    """Verify sync_existing is fully removed from all backends."""
+
+    def test_json_hash_index_no_sync_existing(self, tmp_path):
+        index = HashIndex(tmp_path)
+        assert not hasattr(index, "sync_existing")
+
+    def test_json_hash_index_no_sources_dir(self, tmp_path):
+        """HashIndex constructor no longer accepts sources_dir."""
+        index = HashIndex(tmp_path)
+        assert not hasattr(index, "_sources_dir")
+```
+
+In `tests/unit/test_pipeline.py`, verify `sync_hashes` param is gone:
+
+```python
+class TestSyncHashesRemoved:
+    @pytest.mark.asyncio
+    async def test_aingest_from_local_no_sync_hashes_param(self, test_config):
+        """aingest_from_local no longer accepts sync_hashes."""
+        import inspect
+        pipeline = _make_pipeline(test_config)
+        sig = inspect.signature(pipeline.aingest_from_local)
+        assert "sync_hashes" not in sig.parameters
+```
 
 **Step 2: Run tests to verify they fail**
 
-Run: `python -m pytest tests/unit/test_hash_index.py -v -k "sync_existing_noop or factory"`
-Expected: May pass or fail depending on current state
+Run: `python -m pytest tests/unit/test_hash_index.py::TestSyncExistingRemoved -v`
+Expected: FAIL (sync_existing still exists)
 
 **Step 3: Implement**
 
-**HashIndex (JSON backend)** — `src/dlightrag/ingestion/hash_index.py:170`:
-- Change `__init__` signature from `(self, working_dir: Path, sources_dir: Path, workspace: str = "default")` to `(self, working_dir: Path, workspace: str = "default")`
-- Remove `self._sources_dir = sources_dir` (line 177)
-- Replace `sync_existing()` body (lines 272-302) with:
-  ```python
-  async def sync_existing(self) -> int:
-      """No-op — sources/ directory removed. Returns 0."""
-      return 0
-  ```
+**hash_index.py — all 4 backends:**
 
-**PGHashIndex** — `src/dlightrag/ingestion/hash_index.py:353`:
-- Remove `sources_dir: Path | None = None` from `__init__` params (line 356)
-- Remove `self._sources_dir = sources_dir` (line 361)
-- Replace `sync_existing()` body (lines 517-548) with `return 0`
+**HashIndex (JSON):**
+- Change `__init__` signature: `(self, working_dir: Path, sources_dir: Path, workspace: str = "default")` → `(self, working_dir: Path, workspace: str = "default")`
+- Delete `self._sources_dir = sources_dir` (line 177)
+- Delete entire `sync_existing()` method (lines 272-302)
 
-**RedisHashIndex** — `src/dlightrag/ingestion/hash_index.py:563`:
-- Remove `sources_dir: Path | None = None` from `__init__` params
-- Remove `self._sources_dir = sources_dir` (line 565)
-- Replace `sync_existing()` body (lines 681-712) with `return 0`
+**PGHashIndex:**
+- Remove `sources_dir: Path | None = None` from `__init__` (line 356)
+- Delete `self._sources_dir = sources_dir` (line 361)
+- Delete entire `sync_existing()` method (lines 517-548)
 
-**MongoHashIndex** — `src/dlightrag/ingestion/hash_index.py:724`:
-- Remove `sources_dir: Path | None = None` from `__init__` params
-- Remove `self._sources_dir = sources_dir` (line 726)
-- Replace `sync_existing()` body (lines 820-848) with `return 0`
+**RedisHashIndex:**
+- Remove `sources_dir: Path | None = None` from `__init__` (line 563)
+- Delete `self._sources_dir = sources_dir` (line 565)
+- Delete entire `sync_existing()` method (lines 681-712)
 
-**Update callers:**
+**MongoHashIndex:**
+- Remove `sources_dir: Path | None = None` from `__init__` (line 724)
+- Delete `self._sources_dir = sources_dir` (line 726)
+- Delete entire `sync_existing()` method (lines 820-848)
 
-`src/dlightrag/service.py` — `_create_hash_index()` (lines 389-439):
-- Line 401: Change `PGHashIndex(workspace=config.workspace, sources_dir=config.sources_dir)` → `PGHashIndex(workspace=config.workspace)`
-- Line 414: Change `RedisHashIndex(workspace=config.workspace, sources_dir=config.sources_dir)` → `RedisHashIndex(workspace=config.workspace)`
-- Line 427: Change `MongoHashIndex(workspace=config.workspace, sources_dir=config.sources_dir)` → `MongoHashIndex(workspace=config.workspace)`
-- Line 439: Change `HashIndex(config.working_dir_path, config.sources_dir, workspace=config.workspace)` → `HashIndex(config.working_dir_path, workspace=config.workspace)`
+**pipeline.py:**
+- `__init__` (line 97-100): Change `HashIndex(self.config.working_dir_path, self.config.sources_dir)` → `HashIndex(self.config.working_dir_path)`
+- `aingest_from_local()`: Remove `sync_hashes: bool = False` param (line 366), remove docstring line about sync_hashes (line 380), delete `if sync_hashes: await self._hash_index.sync_existing()` block (lines 387-388)
+- `aingest_from_azure_blob()`: Remove `sync_hashes: bool = False` param (line 529), remove docstring line (line 542), delete sync_hashes block (lines 548-549)
 
-`src/dlightrag/ingestion/pipeline.py` — `__init__` (lines 97-100):
-- Change `HashIndex(self.config.working_dir_path, self.config.sources_dir)` → `HashIndex(self.config.working_dir_path)`
+**service.py:**
+- `aingest()`: Remove `sync_hashes` from docstring (lines 477-478), delete `sync_hashes = bool(kwargs.get("sync_hashes", False))` (line 495), remove `sync_hashes=sync_hashes` from `aingest_from_local` call (line 506), remove from `aingest_from_azure_blob` call (line 536)
+- `_create_hash_index()` (lines 389-439):
+  - Line 401: `PGHashIndex(workspace=config.workspace, sources_dir=config.sources_dir)` → `PGHashIndex(workspace=config.workspace)`
+  - Line 414: `RedisHashIndex(workspace=config.workspace, sources_dir=config.sources_dir)` → `RedisHashIndex(workspace=config.workspace)`
+  - Line 427: `MongoHashIndex(workspace=config.workspace, sources_dir=config.sources_dir)` → `MongoHashIndex(workspace=config.workspace)`
+  - Line 439: `HashIndex(config.working_dir_path, config.sources_dir, workspace=config.workspace)` → `HashIndex(config.working_dir_path, workspace=config.workspace)`
+
+**api/server.py:**
+- Remove `sync_hashes: bool = False` from `IngestRequest` model (line 89)
+- Remove `kwargs["sync_hashes"] = body.sync_hashes` (line 131)
+
+**scripts/cli.py:**
+- Delete `--sync-hashes` argument definition (around line 322)
+- Remove `if args.sync_hashes:` block (line 122)
+- Remove `kwargs["sync_hashes"] = args.sync_hashes` lines (lines 139, 149)
+
+**Update tests:**
+- `tests/unit/test_cli.py`: Remove or update `test_snowflake_rejects_sync_hashes` (line 154) — the param no longer exists
+- `tests/unit/test_hash_index.py`: Remove any tests that reference `sync_existing` or `sources_dir` param. Update `HashIndex(...)` constructor calls to drop `sources_dir`.
+- `tests/unit/test_api_server.py`: Remove any `sync_hashes` references in request bodies
+- `tests/unit/test_pipeline.py`: Remove any `sync_hashes` references
 
 **Step 4: Run tests**
 
@@ -207,8 +255,8 @@ Expected: ALL PASS
 **Step 5: Commit**
 
 ```bash
-git add src/dlightrag/ingestion/hash_index.py src/dlightrag/service.py src/dlightrag/ingestion/pipeline.py tests/unit/
-git commit -m "refactor: drop sources_dir from all HashIndex backends"
+git add src/dlightrag/ingestion/hash_index.py src/dlightrag/ingestion/pipeline.py src/dlightrag/service.py src/dlightrag/api/server.py scripts/cli.py tests/unit/
+git commit -m "refactor: delete sync_existing, sources_dir, sync_hashes from entire chain"
 ```
 
 ---
@@ -236,7 +284,6 @@ class TestTempDirAndSourceUri:
         tmpdir = pipeline._create_temp_dir()
         assert tmpdir.exists()
         assert ".tmp" in tmpdir.parts
-        assert test_config.working_dir_path in tmpdir.parents or tmpdir.parent.parent == test_config.working_dir_path / ".tmp"
         # Cleanup
         import shutil
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -245,11 +292,10 @@ class TestTempDirAndSourceUri:
     async def test_source_uri_passed_to_insert_content_list(self, test_config):
         """source_uri (not parse_path) is passed to insert_content_list."""
         pipeline = _make_pipeline(test_config)
-        # Create a real temp file
         test_file = test_config.working_dir_path / "test.txt"
         test_file.write_text("hello")
 
-        result = await pipeline._ingest_single_file_with_policy(
+        await pipeline._ingest_single_file_with_policy(
             file_path=test_file,
             artifacts_dir=test_config.artifacts_dir,
             source_uri="/original/path/test.txt",
@@ -632,7 +678,7 @@ class TestDeleteFilesNoSourceCleanup:
         original.parent.mkdir(parents=True, exist_ok=True)
         original.write_text("original content")
 
-        # Mock hash_index to return this file's path
+        # Mock deletion context to simulate a found doc_id referencing the original
         pipeline._hash_index = MagicMock()
         # ... setup mock to simulate a found doc_id
 
