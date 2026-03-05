@@ -212,7 +212,10 @@ class TestCloseSharedRagService:
 
 @pytest.fixture(autouse=True)
 def _reset_ws_pool():
-    """Reset workspace pool state before and after each test."""
+    """Reset workspace pool state and set test config before each test."""
+    from dlightrag.config import DlightragConfig, set_config
+
+    set_config(DlightragConfig(openai_api_key="test"))  # type: ignore[call-arg]
     reset_workspace_pool()
     yield
     reset_workspace_pool()
