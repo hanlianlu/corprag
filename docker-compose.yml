@@ -53,7 +53,7 @@ services:
     environment:
       POSTGRES_DB: ${DLIGHTRAG_POSTGRES_DATABASE:-dlightrag}
       POSTGRES_USER: ${DLIGHTRAG_POSTGRES_USER:-dlightrag}
-      POSTGRES_PASSWORD: ${DLIGHTRAG_POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${DLIGHTRAG_POSTGRES_PASSWORD:-dlightrag}
     volumes:
       - pg_data:/var/lib/postgresql/data
     healthcheck:

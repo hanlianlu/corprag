@@ -286,7 +286,7 @@ class DlightragConfig(BaseSettings):
     # ===== MCP Server =====
     mcp_transport: Literal["stdio", "streamable-http"] = Field(default="stdio")
     mcp_host: str = Field(default="0.0.0.0")
-    mcp_port: int = Field(default=8100)
+    mcp_port: int = Field(default=8101)
 
     # ===== REST API Server =====
     api_host: str = Field(default="0.0.0.0")

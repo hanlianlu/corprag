@@ -37,7 +37,7 @@ async def main():
 
     # Ingest documents
     result = await service.aingest(source_type="local", path="./docs")
-    print(f"Ingested {result['ingested']} documents")
+    print(f"Ingested {result['processed']} documents")
 
     # Retrieve (structured contexts + sources, no LLM answer)
     result = await service.aretrieve(query="What are the key findings?")
@@ -195,7 +195,7 @@ All configuration is via `DLIGHTRAG_` environment variables, a `.env` file, or c
 
 | Variable | Default | Description |
 |---|---|---|
-| `DLIGHTRAG_LLM_PROVIDER` | `openai` | `openai`, `azure_openai`, `anthropic`, `google_gemini`, `qwen`, `minimax`, `ollama`, `openrouter` |
+| `DLIGHTRAG_LLM_PROVIDER` | `openai` | `openai`, `azure_openai`, `anthropic`, `google_gemini`, `qwen`, `minimax`, `ollama`, `xinference`, `openrouter` |
 | `DLIGHTRAG_EMBEDDING_PROVIDER` | (follows `llm_provider`) | Override embedding provider (e.g., `openai` when using Anthropic) |
 | `DLIGHTRAG_VISION_PROVIDER` | (follows `llm_provider`) | Override vision provider |
 | `DLIGHTRAG_EMBEDDING_MODEL` | `text-embedding-3-large` | Embedding model |
@@ -256,8 +256,8 @@ Five backends are available. The `cohere`, `jina`, and `aliyun` backends use Lig
 |---|---|---|
 | `llm` | (follows `INGESTION_MODEL`) | (follows `LLM_PROVIDER` credentials) |
 | `cohere` | `rerank-v4.0-pro` | `DLIGHTRAG_COHERE_API_KEY` |
-| `jina` | `jina-reranker-v2-base-multilingual` | `DLIGHTRAG_JINA_API_KEY` |
-| `aliyun` | `gte-rerank-v2` | `DLIGHTRAG_ALIYUN_RERANK_API_KEY` |
+| `jina` | `jina-reranker-v3` | `DLIGHTRAG_JINA_API_KEY` |
+| `aliyun` | `qwen3-rerank` | `DLIGHTRAG_ALIYUN_RERANK_API_KEY` |
 | `azure_cohere` | `Cohere-rerank-v4.0-pro` | `DLIGHTRAG_AZURE_COHERE_API_KEY` + `DLIGHTRAG_AZURE_COHERE_ENDPOINT` |
 
 **Examples:**

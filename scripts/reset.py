@@ -6,7 +6,8 @@ Works with any storage backend configured in DlightragConfig (PostgreSQL,
 NanoVector, Neo4J, Milvus, Redis, Mongo, JSON files, etc.).
 
 Usage:
-    uv run scripts/reset.py                      # reset all (with confirmation)
+    uv run scripts/reset.py                      # reset default workspace (with confirmation)
+    uv run scripts/reset.py --workspace project-a # reset specific workspace
     uv run scripts/reset.py --dry-run             # preview what would be dropped
     uv run scripts/reset.py --keep-files          # drop storages, keep local files
     uv run scripts/reset.py -y                    # skip confirmation prompt
@@ -120,11 +121,15 @@ def _reset_local(working_dir: Path, *, dry_run: bool) -> tuple[int, int]:
 # ── orchestrator ─────────────────────────────────────────────────
 
 
-async def reset_all(*, do_local: bool = True, dry_run: bool = False) -> dict[str, int]:
+async def reset_all(
+    *, workspace: str | None = None, do_local: bool = True, dry_run: bool = False
+) -> dict[str, int]:
     from dlightrag.config import get_config
     from dlightrag.service import RAGService
 
     config = get_config()
+    if workspace:
+        config = config.model_copy(update={"workspace": workspace})
 
     # Show backend info
     print("\nStorage backends (from config):")
@@ -138,7 +143,7 @@ async def reset_all(*, do_local: bool = True, dry_run: bool = False) -> dict[str
 
     # Initialize service to get LightRAG with correct backends
     print("\nInitializing RAGService...")
-    service = await RAGService.create()
+    service = await RAGService.create(config=config)
 
     try:
         # Get the LightRAG instance
@@ -191,6 +196,11 @@ def main() -> int:
         action="store_true",
         help="Drop storages but keep local files",
     )
+    parser.add_argument(
+        "--workspace",
+        default=None,
+        help="Target workspace to reset (default: from config)",
+    )
 
     args = parser.parse_args()
 
@@ -213,7 +223,9 @@ def main() -> int:
             print("\nCancelled.")
             return 1
 
-    stats = asyncio.run(reset_all(do_local=do_local, dry_run=args.dry_run))
+    stats = asyncio.run(
+        reset_all(workspace=args.workspace, do_local=do_local, dry_run=args.dry_run)
+    )
 
     print("\nDone.")
     print(f"  Storages dropped: {stats['storages_dropped']}")

@@ -63,6 +63,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/dlightrag"]
 
+[tool.uv]
+constraint-dependencies = ["onnxruntime<1.24"]
+
 [tool.uv.sources]
 raganything = { git = "https://github.com/HKUDS/RAG-Anything.git", rev = "main" }
 

@@ -6,7 +6,7 @@ Usage:
     # Local ingestion (runs directly via RAGService, no API server needed)
     uv run scripts/cli.py ingest ./docs
     uv run scripts/cli.py ingest ./docs --replace
-    uv run scripts/cli.py ingest ./docs --replace
+    uv run scripts/cli.py ingest ./docs --workspace project-a
 
     # Azure Blob ingestion
     uv run scripts/cli.py ingest --source azure_blob --container my-container
@@ -20,10 +20,11 @@ Usage:
     # Query & answer (requires API server: docker compose up dlightrag-api)
     uv run scripts/cli.py query "What are the key findings?"
     uv run scripts/cli.py query "Revenue trends" --mode mix --top-k 30
+    uv run scripts/cli.py query "findings?" --workspaces project-a project-b
     uv run scripts/cli.py answer "What are the key findings?"
     uv run scripts/cli.py answer "Summarize the report" --mode mix
     uv run scripts/cli.py chat
-    uv run scripts/cli.py chat --mode mix
+    uv run scripts/cli.py chat --workspaces project-a project-b
 """
 
 from __future__ import annotations
@@ -126,6 +127,7 @@ def _validate_ingest_args(args: argparse.Namespace) -> None:
 
 async def _run_ingest(args: argparse.Namespace) -> None:
     """Run ingestion directly via RAGService (no API server needed)."""
+    from dlightrag.config import get_config
     from dlightrag.service import RAGService
 
     source = args.source_type
@@ -157,9 +159,14 @@ async def _run_ingest(args: argparse.Namespace) -> None:
         if args.table:
             print(f"  table metadata: {args.table}")
 
+    config = get_config()
+    workspace = args.workspace or config.workspace
+    if args.workspace:
+        config = config.model_copy(update={"workspace": workspace})
+    print(f"Workspace: {workspace}")
     print("Running locally (direct RAGService)\n")
 
-    service = await RAGService.create()
+    service = await RAGService.create(config=config)
     try:
         result = await service.aingest(source_type=source, **kwargs)
         _print_json(result)
@@ -177,9 +184,13 @@ def cmd_query(args: argparse.Namespace) -> None:
     payload: dict = {"query": args.query, "mode": args.mode}
     if args.top_k is not None:
         payload["top_k"] = args.top_k
+    if args.workspaces:
+        payload["workspaces"] = args.workspaces
 
     print(f"Query: {args.query}")
     print(f"Mode: {args.mode}")
+    if args.workspaces:
+        print(f"Workspaces: {', '.join(args.workspaces)}")
     print(f"API: {url}\n")
 
     resp = httpx.post(url, json=payload, headers=_headers(), timeout=120)
@@ -192,9 +203,13 @@ def cmd_answer(args: argparse.Namespace) -> None:
     payload: dict = {"query": args.query, "mode": args.mode}
     if args.top_k is not None:
         payload["top_k"] = args.top_k
+    if args.workspaces:
+        payload["workspaces"] = args.workspaces
 
     print(f"Question: {args.query}")
     print(f"Mode: {args.mode}")
+    if args.workspaces:
+        print(f"Workspaces: {', '.join(args.workspaces)}")
     print(f"API: {url}\n")
 
     resp = httpx.post(url, json=payload, headers=_headers(), timeout=120)
@@ -206,7 +221,8 @@ def cmd_chat(args: argparse.Namespace) -> None:
     url = f"{_get_api_url()}/answer"
     history: list[dict[str, str]] = []
 
-    print(f"dlightrag chat (mode={args.mode}, API={_get_api_url()})")
+    ws_info = f", workspaces={','.join(args.workspaces)}" if args.workspaces else ""
+    print(f"dlightrag chat (mode={args.mode}{ws_info}, API={_get_api_url()})")
     print("Type your question, or: /clear to reset history, /quit to exit\n")
 
     while True:
@@ -229,6 +245,8 @@ def cmd_chat(args: argparse.Namespace) -> None:
         payload: dict = {"query": question, "mode": args.mode}
         if args.top_k is not None:
             payload["top_k"] = args.top_k
+        if args.workspaces:
+            payload["workspaces"] = args.workspaces
         if history:
             payload["conversation_history"] = history
 
@@ -312,6 +330,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_ingest.add_argument("--query", help="SQL query (snowflake source)")
     p_ingest.add_argument("--table", help="Table name metadata (snowflake source, optional)")
     p_ingest.add_argument("--replace", action="store_true", help="Replace existing documents")
+    p_ingest.add_argument(
+        "--workspace", default=None, help="Target workspace (default: from config)"
+    )
 
     # query (retrieve only)
     p_query = sub.add_parser("query", help="Retrieve contexts and sources (no LLM answer)")
@@ -320,6 +341,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--mode", default="mix", choices=["local", "global", "hybrid", "naive", "mix"]
     )
     p_query.add_argument("--top-k", type=int, default=None, dest="top_k")
+    p_query.add_argument(
+        "--workspaces", nargs="+", default=None, help="Workspaces to search (federation)"
+    )
 
     # answer (single-shot LLM answer)
     p_answer = sub.add_parser(
@@ -330,6 +354,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--mode", default="mix", choices=["local", "global", "hybrid", "naive", "mix"]
     )
     p_answer.add_argument("--top-k", type=int, default=None, dest="top_k")
+    p_answer.add_argument(
+        "--workspaces", nargs="+", default=None, help="Workspaces to search (federation)"
+    )
 
     # chat (multi-turn REPL)
     p_chat = sub.add_parser("chat", help="Interactive multi-turn conversation")
@@ -337,6 +364,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--mode", default="mix", choices=["local", "global", "hybrid", "naive", "mix"]
     )
     p_chat.add_argument("--top-k", type=int, default=None, dest="top_k")
+    p_chat.add_argument(
+        "--workspaces", nargs="+", default=None, help="Workspaces to search (federation)"
+    )
 
     return parser
 

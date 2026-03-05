@@ -1,5 +1,5 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
-# Corporate RAG service - multimodal RAG
+# DlightRAG - multimodal RAG
 
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
 LABEL maintainer="HanlianLyu"
@@ -15,7 +15,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     UV_HTTP_TIMEOUT=300 uv sync --no-dev --no-install-project
 
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
-LABEL maintainer="hllyu"
+LABEL maintainer="HanlianLyu"
 
 WORKDIR /app
 
