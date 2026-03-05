@@ -49,7 +49,7 @@ class TestPGHashIndex:
         """Test register and lookup with real PostgreSQL."""
         import asyncpg
 
-        from dlightrag.ingestion.hash_index import PGHashIndex
+        from dlightrag.core.ingestion.hash_index import PGHashIndex
 
         pool = await asyncpg.create_pool(
             host="localhost",

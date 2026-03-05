@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
-from dlightrag.retrieval.engine import (
+from dlightrag.core.retrieval.engine import (
     RetrievalResult,
     _extract_rag_relative,
     _to_download_url,
