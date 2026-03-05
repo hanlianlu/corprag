@@ -227,6 +227,12 @@ class TestExtractJson:
         text = 'Some preamble text {"key": "value"}'
         assert _extract_json(text) == '{"key": "value"}'
 
+    def test_json_with_trailing_text(self) -> None:
+        from dlightrag.models.llm import _extract_json
+
+        text = '{"key": "value"} Here is my reasoning...'
+        assert _extract_json(text) == '{"key": "value"}'
+
 
 class TestConvertOpenaiToAnthropicMessages:
     """Test message format conversion."""

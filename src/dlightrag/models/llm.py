@@ -540,8 +540,6 @@ def get_rerank_func(config: DlightragConfig | None = None) -> Callable:
     DLIGHTRAG_RERANK_BASE_URL, following the same pattern as LightRAG's
     --rerank-binding + --rerank-binding-host.
     """
-    from functools import partial
-
     from dlightrag.config import get_config
 
     cfg = config or get_config()
@@ -600,9 +598,17 @@ def _extract_json(text: str) -> str:
     match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
     if match:
         return match.group(1).strip()
-    # Try to find raw JSON object
+    # Try to find raw JSON object — match outermost braces
     start = text.find("{")
     if start != -1:
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : i + 1]
         return text[start:]
     return text
 
