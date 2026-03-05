@@ -151,6 +151,18 @@ class IngestionPipeline:
             *path_parts,
         )
 
+    def _create_temp_dir(self) -> Path:
+        """Create a unique temp directory under working_dir/.tmp/."""
+        import uuid
+
+        tmpdir = self.config.temp_dir / uuid.uuid4().hex[:12]
+        tmpdir.mkdir(parents=True, exist_ok=True)
+        return tmpdir
+
+    async def _prepare_for_parsing(self, file_path: Path, tmpdir: Path) -> Path:
+        """Prepare file for parsing. Converts Excel to PDF if needed, otherwise returns original."""
+        return await self._maybe_convert_excel_to_pdf(file_path, tmpdir)
+
     async def _maybe_convert_excel_to_pdf(
         self,
         file_path: Path,
@@ -270,6 +282,7 @@ class IngestionPipeline:
         file_path: Path,
         artifacts_dir: Path,
         content_hash: str | None = None,
+        source_uri: str | None = None,
     ) -> IngestionResult:
         """Ingest a single file with content filtering.
 
@@ -309,7 +322,7 @@ class IngestionPipeline:
                 if result.index_stream:
                     await self.rag.insert_content_list(  # type: ignore[misc]
                         content_list=result.index_stream,
-                        file_path=str(file_path),
+                        file_path=source_uri or str(file_path),
                         doc_id=doc_id,
                     )
 
@@ -334,13 +347,13 @@ class IngestionPipeline:
 
                 # Step 4: Register hash for deduplication (if hash was provided)
                 if content_hash and doc_id:
-                    await self._hash_index.register(content_hash, doc_id, str(file_path))
+                    await self._hash_index.register(content_hash, doc_id, source_uri or str(file_path))
 
                 return IngestionResult(
                     status="success",
                     processed=1,
                     doc_id=doc_id,
-                    source_path=str(file_path),
+                    source_path=source_uri or str(file_path),
                     stats=result.stats,
                 )
 

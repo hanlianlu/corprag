@@ -344,3 +344,75 @@ class TestCheckCancelled:
 
         with pytest.raises(asyncio.CancelledError):
             await run()
+
+
+# ---------------------------------------------------------------------------
+# TestTempDirAndSourceUri
+# ---------------------------------------------------------------------------
+
+
+class TestTempDirAndSourceUri:
+    """Tests for temp dir creation and source_uri flow."""
+
+    @pytest.mark.asyncio
+    async def test_create_temp_dir_under_working_dir(self, test_config):
+        """Temp dirs are created under working_dir/.tmp/."""
+        pipeline = _make_pipeline(test_config)
+        tmpdir = pipeline._create_temp_dir()
+        assert tmpdir.exists()
+        assert ".tmp" in tmpdir.parts
+        # Cleanup
+        import shutil
+
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_source_uri_passed_to_insert_content_list(self, test_config):
+        """source_uri (not parse_path) is passed to insert_content_list."""
+        pipeline = _make_pipeline(test_config)
+        test_file = test_config.working_dir_path / "test.txt"
+        test_file.write_text("hello")
+
+        await pipeline._ingest_single_file_with_policy(
+            file_path=test_file,
+            artifacts_dir=test_config.artifacts_dir,
+            source_uri="/original/path/test.txt",
+        )
+
+        # insert_content_list should receive source_uri, not parse_path
+        call_args = pipeline.rag.insert_content_list.call_args
+        assert call_args is not None
+        # Check both positional and keyword args
+        file_path_arg = call_args.kwargs.get("file_path") or call_args[1].get("file_path")
+        assert file_path_arg == "/original/path/test.txt"
+
+    @pytest.mark.asyncio
+    async def test_source_uri_stored_in_hash_index(self, test_config):
+        """source_uri is stored in hash_index, not parse_path."""
+        pipeline = _make_pipeline(test_config)
+        test_file = test_config.working_dir_path / "test.txt"
+        test_file.write_text("hello")
+
+        await pipeline._ingest_single_file_with_policy(
+            file_path=test_file,
+            artifacts_dir=test_config.artifacts_dir,
+            content_hash="abc123",
+            source_uri="/original/path/test.txt",
+        )
+
+        entries = await pipeline._hash_index.list_all()
+        assert len(entries) == 1
+        assert entries[0]["file_path"] == "/original/path/test.txt"
+
+    @pytest.mark.asyncio
+    async def test_prepare_for_parsing_non_excel(self, test_config):
+        """Non-Excel files pass through unchanged."""
+        pipeline = _make_pipeline(test_config)
+        test_file = test_config.working_dir_path / "test.pdf"
+        test_file.write_text("pdf content")
+        tmpdir = pipeline._create_temp_dir()
+        result = await pipeline._prepare_for_parsing(test_file, tmpdir)
+        assert result == test_file
+        import shutil
+
+        shutil.rmtree(tmpdir, ignore_errors=True)
