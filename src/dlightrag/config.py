@@ -33,7 +33,7 @@ LLMProvider = Literal[
 
 
 class DlightragConfig(BaseSettings):
-    """Corporate RAG configuration.
+    """DlightRAG configuration.
 
     Configuration sources (in order of precedence):
         1. Constructor arguments (when used as library)
@@ -152,7 +152,7 @@ class DlightragConfig(BaseSettings):
     google_gemini_api_key: str | None = Field(default=None)
     qwen_api_key: str | None = Field(default=None)
     qwen_base_url: str = Field(
-        default="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        default="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
     )
     minimax_api_key: str | None = Field(default=None)
     minimax_base_url: str = Field(

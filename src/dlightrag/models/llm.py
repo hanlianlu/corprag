@@ -5,7 +5,7 @@ Self-contained — all models are constructed from DlightragConfig without
 external dependencies on backend.llm or backend.agents.
 
 Supports multiple LLM providers:
-- Category A (OpenAI-compatible): openai, azure_openai, qwen, minimax
+- Category A (OpenAI-compatible): openai, azure_openai, qwen, minimax, ollama, xinference, openrouter
 - Category B (Dedicated class): anthropic, google_gemini
 """
 # pyright: reportCallIssue=false, reportArgumentType=false, reportAttributeAccessIssue=false
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 LLMFunc = Callable[..., Any]
 
-# OpenAI-compatible providers that can use ChatOpenAI with custom base_url
+# OpenAI-compatible providers that use openai_complete_if_cache with custom base_url
 _OPENAI_COMPATIBLE_PROVIDERS = {
     "openai",
     "azure_openai",
@@ -166,7 +166,7 @@ def _build_openai_vision_func(
     provider: str,
     model_kwargs: dict[str, Any] | None = None,
 ) -> Callable[..., Awaitable[str]]:
-    """OpenAI-compatible vision func (covers openai, azure_openai, qwen, minimax)."""
+    """OpenAI-compatible vision func (covers all providers in _OPENAI_COMPATIBLE_PROVIDERS)."""
     from openai import AsyncOpenAI
 
     api_key = cfg._get_provider_api_key(provider)
