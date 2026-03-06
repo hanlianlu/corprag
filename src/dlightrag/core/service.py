@@ -76,7 +76,14 @@ from dlightrag.models.prompts import inject_custom_prompts  # noqa: E402
 
 inject_custom_prompts()
 
-from raganything import RAGAnything, RAGAnythingConfig  # noqa: E402
+# RAGAnything is only needed for caption mode — make import optional
+# so unified mode doesn't require raganything dependencies.
+try:
+    from raganything import RAGAnything, RAGAnythingConfig  # noqa: E402
+
+    _HAS_RAGANYTHING = True
+except ImportError:
+    _HAS_RAGANYTHING = False
 
 from dlightrag.core.ingestion.pipeline import IngestionPipeline  # noqa: E402
 from dlightrag.core.retrieval.engine import (  # noqa: E402
@@ -146,10 +153,15 @@ class RAGService:
         self._cancel_checker = cancel_checker
         self._url_transformer = url_transformer
 
-        # Single RAGAnything instance + composed pipelines (created lazily in initialize())
-        self.rag: RAGAnything | None = None
+        # Caption mode (Mode 1): RAGAnything + composed pipelines
+        self.rag: Any = None  # RAGAnything (caption mode)
         self.ingestion: IngestionPipeline | None = None
         self.retrieval: RetrievalEngine | None = None
+
+        # Unified mode (Mode 2): direct LightRAG + UnifiedRepresentEngine
+        self.unified: Any = None  # UnifiedRepresentEngine
+        self._lightrag: Any = None  # Direct LightRAG reference (unified mode)
+        self._visual_chunks: Any = None  # Visual chunks KV store (unified mode)
 
     @staticmethod
     def _build_vector_db_kwargs(config: DlightragConfig) -> dict[str, Any]:
@@ -276,8 +288,19 @@ class RAGService:
         logger.info("PostgreSQL schema ensured")
 
     async def _do_initialize(self) -> None:
-        """Create a single RAGAnything object and compose pipelines."""
+        """Create RAG backend and compose pipelines based on rag_mode."""
         config = self.config
+
+        if config.rag_mode == "unified":
+            await self._do_initialize_unified()
+            return
+
+        # --- Caption mode (existing code, unchanged) ---
+        if not _HAS_RAGANYTHING:
+            raise ImportError(
+                "raganything is required for caption mode. "
+                "Install it with: pip install raganything"
+            )
 
         # Detect optimal MinerU backend based on hardware (only for mineru parser)
         mineru_backend = None
@@ -366,7 +389,74 @@ class RAGService:
         self.retrieval = RetrievalEngine(rag=self.rag, config=config)
         self.retrieval._url_transformer = self._url_transformer
 
-        logger.info("RAG pipelines initialized successfully")
+        logger.info("RAG pipelines initialized successfully (caption mode)")
+
+    async def _do_initialize_unified(self) -> None:
+        """Initialize unified representational RAG mode (Mode 2).
+
+        Creates LightRAG directly (no RAGAnything), sets up visual_chunks
+        KV store, and creates UnifiedRepresentEngine.
+        """
+        import dataclasses
+
+        from lightrag import LightRAG
+
+        from dlightrag.unifiedrepresent.engine import UnifiedRepresentEngine
+
+        config = self.config
+        logger.info("Initializing unified representational RAG mode...")
+
+        # Get model functions
+        llm_func = get_llm_model_func(config)
+        vision_func = get_vision_model_func(config) if self.enable_vlm else None
+        embedding_func = get_embedding_func(config)
+
+        # LightRAG configuration (same storage backends as caption mode)
+        # Do NOT pass rerank_model_func — we handle reranking ourselves
+        lightrag = LightRAG(
+            working_dir=str(config.working_dir_path),
+            llm_model_func=llm_func,
+            embedding_func=embedding_func,
+            workspace=config.workspace,
+            default_llm_timeout=config.llm_request_timeout,
+            chunk_token_size=config.chunk_size,
+            chunk_overlap_token_size=config.chunk_overlap,
+            max_parallel_insert=config.max_parallel_insert,
+            llm_model_max_async=config.max_async,
+            embedding_func_max_async=config.embedding_func_max_async,
+            embedding_batch_num=config.embedding_batch_num,
+            vector_storage=config.vector_storage,
+            graph_storage=config.graph_storage,
+            kv_storage=config.kv_storage,
+            doc_status_storage=config.doc_status_storage,
+            vector_db_storage_cls_kwargs=self._build_vector_db_kwargs(config),
+            addon_params={
+                "entity_types": config.kg_entity_types,
+                "language": "English",
+            },
+        )
+        await lightrag.initialize_storages()
+        self._lightrag = lightrag
+
+        # Create visual_chunks KV store (same backend as other KV stores)
+        kv_cls = lightrag.key_string_value_json_storage_cls
+        visual_chunks = kv_cls(
+            namespace="visual_chunks",
+            global_config=dataclasses.asdict(lightrag),
+            embedding_func=embedding_func,
+        )
+        await visual_chunks.initialize()
+        self._visual_chunks = visual_chunks
+
+        # Create engine
+        self.unified = UnifiedRepresentEngine(
+            lightrag=lightrag,
+            visual_chunks=visual_chunks,
+            config=config,
+            vision_model_func=vision_func,
+        )
+
+        logger.info("Unified representational RAG mode initialized")
 
     async def _create_hash_index(self, config: DlightragConfig) -> HashIndexProtocol:
         """Create the appropriate hash index backend based on KV storage config.
@@ -435,6 +525,18 @@ class RAGService:
             except Exception:  # noqa: BLE001
                 logger.warning("Failed to finalize storages", exc_info=True)
 
+        # Unified mode cleanup
+        if self._visual_chunks is not None:
+            try:
+                await self._visual_chunks.finalize()
+            except Exception:  # noqa: BLE001
+                logger.warning("Failed to finalize visual_chunks", exc_info=True)
+        if self._lightrag is not None:
+            try:
+                await self._lightrag.finalize_storages()
+            except Exception:  # noqa: BLE001
+                logger.warning("Failed to finalize LightRAG storages", exc_info=True)
+
     # === INGESTION API ===
 
     async def aingest(
@@ -452,6 +554,15 @@ class RAGService:
                 snowflake: query, table
         """
         self._ensure_initialized()
+
+        # Unified mode: only supports local file ingestion
+        if self.unified is not None:
+            if source_type != "local":
+                raise ValueError(
+                    f"Unified mode only supports local file ingestion, got: {source_type}"
+                )
+            path = Path(kwargs["path"])
+            return await self.unified.aingest(file_path=str(path))
 
         if not self.ingestion:
             raise RuntimeError("Ingestion pipeline not initialized")
@@ -543,6 +654,16 @@ class RAGService:
         """
         self._ensure_initialized()
 
+        if self.unified is not None:
+            result = await self.unified.aretrieve(
+                query=query, mode=mode, top_k=top_k, chunk_top_k=chunk_top_k
+            )
+            return RetrievalResult(
+                answer=None,
+                contexts=result.get("contexts", {}),
+                raw=result.get("raw", {}),
+            )
+
         if not self.retrieval:
             raise RuntimeError("Retrieval engine not initialized")
 
@@ -572,6 +693,16 @@ class RAGService:
         """
         self._ensure_initialized()
 
+        if self.unified is not None:
+            result = await self.unified.aanswer(
+                query=query, mode=mode, top_k=top_k, chunk_top_k=chunk_top_k
+            )
+            return RetrievalResult(
+                answer=result.get("answer"),
+                contexts=result.get("contexts", {}),
+                raw=result.get("raw", {}),
+            )
+
         if not self.retrieval:
             raise RuntimeError("Retrieval engine not initialized")
 
@@ -598,6 +729,12 @@ class RAGService:
         Returns (contexts, raw, token_iterator).
         """
         self._ensure_initialized()
+
+        if self.unified is not None:
+            return await self.unified.aanswer_stream(
+                query=query, mode=mode, top_k=top_k, chunk_top_k=chunk_top_k
+            )
+
         if not self.retrieval:
             raise RuntimeError("Retrieval engine not initialized")
 
@@ -645,6 +782,10 @@ class RAGService:
     async def alist_ingested_files(self) -> list[dict[str, Any]]:
         """List all ingested files."""
         self._ensure_initialized()
+        if self.unified is not None:
+            raise NotImplementedError(
+                "File listing is not yet supported in unified mode"
+            )
         if not self.ingestion:
             raise RuntimeError("Ingestion pipeline not initialized")
         return await self.ingestion.alist_ingested_files()
@@ -658,6 +799,10 @@ class RAGService:
     ) -> list[dict[str, Any]]:
         """Unified file deletion."""
         self._ensure_initialized()
+        if self.unified is not None:
+            raise NotImplementedError(
+                "File deletion is not yet supported in unified mode"
+            )
         if not self.ingestion:
             raise RuntimeError("Ingestion pipeline not initialized")
         return await self.ingestion.adelete_files(
