@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
@@ -164,6 +165,33 @@ class RAGServiceManager:
             svc = await self._get_service(ws_list[0])
             return await svc.aanswer(query, **kwargs)
         return await federated_answer(query, ws_list, self._get_service, **kwargs)
+
+    async def aanswer_stream(
+        self,
+        query: str,
+        *,
+        workspace: str | None = None,
+        workspaces: list[str] | None = None,
+        **kwargs: Any,
+    ) -> tuple[dict[str, Any], dict[str, Any], AsyncIterator[str]]:
+        """Streaming answer from a single workspace.
+
+        Federated streaming is not supported — uses first workspace if
+        multiple are provided.
+        """
+        ws_list = workspaces or [workspace or self._config.workspace]
+        if len(ws_list) > 1:
+            logger.warning(
+                "Streaming only supports single workspace, using '%s'", ws_list[0]
+            )
+        try:
+            async with asyncio.timeout(self._config.request_timeout):
+                svc = await self._get_service(ws_list[0])
+                return await svc.aanswer_stream(query, **kwargs)
+        except TimeoutError as e:
+            raise RAGServiceUnavailableError(
+                detail=f"Request timed out after {self._config.request_timeout}s"
+            ) from e
 
     # --- Management ---
 

@@ -15,7 +15,7 @@ import logging
 import os
 import platform
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -576,6 +576,32 @@ class RAGService:
             raise RuntimeError("Retrieval engine not initialized")
 
         return await self.retrieval.aanswer(
+            query,
+            multimodal_content=multimodal_content,
+            mode=mode,
+            top_k=top_k,
+            chunk_top_k=chunk_top_k,
+            **kwargs,
+        )
+
+    async def aanswer_stream(
+        self,
+        query: str,
+        multimodal_content: list[dict[str, Any]] | None = None,
+        mode: Literal["local", "global", "hybrid", "naive", "mix"] | None = "mix",
+        top_k: int | None = None,
+        chunk_top_k: int | None = None,
+        **kwargs: Any,
+    ) -> tuple[dict[str, Any], dict[str, Any], AsyncIterator[str]]:
+        """Streaming answer: retrieve contexts, then stream LLM tokens.
+
+        Returns (contexts, raw, token_iterator).
+        """
+        self._ensure_initialized()
+        if not self.retrieval:
+            raise RuntimeError("Retrieval engine not initialized")
+
+        return await self.retrieval.aanswer_stream(
             query,
             multimodal_content=multimodal_content,
             mode=mode,
