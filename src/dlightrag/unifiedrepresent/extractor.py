@@ -47,8 +47,7 @@ class EntityExtractor:
         """
         # 1. Generate VLM descriptions for all pages (semaphore-controlled)
         description_tasks = [
-            self._describe_page(image, page_index)
-            for page_index, image in enumerate(images)
+            self._describe_page(image, page_index) for page_index, image in enumerate(images)
         ]
         descriptions = await asyncio.gather(*description_tasks)
 
@@ -56,9 +55,7 @@ class EntityExtractor:
         chunk_ids: list[str] = []
         chunks_dict: dict[str, dict[str, Any]] = {}
         for page_index, description in enumerate(descriptions):
-            chunk_id = compute_mdhash_id(
-                f"{doc_id}:page:{page_index}", prefix="chunk-"
-            )
+            chunk_id = compute_mdhash_id(f"{doc_id}:page:{page_index}", prefix="chunk-")
             chunk_ids.append(chunk_id)
             chunks_dict[chunk_id] = {
                 "content": description,
@@ -106,9 +103,7 @@ class EntityExtractor:
         """Call VLM to generate text description of a page image."""
         from dlightrag.unifiedrepresent.prompts import PAGE_DESCRIPTION_PROMPT
 
-        prompt = PAGE_DESCRIPTION_PROMPT.format(
-            entity_types=", ".join(self.entity_types)
-        )
+        prompt = PAGE_DESCRIPTION_PROMPT.format(entity_types=", ".join(self.entity_types))
 
         async with self._vlm_semaphore:
             # vision_model_func expects: (prompt, images=[image])
@@ -120,9 +115,7 @@ class EntityExtractor:
             )
 
         if not description or not description.strip():
-            logger.warning(
-                "VLM returned empty description for page %d", page_index
-            )
+            logger.warning("VLM returned empty description for page %d", page_index)
             return f"[Page {page_index + 1}: no content extracted]"
 
         return description.strip()

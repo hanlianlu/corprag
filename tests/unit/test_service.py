@@ -280,3 +280,105 @@ class TestBuildVectorDbKwargs:
         test_config.vector_db_kwargs = {"cosine_better_than_threshold": 0.5}
         result = RAGService._build_vector_db_kwargs(test_config)
         assert result["cosine_better_than_threshold"] == 0.5
+
+
+# ---------------------------------------------------------------------------
+# TestRAGServiceUnifiedMode
+# ---------------------------------------------------------------------------
+
+
+class TestRAGServiceUnifiedMode:
+    """Test unified mode (Mode 2) behavior in RAGService."""
+
+    async def test_aingest_unified_blocks_non_local(self, test_config: DlightragConfig) -> None:
+        """Unified mode rejects non-local source types."""
+        service = RAGService(config=test_config)
+        service._initialized = True
+        service.unified = MagicMock()
+
+        with pytest.raises(ValueError, match="Unified mode only supports local"):
+            await service.aingest(source_type="azure_blob", container_name="c")
+
+    async def test_aingest_unified_delegates_to_engine(self, test_config: DlightragConfig) -> None:
+        """Unified mode delegates local ingestion to unified engine."""
+        service = RAGService(config=test_config)
+        service._initialized = True
+        service.unified = MagicMock()
+        service.unified.aingest = AsyncMock(
+            return_value={"doc_id": "d1", "page_count": 3, "file_path": "/tmp/f.pdf"}
+        )
+
+        result = await service.aingest(source_type="local", path="/tmp/f.pdf")
+        service.unified.aingest.assert_awaited_once_with(file_path="/tmp/f.pdf")
+        assert result["doc_id"] == "d1"
+        assert result["page_count"] == 3
+
+    async def test_aretrieve_unified_delegates(self, test_config: DlightragConfig) -> None:
+        """Unified mode aretrieve returns a RetrievalResult."""
+        from dlightrag.core.retrieval.engine import RetrievalResult
+
+        service = RAGService(config=test_config)
+        service._initialized = True
+        service.unified = MagicMock()
+        service.unified.aretrieve = AsyncMock(
+            return_value={"contexts": {"chunks": []}, "raw": {"scores": [0.9]}}
+        )
+
+        result = await service.aretrieve("test query")
+        service.unified.aretrieve.assert_awaited_once()
+        assert isinstance(result, RetrievalResult)
+        assert result.answer is None
+        assert result.contexts == {"chunks": []}
+        assert result.raw == {"scores": [0.9]}
+
+    async def test_aanswer_unified_delegates(self, test_config: DlightragConfig) -> None:
+        """Unified mode aanswer returns a RetrievalResult with answer."""
+        from dlightrag.core.retrieval.engine import RetrievalResult
+
+        service = RAGService(config=test_config)
+        service._initialized = True
+        service.unified = MagicMock()
+        service.unified.aanswer = AsyncMock(
+            return_value={
+                "answer": "The answer is 42.",
+                "contexts": {"chunks": ["c1"]},
+                "raw": {},
+            }
+        )
+
+        result = await service.aanswer("what is the answer?")
+        service.unified.aanswer.assert_awaited_once()
+        assert isinstance(result, RetrievalResult)
+        assert result.answer == "The answer is 42."
+        assert result.contexts == {"chunks": ["c1"]}
+
+    async def test_alist_ingested_files_unified_raises(self, test_config: DlightragConfig) -> None:
+        """Unified mode does not support file listing yet."""
+        service = RAGService(config=test_config)
+        service._initialized = True
+        service.unified = MagicMock()
+
+        with pytest.raises(NotImplementedError, match="not yet supported in unified mode"):
+            await service.alist_ingested_files()
+
+    async def test_adelete_files_unified_raises(self, test_config: DlightragConfig) -> None:
+        """Unified mode does not support file deletion yet."""
+        service = RAGService(config=test_config)
+        service._initialized = True
+        service.unified = MagicMock()
+
+        with pytest.raises(NotImplementedError, match="not yet supported in unified mode"):
+            await service.adelete_files(filenames=["a.pdf"])
+
+    async def test_close_unified_cleanup(self, test_config: DlightragConfig) -> None:
+        """close() calls finalize on visual_chunks and LightRAG storages."""
+        service = RAGService(config=test_config)
+        service._initialized = True
+        service.rag = None  # No caption-mode RAG
+        service._visual_chunks = AsyncMock()
+        service._lightrag = AsyncMock()
+
+        await service.close()
+
+        service._visual_chunks.finalize.assert_awaited_once()
+        service._lightrag.finalize_storages.assert_awaited_once()

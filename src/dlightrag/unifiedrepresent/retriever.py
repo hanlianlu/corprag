@@ -99,9 +99,7 @@ class VisualRetriever:
         visual_data = await self.visual_chunks.get_by_ids(chunk_id_list)
         # visual_data is a list (same order as input); filter out None/missing
         resolved = {
-            cid: vd
-            for cid, vd in zip(chunk_id_list, visual_data, strict=False)
-            if vd is not None
+            cid: vd for cid, vd in zip(chunk_id_list, visual_data, strict=False) if vd is not None
         }
 
         # Phase 3: Visual reranking (optional)
@@ -123,12 +121,14 @@ class VisualRetriever:
                     "author": vd.get("doc_author", ""),
                     "path": vd.get("source_file", ""),
                 }
-            media.append({
-                "chunk_id": cid,
-                "page_index": vd.get("page_index"),
-                "image_data": vd.get("image_data"),
-                "relevance_score": vd.get("relevance_score"),
-            })
+            media.append(
+                {
+                    "chunk_id": cid,
+                    "page_index": vd.get("page_index"),
+                    "image_data": vd.get("image_data"),
+                    "relevance_score": vd.get("relevance_score"),
+                }
+            )
 
         return {
             "contexts": {
@@ -258,10 +258,12 @@ class VisualRetriever:
             vd = resolved[cid]
             img_data = vd.get("image_data")
             if img_data:
-                documents.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{img_data}"},
-                })
+                documents.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{img_data}"},
+                    }
+                )
             else:
                 # Fallback to text content if no image
                 documents.append(vd.get("content", ""))
@@ -284,9 +286,7 @@ class VisualRetriever:
             results = resp.json().get("results", [])
 
             # Sort by relevance_score descending
-            results.sort(
-                key=lambda x: x.get("relevance_score", 0), reverse=True
-            )
+            results.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
 
             reranked: dict[str, dict] = {}
             for item in results[:top_k]:

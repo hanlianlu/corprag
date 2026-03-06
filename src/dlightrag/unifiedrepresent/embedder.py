@@ -93,9 +93,7 @@ class VisualEmbedder:
         encoded = base64.b64encode(buf.getvalue()).decode("ascii")
         return f"data:image/png;base64,{encoded}"
 
-    async def _embed_image_batch(
-        self, images: list[Image.Image]
-    ) -> list[list[float]]:
+    async def _embed_image_batch(self, images: list[Image.Image]) -> list[list[float]]:
         """Call the embedding endpoint for a single batch of images."""
         url = f"{self.base_url}/embeddings"
         input_items = [
@@ -134,8 +132,5 @@ class VisualEmbedder:
     def _validate_dim(self, embedding: list[float]) -> None:
         """Raise if the returned embedding dimension does not match ``self.dim``."""
         if len(embedding) != self.dim:
-            msg = (
-                f"Expected embedding dimension {self.dim}, "
-                f"got {len(embedding)}"
-            )
+            msg = f"Expected embedding dimension {self.dim}, got {len(embedding)}"
             raise ValueError(msg)

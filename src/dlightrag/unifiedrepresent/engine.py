@@ -71,15 +71,9 @@ class UnifiedRepresentEngine:
             visual_chunks=visual_chunks,
             config=config,
             vision_model_func=vision_model_func,
-            rerank_model=(
-                config.effective_rerank_model if config.enable_rerank else None
-            ),
-            rerank_base_url=(
-                config.rerank_base_url if config.enable_rerank else None
-            ),
-            rerank_api_key=(
-                config.effective_rerank_api_key if config.enable_rerank else None
-            ),
+            rerank_model=(config.effective_rerank_model if config.enable_rerank else None),
+            rerank_base_url=(config.rerank_base_url if config.enable_rerank else None),
+            rerank_api_key=(config.effective_rerank_api_key if config.enable_rerank else None),
         )
 
     # ------------------------------------------------------------------
@@ -121,18 +115,14 @@ class UnifiedRepresentEngine:
             doc_id = compute_mdhash_id(file_path, prefix="doc-")
 
         # Step 3: Write full_docs entry (minimal, for LightRAG compat)
-        await self.lightrag.full_docs.upsert(
-            {doc_id: {"content": "", "file_path": str(path)}}
-        )
+        await self.lightrag.full_docs.upsert({doc_id: {"content": "", "file_path": str(path)}})
 
         # Step 4: Parallel embedding + entity extraction
         embed_task = self.embedder.embed_pages(images)
         extract_task = self.extractor.extract_from_pages(
             images=images, doc_id=doc_id, file_path=str(path)
         )
-        visual_vectors, page_infos = await asyncio.gather(
-            embed_task, extract_task
-        )
+        visual_vectors, page_infos = await asyncio.gather(embed_task, extract_task)
 
         # Step 5a: Write to chunks_vdb (visual vectors via embedding func swap)
         chunks_data: dict[str, dict] = {}
@@ -179,21 +169,13 @@ class UnifiedRepresentEngine:
                 # Document metadata from render
                 "doc_title": render_result.metadata.get("title", ""),
                 "doc_author": render_result.metadata.get("author", ""),
-                "creation_date": render_result.metadata.get(
-                    "creation_date", ""
-                ),
-                "page_count": render_result.metadata.get(
-                    "page_count", page_count
-                ),
-                "original_format": render_result.metadata.get(
-                    "original_format", ""
-                ),
+                "creation_date": render_result.metadata.get("creation_date", ""),
+                "page_count": render_result.metadata.get("page_count", page_count),
+                "original_format": render_result.metadata.get("original_format", ""),
             }
         await self.visual_chunks.upsert(visual_data)
 
-        logger.info(
-            "Ingested %s: %d pages, doc_id=%s", path.name, page_count, doc_id
-        )
+        logger.info("Ingested %s: %d pages, doc_id=%s", path.name, page_count, doc_id)
         return {
             "doc_id": doc_id,
             "page_count": page_count,
@@ -256,8 +238,7 @@ class UnifiedRepresentEngine:
         # Convention: chunk_id = compute_mdhash_id(f"{doc_id}:page:{i}", prefix="chunk-")
         # We don't know page count, so full deletion requires scanning visual_chunks.
         logger.warning(
-            "adelete_doc is not fully implemented yet for unified mode "
-            "(doc_id=%s)",
+            "adelete_doc is not fully implemented yet for unified mode (doc_id=%s)",
             doc_id,
         )
 
@@ -284,9 +265,7 @@ class UnifiedRepresentEngine:
 
         # Build cache: content text -> pre-computed vector
         vector_cache: dict[str, np.ndarray] = {}
-        for (_, chunk_dict), vector in zip(
-            chunks_data.items(), visual_vectors, strict=True
-        ):
+        for (_, chunk_dict), vector in zip(chunks_data.items(), visual_vectors, strict=True):
             vector_cache[chunk_dict["content"]] = vector
 
         # Temporary embedding function that looks up cached vectors
@@ -296,9 +275,7 @@ class UnifiedRepresentEngine:
                 if text in vector_cache:
                     results.append(vector_cache[text])
                 else:
-                    raise ValueError(
-                        f"No pre-computed vector for: {text[:80]}..."
-                    )
+                    raise ValueError(f"No pre-computed vector for: {text[:80]}...")
             return np.array(results, dtype=np.float32)
 
         # Swap embedding func on chunks_vdb
