@@ -420,3 +420,107 @@ class TestFilesEndpoint:
         assert resp.status_code == 200
         call_kwargs = mock_manager.list_ingested_files.call_args
         assert call_kwargs[0][0] == "project-z"  # first positional arg is workspace
+
+
+# ---------------------------------------------------------------------------
+# TestAnswerStreamMode
+# ---------------------------------------------------------------------------
+
+
+class TestAnswerStreamMode:
+    """Test POST /answer with stream=true SSE mode."""
+
+    async def test_stream_returns_sse_content_type(
+        self, client: AsyncClient, mock_config: DlightragConfig, mock_manager
+    ) -> None:
+        async def mock_tokens():
+            for t in ["Hello", " world"]:
+                yield t
+
+        mock_manager.aanswer_stream = AsyncMock(
+            return_value=({"chunks": []}, {}, mock_tokens())
+        )
+        app.state.manager = mock_manager
+        resp = await client.post("/answer", json={"query": "test", "stream": True})
+        assert resp.status_code == 200
+        assert "text/event-stream" in resp.headers["content-type"]
+
+    async def test_stream_event_sequence(
+        self, client: AsyncClient, mock_config: DlightragConfig, mock_manager
+    ) -> None:
+        """Verify context -> token(s) -> done event order."""
+        async def mock_tokens():
+            for t in ["Hi", " there"]:
+                yield t
+
+        mock_manager.aanswer_stream = AsyncMock(
+            return_value=({"chunks": [{"id": "c1"}]}, {"sources": []}, mock_tokens())
+        )
+        app.state.manager = mock_manager
+        resp = await client.post("/answer", json={"query": "test", "stream": True})
+        lines = [line for line in resp.text.split("\n") if line.startswith("data: ")]
+
+        import json as json_mod
+
+        events = [json_mod.loads(line.removeprefix("data: ")) for line in lines]
+        assert events[0]["type"] == "context"
+        assert events[0]["data"] == {"chunks": [{"id": "c1"}]}
+        assert events[-1]["type"] == "done"
+        token_events = [e for e in events if e["type"] == "token"]
+        assert len(token_events) == 2
+        assert token_events[0]["content"] == "Hi"
+        assert token_events[1]["content"] == " there"
+
+    async def test_stream_error_during_iteration(
+        self, client: AsyncClient, mock_config: DlightragConfig, mock_manager
+    ) -> None:
+        """Error mid-stream produces error event."""
+        async def mock_tokens():
+            yield "start"
+            raise RuntimeError("LLM exploded")
+
+        mock_manager.aanswer_stream = AsyncMock(
+            return_value=({"chunks": []}, {}, mock_tokens())
+        )
+        app.state.manager = mock_manager
+        resp = await client.post("/answer", json={"query": "test", "stream": True})
+        lines = [line for line in resp.text.split("\n") if line.startswith("data: ")]
+
+        import json as json_mod
+
+        events = [json_mod.loads(line.removeprefix("data: ")) for line in lines]
+        error_events = [e for e in events if e["type"] == "error"]
+        assert len(error_events) == 1
+        assert "LLM exploded" in error_events[0]["message"]
+
+    async def test_stream_service_unavailable_503(
+        self, client: AsyncClient, mock_config: DlightragConfig, mock_manager
+    ) -> None:
+        """Pre-stream errors return normal HTTP 503."""
+        mock_manager.aanswer_stream = AsyncMock(
+            side_effect=RAGServiceUnavailableError("RAG not ready")
+        )
+        app.state.manager = mock_manager
+        resp = await client.post("/answer", json={"query": "hello", "stream": True})
+        assert resp.status_code == 503
+
+    async def test_stream_false_returns_json(
+        self, client: AsyncClient, mock_config: DlightragConfig, mock_manager
+    ) -> None:
+        """stream=false (default) returns normal JSON response."""
+        app.state.manager = mock_manager
+        resp = await client.post("/answer", json={"query": "test", "stream": False})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "answer" in body
+        assert body["answer"] == "The answer is 42"
+
+    async def test_default_no_stream_returns_json(
+        self, client: AsyncClient, mock_config: DlightragConfig, mock_manager
+    ) -> None:
+        """Omitting stream field returns normal JSON (backwards compatible)."""
+        app.state.manager = mock_manager
+        resp = await client.post("/answer", json={"query": "test"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "answer" in body

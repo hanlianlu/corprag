@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from dlightrag.config import DlightragConfig, get_config
@@ -89,6 +89,7 @@ class RetrieveRequest(BaseModel):
 class AnswerRequest(BaseModel):
     query: str
     mode: Literal["local", "global", "hybrid", "naive", "mix"] = "mix"
+    stream: bool = False
     top_k: int | None = None
     chunk_top_k: int | None = None
     conversation_history: list[dict[str, str]] | None = None
@@ -170,15 +171,33 @@ async def retrieve(body: RetrieveRequest, request: Request) -> dict[str, Any]:
     }
 
 
-@app.post("/answer", dependencies=[Depends(_verify_auth)])
-async def answer(body: AnswerRequest, request: Request) -> dict[str, Any]:
-    """RAG query with LLM-generated answer and structured results."""
+@app.post("/answer", dependencies=[Depends(_verify_auth)], response_model=None)
+async def answer(body: AnswerRequest, request: Request):
+    """RAG query with LLM-generated answer. Set stream=true for SSE."""
+    import json
+
     manager = _get_manager(request)
     kwargs: dict[str, Any] = {}
     if body.conversation_history:
         kwargs["conversation_history"] = body.conversation_history
 
-    result = await manager.aanswer(
+    if not body.stream:
+        result = await manager.aanswer(
+            body.query,
+            workspaces=body.workspaces,
+            mode=body.mode,
+            top_k=body.top_k,
+            chunk_top_k=body.chunk_top_k,
+            **kwargs,
+        )
+        return {
+            "answer": result.answer,
+            "contexts": result.contexts,
+            "raw": result.raw,
+        }
+
+    # Streaming mode
+    contexts, raw, token_iter = await manager.aanswer_stream(
         body.query,
         workspaces=body.workspaces,
         mode=body.mode,
@@ -186,11 +205,22 @@ async def answer(body: AnswerRequest, request: Request) -> dict[str, Any]:
         chunk_top_k=body.chunk_top_k,
         **kwargs,
     )
-    return {
-        "answer": result.answer,
-        "contexts": result.contexts,
-        "raw": result.raw,
-    }
+
+    async def event_generator() -> AsyncIterator[str]:
+        yield f"data: {json.dumps({'type': 'context', 'data': contexts, 'raw': raw}, ensure_ascii=False)}\n\n"
+        try:
+            async for chunk in token_iter:
+                yield f"data: {json.dumps({'type': 'token', 'content': chunk}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        except Exception as exc:
+            logger.exception("Error during SSE streaming")
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/files", dependencies=[Depends(_verify_auth)])
