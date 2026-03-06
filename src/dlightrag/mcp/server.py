@@ -285,7 +285,17 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         if name == "list_files":
             manager = await _ensure_manager()
             ws = arguments.get("workspace") or _get_config().workspace
-            files = await manager.list_ingested_files(ws)
+            try:
+                files = await manager.list_ingested_files(ws)
+            except NotImplementedError:
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(
+                            {"error": "File listing is not supported in unified RAG mode"},
+                        ),
+                    )
+                ]
             return [
                 TextContent(
                     type="text",
@@ -298,9 +308,19 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         if name == "delete_files":
             manager = await _ensure_manager()
             ws = arguments.get("workspace") or _get_config().workspace
-            results = await manager.delete_files(
-                ws, filenames=arguments.get("filenames"), file_paths=arguments.get("file_paths")
-            )
+            try:
+                results = await manager.delete_files(
+                    ws, filenames=arguments.get("filenames"), file_paths=arguments.get("file_paths")
+                )
+            except NotImplementedError:
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(
+                            {"error": "File deletion is not supported in unified RAG mode"},
+                        ),
+                    )
+                ]
             return [
                 TextContent(
                     type="text", text=json.dumps({"results": results, "workspace": ws}, default=str)

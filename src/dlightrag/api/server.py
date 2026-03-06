@@ -234,7 +234,13 @@ async def list_files(
     """List all ingested documents."""
     manager = _get_manager(request)
     ws = workspace or get_config().workspace
-    files = await manager.list_ingested_files(ws)
+    try:
+        files = await manager.list_ingested_files(ws)
+    except NotImplementedError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="File listing is not supported in unified RAG mode",
+        ) from exc
     return {"files": files, "count": len(files), "workspace": ws}
 
 
@@ -243,12 +249,18 @@ async def delete_files(body: DeleteRequest, request: Request) -> dict[str, Any]:
     """Delete documents from knowledge base."""
     manager = _get_manager(request)
     ws = body.workspace or get_config().workspace
-    results = await manager.delete_files(
-        ws,
-        file_paths=body.file_paths,
-        filenames=body.filenames,
-        delete_source=body.delete_source,
-    )
+    try:
+        results = await manager.delete_files(
+            ws,
+            file_paths=body.file_paths,
+            filenames=body.filenames,
+            delete_source=body.delete_source,
+        )
+    except NotImplementedError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="File deletion is not supported in unified RAG mode",
+        ) from exc
     return {"results": results, "workspace": ws}
 
 
@@ -264,6 +276,7 @@ async def health(request: Request) -> dict[str, Any]:
     status: dict[str, Any] = {
         "status": "degraded" if is_degraded else "healthy",
         "rag_initialized": manager.is_ready(),
+        "rag_mode": config.rag_mode,
         "crafted_by": "hllyu",
         "maintained_by": "HanlianLyu",
         "storage": {
