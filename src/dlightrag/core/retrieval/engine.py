@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -180,6 +180,90 @@ class RetrievalEngine:
             url_transformer=getattr(self, "_url_transformer", None),
             lightrag=lightrag,
         )
+
+    async def aanswer_stream(
+        self,
+        query: str,
+        multimodal_content: list[dict[str, Any]] | None = None,
+        *,
+        mode: Literal["local", "global", "hybrid", "naive", "mix"] | None = "mix",
+        top_k: int | None = None,
+        chunk_top_k: int | None = None,
+        **kwargs: Any,
+    ) -> tuple[dict[str, Any], dict[str, Any], AsyncIterator[str]]:
+        """Two-phase streaming: retrieve contexts, then stream LLM answer.
+
+        Returns:
+            (contexts, raw, token_iterator) — contexts/raw are complete,
+            token_iterator yields LLM chunks as they arrive.
+        """
+        lightrag = getattr(self.rag, "lightrag", None)
+        if lightrag is None:
+            raise RuntimeError("LightRAG not initialized - no documents ingested yet")
+
+        enhanced_query = query
+        if multimodal_content and hasattr(self.rag, "_process_multimodal_query_content"):
+            enhanced_query = await self.rag._process_multimodal_query_content(
+                query, multimodal_content
+            )
+
+        adjusted_top_k = top_k or self.config.top_k
+        adjusted_chunk_top_k = chunk_top_k or self.config.chunk_top_k
+        enable_rerank = kwargs.pop("enable_rerank", self.config.enable_rerank)
+
+        # Truncate conversation history (same logic as aanswer)
+        history = kwargs.pop("conversation_history", None)
+        if history:
+            max_msgs = self.config.max_conversation_turns * 2
+            if len(history) > max_msgs:
+                history = history[-max_msgs:]
+            token_budget = self.config.max_conversation_tokens
+            total = 0
+            cutoff = 0
+            for i in range(len(history) - 1, -1, -1):
+                total += len(history[i].get("content", "")) // 4
+                if total > token_budget:
+                    cutoff = i + 1
+                    break
+            if cutoff:
+                history = history[cutoff:]
+            kwargs["conversation_history"] = history
+
+        query_kwargs = {
+            "top_k": adjusted_top_k,
+            "chunk_top_k": adjusted_chunk_top_k,
+            "enable_rerank": enable_rerank,
+            "max_entity_tokens": kwargs.pop("max_entity_tokens", self.config.max_entity_tokens),
+            "max_relation_tokens": kwargs.pop(
+                "max_relation_tokens", self.config.max_relation_tokens
+            ),
+            "max_total_tokens": kwargs.pop("max_total_tokens", self.config.max_total_tokens),
+            **kwargs,
+        }
+
+        # Phase 1: Retrieve contexts (non-streaming)
+        query_param = QueryParam(mode=mode or self.config.default_mode, **query_kwargs)
+        retrieval_data = await lightrag.aquery_data(enhanced_query, param=query_param)
+
+        contexts = retrieval_data.get("data", {})
+        raw: dict[str, Any] = retrieval_data if isinstance(retrieval_data, dict) else {}
+
+        # Augment with sources/media
+        temp_result = RetrievalResult(answer=None, contexts=contexts, raw=raw)
+        augmented = await augment_retrieval_result(
+            temp_result,
+            str(self.config.working_dir_path),
+            url_transformer=getattr(self, "_url_transformer", None),
+            lightrag=lightrag,
+        )
+
+        # Phase 2: Stream LLM answer
+        stream_param = QueryParam(
+            mode=mode or self.config.default_mode, stream=True, **query_kwargs
+        )
+        token_iter = await lightrag.aquery(enhanced_query, param=stream_param)
+
+        return augmented.contexts, augmented.raw, token_iter
 
 
 # --- Augmentation utilities (moved from old retrieval/engine.py) ---

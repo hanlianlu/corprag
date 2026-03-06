@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from dlightrag.core.retrieval.engine import (
     RetrievalEngine,
     RetrievalResult,
@@ -345,3 +347,63 @@ class TestRetrievalEngineAanswer:
         engine, mock_rag = self._make_engine()
         await engine.aanswer("query")
         mock_rag.lightrag.aquery_llm.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# TestRetrievalEngineAanswerStream
+# ---------------------------------------------------------------------------
+
+
+class TestRetrievalEngineAanswerStream:
+    """Test streaming answer retrieval."""
+
+    def _make_engine(self) -> tuple[RetrievalEngine, MagicMock]:
+        from dlightrag.config import DlightragConfig
+
+        cfg = DlightragConfig(openai_api_key="test")  # type: ignore[call-arg]
+        mock_rag = MagicMock()
+        mock_rag.lightrag = MagicMock()
+
+        # aquery_data returns retrieval contexts
+        mock_rag.lightrag.aquery_data = AsyncMock(
+            return_value={
+                "data": {"chunks": [{"id": "c1"}], "entities": [], "relationships": []},
+            }
+        )
+
+        # aquery returns an async iterator when stream=True
+        async def mock_stream():
+            for token in ["Hello", " ", "world"]:
+                yield token
+
+        mock_rag.lightrag.aquery = AsyncMock(return_value=mock_stream())
+        mock_rag._process_multimodal_query_content = AsyncMock(return_value="enhanced")
+        engine = RetrievalEngine(rag=mock_rag, config=cfg)
+        return engine, mock_rag
+
+    @patch("dlightrag.core.retrieval.engine.augment_retrieval_result", new_callable=AsyncMock)
+    async def test_aanswer_stream_returns_contexts_and_iterator(self, mock_augment) -> None:
+        mock_augment.side_effect = lambda r, *a, **kw: r
+        engine, mock_rag = self._make_engine()
+        contexts, raw, token_iter = await engine.aanswer_stream("query")
+        assert "chunks" in contexts
+        tokens = [t async for t in token_iter]
+        assert tokens == ["Hello", " ", "world"]
+
+    @patch("dlightrag.core.retrieval.engine.augment_retrieval_result", new_callable=AsyncMock)
+    async def test_aanswer_stream_calls_aquery_with_stream_true(self, mock_augment) -> None:
+        mock_augment.side_effect = lambda r, *a, **kw: r
+        engine, mock_rag = self._make_engine()
+        await engine.aanswer_stream("query")
+        mock_rag.lightrag.aquery.assert_awaited_once()
+        mock_rag.lightrag.aquery_data.assert_awaited_once()
+
+    async def test_aanswer_stream_no_lightrag_raises(self) -> None:
+        from dlightrag.config import DlightragConfig
+
+        cfg = DlightragConfig(openai_api_key="test")  # type: ignore[call-arg]
+        mock_rag = MagicMock()
+        mock_rag.lightrag = None
+        engine = RetrievalEngine(rag=mock_rag, config=cfg)
+        with pytest.raises(RuntimeError, match="not initialized"):
+            await engine.aanswer_stream("query")
