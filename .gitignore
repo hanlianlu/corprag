@@ -28,6 +28,9 @@ Thumbs.db
 .env
 !.env.example
 
+# Worktrees
+.worktrees/
+
 # Storage
 dlightrag_storage/
 *.db

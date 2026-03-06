@@ -39,6 +39,9 @@ docs/
 *.md
 !README.md
 
+# Worktrees
+.worktrees/
+
 # Storage
 corprag_storage/
 dlightrag_storage/
