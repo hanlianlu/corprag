@@ -294,56 +294,43 @@ DlightRAG supports two RAG modes:
 | Mode | Pipeline | Best For |
 |------|----------|----------|
 | `caption` (default) | RAGAnything: document parsing → VLM captioning → text embedding → KG | Text-heavy documents, structured element extraction |
-| `unified` | Visual: page rendering → visual embedding → VLM entity extraction → KG | Visually rich documents (charts, diagrams, complex layouts) |
+| `unified` | Visual: page rendering → multimodal embedding → VLM entity extraction → KG | Visually rich documents (charts, diagrams, complex layouts) |
 
 ### Configuration
 
-Set `DLIGHTRAG_RAG_MODE=unified` in your `.env` file:
+Set `DLIGHTRAG_RAG_MODE=unified` and point the standard embedding/vision/reranking fields at multimodal models. No separate `VISUAL_*` config exists — unified mode reuses the same config fields with multimodal models.
 
 ```bash
-# Mode selection
 DLIGHTRAG_RAG_MODE=unified
-DLIGHTRAG_PAGE_RENDER_DPI=250
+DLIGHTRAG_PAGE_RENDER_DPI=250                     # default 250
 
-# LLM (for keyword extraction, entity extraction)
-DLIGHTRAG_LLM_PROVIDER=qwen
-DLIGHTRAG_CHAT_MODEL=qwen3-vl-32b
-
-# Visual embedding (must be multimodal)
-DLIGHTRAG_EMBEDDING_PROVIDER=openai
-DLIGHTRAG_EMBEDDING_MODEL=qwen3-vl-embedding-8b
+# Embedding must be multimodal (images + text → same vector space)
+DLIGHTRAG_EMBEDDING_PROVIDER=xinference           # or openai, qwen, etc.
+DLIGHTRAG_EMBEDDING_MODEL=qwen3-vl-embedding
 DLIGHTRAG_EMBEDDING_DIM=4096
-DLIGHTRAG_OPENAI_EMBEDDING_BASE_URL=http://localhost:8000/v1
 
-# Vision model (for page description + answer generation)
-DLIGHTRAG_VISION_PROVIDER=qwen
+# Vision model (page description during ingestion + answer generation during query)
 DLIGHTRAG_VISION_MODEL=qwen3-vl-32b
 
-# Visual reranking (optional)
+# Reranking (optional, multimodal reranker recommended)
 DLIGHTRAG_ENABLE_RERANK=true
-DLIGHTRAG_RERANK_MODEL=qwen3-vl-reranker-8b
-DLIGHTRAG_RERANK_BASE_URL=http://localhost:8000/v1
+DLIGHTRAG_RERANK_BACKEND=cohere                   # use cohere/jina/aliyun binding
+DLIGHTRAG_RERANK_MODEL=qwen3-rerank
+DLIGHTRAG_RERANK_BASE_URL=http://localhost:9997/v1/rerank
 ```
-
-### Model Requirements
-
-- **Embedding model**: Must accept image input (e.g., `qwen3-vl-embedding`)
-- **Vision model**: Must accept image input (e.g., `qwen3-vl`)
-- **Rerank model** (optional): Must accept image input (e.g., `qwen3-vl-reranker`)
-- **Chat model**: Text-only is fine (used for keyword extraction only)
 
 ### How It Works
 
-1. **Ingestion**: PDF pages are rendered at 250 DPI → each page is embedded via multimodal embedding model → VLM generates text descriptions → LightRAG builds knowledge graph from text
-2. **Query**: LightRAG retrieves relevant entities/chunks → page images are loaded from visual store → optional visual reranking → VLM generates answer from KG context + page images
+1. **Ingestion**: Pages rendered at 250 DPI → parallel: (a) multimodal embedding → `chunks_vdb`, (b) VLM text description → `extract_entities()` → KG. Page images stored in `visual_chunks` KV store.
+2. **Query**: LightRAG KG retrieval → resolve `chunk_id` → `visual_chunks` → optional multimodal reranking → VLM answers from KG context + page images.
 
-### Storage Considerations
+### Limitations
 
-Unified mode stores page images in a `visual_chunks` KV store alongside the standard LightRAG stores. For a 100-page PDF at 250 DPI, expect ~300-700 MB of image storage.
-
-### Per-Workspace Mode Lock
-
-Embedding dimensions differ between modes — a workspace created with one mode cannot switch to the other. Create separate workspaces for different modes.
+- **Local files only** — `azure_blob` and `snowflake` sources not supported (yet)
+- **No file listing/deletion** — `GET /files` and `DELETE /files` return 400; KG doesn't support selective deletion
+- **No deduplication** — re-ingesting the same file creates duplicate entries
+- **Per-workspace mode lock** — embedding dimensions differ; a workspace cannot switch modes after first ingestion
+- **Storage** — page images in `visual_chunks` KV store: ~3-7 MB/page at 250 DPI
 
 
 ## REST API
