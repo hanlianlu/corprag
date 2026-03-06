@@ -117,6 +117,7 @@ class TestUpsertWithVisualVectors:
         # Embedding func restored despite error
         assert lightrag.chunks_vdb.embedding_func is original_func
 
+
 # ---------------------------------------------------------------------------
 # TestAingest
 # ---------------------------------------------------------------------------
@@ -293,7 +294,6 @@ class TestAretrieve:
         assert result is expected
 
 
-
 # ---------------------------------------------------------------------------
 # TestAanswer
 # ---------------------------------------------------------------------------
@@ -334,3 +334,71 @@ class TestAanswer:
             chunk_top_k=10,
         )
         assert result is expected
+
+
+# ---------------------------------------------------------------------------
+# TestAdeleteDoc
+# ---------------------------------------------------------------------------
+
+
+class TestAdeleteDoc:
+    """Test adelete_doc cleans visual_chunks by page_count."""
+
+    @patch("dlightrag.unifiedrepresent.engine.VisualRetriever")
+    @patch("dlightrag.unifiedrepresent.engine.EntityExtractor")
+    @patch("dlightrag.unifiedrepresent.engine.VisualEmbedder")
+    @patch("dlightrag.unifiedrepresent.engine.PageRenderer")
+    async def test_deletes_visual_chunks_by_page_count(
+        self,
+        _renderer: MagicMock,
+        _embedder: MagicMock,
+        _extractor: MagicMock,
+        _retriever: MagicMock,
+    ) -> None:
+        config = _make_config()
+        lightrag = _make_lightrag()
+        visual_chunks = MagicMock()
+        visual_chunks.delete = AsyncMock()
+
+        # full_docs returns doc data with page_count
+        lightrag.full_docs.get_by_id = AsyncMock(
+            return_value={"content": "", "file_path": "/f.pdf", "page_count": 3}
+        )
+
+        engine = UnifiedRepresentEngine(
+            lightrag=lightrag,
+            visual_chunks=visual_chunks,
+            config=config,
+        )
+
+        result = await engine.adelete_doc("doc-abc")
+
+        assert result["visual_chunks_deleted"] == 3
+        assert visual_chunks.delete.await_count == 3
+
+    @patch("dlightrag.unifiedrepresent.engine.VisualRetriever")
+    @patch("dlightrag.unifiedrepresent.engine.EntityExtractor")
+    @patch("dlightrag.unifiedrepresent.engine.VisualEmbedder")
+    @patch("dlightrag.unifiedrepresent.engine.PageRenderer")
+    async def test_returns_zero_when_doc_not_found(
+        self,
+        _renderer: MagicMock,
+        _embedder: MagicMock,
+        _extractor: MagicMock,
+        _retriever: MagicMock,
+    ) -> None:
+        config = _make_config()
+        lightrag = _make_lightrag()
+        visual_chunks = MagicMock()
+        lightrag.full_docs.get_by_id = AsyncMock(return_value=None)
+
+        engine = UnifiedRepresentEngine(
+            lightrag=lightrag,
+            visual_chunks=visual_chunks,
+            config=config,
+        )
+
+        result = await engine.adelete_doc("doc-missing")
+
+        assert result["visual_chunks_deleted"] == 0
+        visual_chunks.delete.assert_not_called()

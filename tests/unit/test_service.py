@@ -460,3 +460,107 @@ class TestRAGServiceUnifiedMode:
 
         service._visual_chunks.finalize.assert_awaited_once()
         service._lightrag.finalize_storages.assert_awaited_once()
+
+    # -- Deduplication --
+
+    async def test_aingest_unified_dedup_skips_duplicate(
+        self, test_config: DlightragConfig
+    ) -> None:
+        """Unified mode skips ingestion when file hash already exists."""
+        service = RAGService(config=test_config)
+        service._initialized = True
+        service.unified = MagicMock()
+        service._hash_index = AsyncMock()
+        service._hash_index.should_skip_file = AsyncMock(
+            return_value=(True, "sha256:abc", "Duplicate of doc-1")
+        )
+
+        result = await service.aingest(source_type="local", path="/tmp/f.pdf")
+
+        assert result["status"] == "skipped"
+        service.unified.aingest.assert_not_called()
+
+    async def test_aingest_unified_registers_hash_on_success(
+        self, test_config: DlightragConfig
+    ) -> None:
+        """Unified mode registers content hash after successful ingestion."""
+        service = RAGService(config=test_config)
+        service._initialized = True
+        service.unified = MagicMock()
+        service.unified.aingest = AsyncMock(
+            return_value={"doc_id": "d1", "page_count": 2, "file_path": "/tmp/f.pdf"}
+        )
+        service._hash_index = AsyncMock()
+        service._hash_index.should_skip_file = AsyncMock(return_value=(False, "sha256:abc", None))
+
+        result = await service.aingest(source_type="local", path="/tmp/f.pdf")
+
+        assert result["doc_id"] == "d1"
+        service._hash_index.register.assert_awaited_once_with("sha256:abc", "d1", "/tmp/f.pdf")
+
+    # -- File listing --
+
+    async def test_alist_ingested_files_unified(self, test_config: DlightragConfig) -> None:
+        """Unified mode lists files via hash index."""
+        service = RAGService(config=test_config)
+        service._initialized = True
+        service.unified = MagicMock()
+        service._hash_index = AsyncMock()
+        service._hash_index.list_all = AsyncMock(
+            return_value=[
+                {"file_path": "/tmp/a.pdf", "doc_id": "d1"},
+                {"file_path": "/tmp/b.pdf", "doc_id": "d2"},
+            ]
+        )
+
+        files = await service.alist_ingested_files()
+
+        assert len(files) == 2
+        assert files[0]["doc_id"] == "d1"
+
+    # -- File deletion --
+
+    async def test_adelete_files_unified(self, test_config: DlightragConfig) -> None:
+        """Unified mode deletion cleans visual_chunks + LightRAG + hash index."""
+        service = RAGService(config=test_config)
+        service._initialized = True
+        service.unified = MagicMock()
+        service.unified.adelete_doc = AsyncMock(
+            return_value={"doc_id": "d1", "visual_chunks_deleted": 3}
+        )
+        service._lightrag = MagicMock()
+        service._lightrag.adelete_by_doc_id = AsyncMock()
+        service._lightrag.doc_status = MagicMock()
+        service._lightrag.doc_status.get_doc_by_file_path = AsyncMock(return_value=None)
+        service._lightrag.doc_status.get_docs_by_status = AsyncMock(return_value={})
+        service._hash_index = MagicMock()
+        service._hash_index.find_by_name = MagicMock(
+            return_value=("d1", "sha256:abc", "/tmp/a.pdf")
+        )
+        service._hash_index.find_by_path = MagicMock(return_value=(None, None, None))
+        service._hash_index.remove = AsyncMock(return_value=True)
+
+        results = await service.adelete_files(filenames=["a.pdf"])
+
+        assert len(results) == 1
+        assert results[0]["status"] == "deleted"
+        service.unified.adelete_doc.assert_awaited_once_with("d1")
+        service._lightrag.adelete_by_doc_id.assert_awaited_once()
+        service._hash_index.remove.assert_awaited_once_with("sha256:abc")
+
+    async def test_adelete_files_unified_not_found(self, test_config: DlightragConfig) -> None:
+        """Unified mode deletion returns not_found when doc not in hash index."""
+        service = RAGService(config=test_config)
+        service._initialized = True
+        service.unified = MagicMock()
+        service._lightrag = MagicMock()
+        service._lightrag.doc_status = MagicMock()
+        service._lightrag.doc_status.get_doc_by_file_path = AsyncMock(return_value=None)
+        service._lightrag.doc_status.get_docs_by_status = AsyncMock(return_value={})
+        service._hash_index = MagicMock()
+        service._hash_index.find_by_name = MagicMock(return_value=(None, None, None))
+        service._hash_index.find_by_path = MagicMock(return_value=(None, None, None))
+
+        results = await service.adelete_files(filenames=["nonexistent.pdf"])
+
+        assert results[0]["status"] == "not_found"
