@@ -290,14 +290,98 @@ class TestBuildVectorDbKwargs:
 class TestRAGServiceUnifiedMode:
     """Test unified mode (Mode 2) behavior in RAGService."""
 
-    async def test_aingest_unified_blocks_non_local(self, test_config: DlightragConfig) -> None:
-        """Unified mode rejects non-local source types."""
+    async def test_aingest_unified_azure_blob_single(self, test_config: DlightragConfig) -> None:
+        """Unified mode downloads a single blob and ingests via unified engine."""
         service = RAGService(config=test_config)
         service._initialized = True
         service.unified = MagicMock()
+        service.unified.aingest = AsyncMock(
+            return_value={"doc_id": "d1", "page_count": 2, "file_path": "/tmp/report.pdf"}
+        )
 
-        with pytest.raises(ValueError, match="Unified mode only supports local"):
-            await service.aingest(source_type="azure_blob", container_name="c")
+        mock_source = AsyncMock()
+        mock_source.aload_document = AsyncMock(return_value=b"%PDF-fake-content")
+
+        result = await service.aingest(
+            source_type="azure_blob",
+            container_name="test-container",
+            blob_path="docs/report.pdf",
+            source=mock_source,
+        )
+
+        service.unified.aingest.assert_awaited_once()
+        assert result["doc_id"] == "d1"
+
+    async def test_aingest_unified_azure_blob_batch(self, test_config: DlightragConfig) -> None:
+        """Unified mode batch-ingests blobs by prefix."""
+        service = RAGService(config=test_config)
+        service._initialized = True
+        service.unified = MagicMock()
+        service.unified.aingest = AsyncMock(
+            return_value={"doc_id": "d1", "page_count": 1, "file_path": "/tmp/f.pdf"}
+        )
+
+        mock_source = AsyncMock()
+        mock_source.alist_documents = AsyncMock(return_value=["a.pdf", "b.pdf"])
+        mock_source.aload_document = AsyncMock(return_value=b"%PDF-fake")
+
+        result = await service.aingest(
+            source_type="azure_blob",
+            container_name="c",
+            prefix="docs/",
+            source=mock_source,
+        )
+
+        assert service.unified.aingest.await_count == 2
+        assert result["processed"] == 2
+
+    async def test_aingest_unified_snowflake(self, test_config: DlightragConfig) -> None:
+        """Unified mode Snowflake inserts text via LightRAG ainsert."""
+        service = RAGService(config=test_config)
+        service._initialized = True
+        service.unified = MagicMock()
+        service._lightrag = MagicMock()
+        service._lightrag.ainsert = AsyncMock()
+
+        with patch("dlightrag.core.service.asyncio.to_thread") as mock_to_thread:
+            mock_source = MagicMock()
+            mock_source.list_documents.return_value = ["row-1", "row-2"]
+            mock_source.load_document.side_effect = [b"text one", b"text two"]
+            mock_source.close = MagicMock()
+
+            # to_thread: 1st call returns SnowflakeDataSource, 2nd executes query, 3rd closes
+            mock_to_thread.side_effect = [mock_source, None, None]
+
+            result = await service.aingest(source_type="snowflake", query="SELECT * FROM t")
+
+        service._lightrag.ainsert.assert_awaited_once()
+        assert result["processed"] == 2
+        assert result["source_type"] == "snowflake"
+
+    async def test_aingest_unified_blob_temp_cleanup(self, test_config: DlightragConfig) -> None:
+        """Temp directory is cleaned up even if unified.aingest fails."""
+        service = RAGService(config=test_config)
+        service._initialized = True
+        service.unified = MagicMock()
+        service.unified.aingest = AsyncMock(side_effect=RuntimeError("render failed"))
+
+        mock_source = AsyncMock()
+        mock_source.aload_document = AsyncMock(return_value=b"%PDF-fake")
+
+        with pytest.raises(RuntimeError, match="render failed"):
+            await service.aingest(
+                source_type="azure_blob",
+                container_name="c",
+                blob_path="f.pdf",
+                source=mock_source,
+            )
+
+        # Verify no temp dirs remain
+        import os
+
+        temp_base = test_config.temp_dir
+        if temp_base.exists():
+            assert len(os.listdir(temp_base)) == 0
 
     async def test_aingest_unified_delegates_to_engine(self, test_config: DlightragConfig) -> None:
         """Unified mode delegates local ingestion to unified engine."""
