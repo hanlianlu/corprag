@@ -243,6 +243,61 @@ class VisualRetriever:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    async def _llm_visual_rerank(
+        self,
+        query: str,
+        resolved: dict[str, dict],
+        top_k: int,
+    ) -> dict[str, dict]:
+        """Rerank visual chunks using VLM pointwise scoring.
+
+        Sends each page image to vision_model_func with a scoring prompt.
+        Pages are scored 0-10, sorted descending, top_k returned.
+        """
+        import asyncio
+
+        from dlightrag.unifiedrepresent.prompts import VISUAL_RERANK_PROMPT
+
+        if not resolved or not self.vision_model_func:
+            return dict(list(resolved.items())[:top_k])
+
+        prompt = VISUAL_RERANK_PROMPT.format(query=query)
+        sem = asyncio.Semaphore(4)
+        chunk_ids = list(resolved.keys())
+
+        async def _score_one(cid: str) -> tuple[str, float]:
+            vd = resolved[cid]
+            img_data = vd.get("image_data")
+            if not img_data:
+                return cid, 0.0
+            async with sem:
+                try:
+                    img_bytes = base64.b64decode(img_data)
+                    resp = await self.vision_model_func(prompt, image_data=img_bytes)
+                    return cid, self._parse_rerank_score(resp)
+                except Exception:
+                    logger.warning("VLM rerank failed for chunk %s", cid, exc_info=True)
+                    return cid, 0.0
+
+        results = await asyncio.gather(*[_score_one(cid) for cid in chunk_ids])
+        scored = sorted(results, key=lambda x: x[1], reverse=True)
+
+        reranked: dict[str, dict] = {}
+        for cid, score in scored[:top_k]:
+            resolved[cid]["relevance_score"] = score
+            reranked[cid] = resolved[cid]
+        return reranked
+
+    @staticmethod
+    def _parse_rerank_score(response: str) -> float:
+        """Parse VLM response to a 0-10 relevance score."""
+        try:
+            score = float(response.strip())
+            return max(0.0, min(10.0, score))
+        except (ValueError, TypeError):
+            logger.warning("Could not parse rerank score from: %r", response)
+            return 0.0
+
     async def _visual_rerank(
         self,
         query: str,
