@@ -29,6 +29,7 @@ LLMProvider = Literal[
     "ollama",
     "xinference",
     "openrouter",
+    "voyage",
 ]
 
 
@@ -61,7 +62,7 @@ class DlightragConfig(BaseSettings):
     # pgvector HNSW index configuration
     pg_vector_index_type: str = Field(
         default="HNSW",
-        description="pgvector index type (HNSW, IVFFlat, VCHORDRQ)",
+        description="pgvector index type — case-sensitive (HNSW, IVFFLAT, VCHORDRQ)",
     )
     pg_hnsw_m: int = Field(default=32, description="HNSW M parameter (connections per node)")
     pg_hnsw_ef_construction: int = Field(
@@ -178,6 +179,8 @@ class DlightragConfig(BaseSettings):
     xinference_base_url: str = Field(default="http://localhost:9997/v1")
     openrouter_api_key: str | None = Field(default=None)
     openrouter_base_url: str = Field(default="https://openrouter.ai/api/v1")
+    voyage_api_key: str | None = Field(default=None)
+    voyage_base_url: str = Field(default="https://api.voyageai.com/v1")
 
     # ===== Embedding =====
     embedding_model: str = Field(default="text-embedding-3-large")
@@ -256,6 +259,12 @@ class DlightragConfig(BaseSettings):
     max_async: int = Field(default=4)
     embedding_func_max_async: int = Field(default=8)
     embedding_batch_num: int = Field(default=10)
+    embedding_request_timeout: int = Field(
+        default=120,
+        description="Per-request timeout for embedding calls (seconds). "
+        "LightRAG worker timeout is 2x this value. "
+        "Increase for slow local models (CPU inference).",
+    )
     ingestion_replace_default: bool = Field(default=False)
 
     # ===== Query Configuration =====
