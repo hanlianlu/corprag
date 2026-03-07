@@ -87,6 +87,7 @@ def _make_retriever(
     rerank_model: str | None = None,
     rerank_base_url: str | None = None,
     rerank_api_key: str | None = None,
+    rerank_backend: str | None = None,
     vision_model_func: AsyncMock | None = None,
     visual_data: list[dict | None] | None = None,
 ) -> VisualRetriever:
@@ -106,6 +107,7 @@ def _make_retriever(
         rerank_model=rerank_model,
         rerank_base_url=rerank_base_url,
         rerank_api_key=rerank_api_key,
+        rerank_backend=rerank_backend,
     )
 
 
@@ -470,3 +472,116 @@ class TestVisualRerank:
         assert payload["documents"][0]["type"] == "image_url"
         headers = call_kwargs[1]["headers"]
         assert headers["Authorization"] == "Bearer secret"
+
+
+# ---------------------------------------------------------------------------
+# TestParseRerankScore
+# ---------------------------------------------------------------------------
+
+
+class TestParseRerankScore:
+    """Test _parse_rerank_score static method: parsing, clamping, edge cases."""
+
+    def test_valid_integer(self) -> None:
+        assert VisualRetriever._parse_rerank_score("8") == 8.0
+
+    def test_valid_float(self) -> None:
+        assert VisualRetriever._parse_rerank_score("7.5") == 7.5
+
+    def test_whitespace_stripped(self) -> None:
+        assert VisualRetriever._parse_rerank_score("  9 \n") == 9.0
+
+    def test_non_numeric_returns_zero(self) -> None:
+        assert VisualRetriever._parse_rerank_score("This page is very relevant") == 0.0
+
+    def test_clamped_above_ten(self) -> None:
+        assert VisualRetriever._parse_rerank_score("15") == 10.0
+
+    def test_clamped_below_zero(self) -> None:
+        assert VisualRetriever._parse_rerank_score("-3") == 0.0
+
+
+# ---------------------------------------------------------------------------
+# TestLlmVisualRerank
+# ---------------------------------------------------------------------------
+
+
+class TestLlmVisualRerank:
+    """Test _llm_visual_rerank: VLM pointwise scoring, sorting, error handling."""
+
+    async def test_sorts_by_score_descending(self) -> None:
+        call_count = 0
+
+        async def mock_vision(prompt, **kwargs):
+            nonlocal call_count
+            scores = ["3", "9", "6"]
+            result = scores[call_count]
+            call_count += 1
+            return result
+
+        img = _TINY_PNG_B64
+        resolved = {
+            "chunk-a": {"image_data": img, "content": "page a"},
+            "chunk-b": {"image_data": img, "content": "page b"},
+            "chunk-c": {"image_data": img, "content": "page c"},
+        }
+
+        ret = _make_retriever(
+            vision_model_func=mock_vision,
+            rerank_backend="llm",
+        )
+        result = await ret._llm_visual_rerank("test query", resolved, top_k=2)
+
+        # Should return 2 chunks, highest scores first
+        assert len(result) == 2
+        scores_out = [v["relevance_score"] for v in result.values()]
+        assert scores_out == sorted(scores_out, reverse=True)
+        # chunk-b scored 9, chunk-c scored 6 — those are the top 2
+        assert list(result.keys()) == ["chunk-b", "chunk-c"]
+
+    async def test_missing_image_data_scores_zero(self) -> None:
+        resolved = {
+            "chunk-a": {"content": "no image"},  # no image_data key
+        }
+        vision_func = AsyncMock(return_value="8")
+        ret = _make_retriever(vision_model_func=vision_func, rerank_backend="llm")
+
+        result = await ret._llm_visual_rerank("query", resolved, top_k=5)
+        assert result["chunk-a"]["relevance_score"] == 0.0
+        vision_func.assert_not_awaited()
+
+    async def test_vision_error_scores_zero(self) -> None:
+        resolved = {
+            "chunk-a": {"image_data": _TINY_PNG_B64, "content": "page"},
+        }
+        vision_func = AsyncMock(side_effect=RuntimeError("API timeout"))
+        ret = _make_retriever(vision_model_func=vision_func, rerank_backend="llm")
+
+        result = await ret._llm_visual_rerank("query", resolved, top_k=5)
+        assert result["chunk-a"]["relevance_score"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# TestRerankRouting
+# ---------------------------------------------------------------------------
+
+
+class TestRerankRouting:
+    """Test Phase 3 routing: rerank_backend selects correct rerank path."""
+
+    def test_llm_backend_with_vision_func(self) -> None:
+        ret = _make_retriever(
+            rerank_backend="llm",
+            vision_model_func=AsyncMock(),
+        )
+        assert ret.rerank_backend == "llm"
+        assert ret.vision_model_func is not None
+
+    def test_api_backend_with_base_url(self) -> None:
+        ret = _make_retriever(
+            rerank_backend="cohere",
+            rerank_model="rerank-v4",
+            rerank_base_url="https://api.cohere.com/v2",
+        )
+        assert ret.rerank_backend == "cohere"
+        assert ret.rerank_base_url is not None
