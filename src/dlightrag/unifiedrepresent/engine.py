@@ -40,6 +40,7 @@ class UnifiedRepresentEngine:
         visual_chunks: Any,  # BaseKVStorage instance
         config: Any,  # DlightragConfig instance
         vision_model_func: Callable | None = None,
+        visual_embedder: VisualEmbedder | None = None,
     ) -> None:
         self.lightrag = lightrag
         self.visual_chunks = visual_chunks
@@ -49,16 +50,20 @@ class UnifiedRepresentEngine:
         # Sub-components
         self.renderer = PageRenderer(dpi=config.page_render_dpi)
 
-        # Build VisualEmbedder from config
-        emb_provider = config.effective_embedding_provider
-        emb_base_url = config._get_url(f"{emb_provider}_base_url") or ""
-        emb_api_key = config._get_provider_api_key(emb_provider) or ""
-        self.embedder = VisualEmbedder(
-            model=config.embedding_model,
-            base_url=emb_base_url,
-            api_key=emb_api_key,
-            dim=config.embedding_dim,
-        )
+        # Use pre-built embedder (shared with LightRAG's embedding_func)
+        # or create one from config as fallback.
+        if visual_embedder is not None:
+            self.embedder = visual_embedder
+        else:
+            emb_provider = config.effective_embedding_provider
+            emb_base_url = config._get_url(f"{emb_provider}_base_url") or ""
+            emb_api_key = config._get_provider_api_key(emb_provider) or ""
+            self.embedder = VisualEmbedder(
+                model=config.embedding_model,
+                base_url=emb_base_url,
+                api_key=emb_api_key,
+                dim=config.embedding_dim,
+            )
 
         self.extractor = EntityExtractor(
             lightrag=lightrag,
@@ -74,6 +79,7 @@ class UnifiedRepresentEngine:
             rerank_model=(config.effective_rerank_model if config.enable_rerank else None),
             rerank_base_url=(config.rerank_base_url if config.enable_rerank else None),
             rerank_api_key=(config.effective_rerank_api_key if config.enable_rerank else None),
+            rerank_backend=(config.rerank_backend if config.enable_rerank else None),
         )
 
     # ------------------------------------------------------------------
@@ -261,6 +267,10 @@ class UnifiedRepresentEngine:
 
         logger.info("Deleted %d visual_chunks for doc_id=%s", deleted, doc_id)
         return {"doc_id": doc_id, "visual_chunks_deleted": deleted}
+
+    async def aclose(self) -> None:
+        """Release resources held by sub-components (HTTP clients, etc.)."""
+        await self.embedder.aclose()
 
     # ------------------------------------------------------------------
     # Internal helpers
