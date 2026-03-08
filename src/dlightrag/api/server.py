@@ -216,7 +216,7 @@ async def answer(body: AnswerRequest, request: Request):
             async for chunk in token_iter:
                 yield f"data: {json.dumps({'type': 'token', 'content': chunk}, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
-        except Exception as exc:
+        except Exception:
             logger.exception("Error during SSE streaming")
             # Return a generic error message to the client to avoid exposing internal details.
             yield f"data: {json.dumps({'type': 'error', 'message': 'Internal server error during streaming'}, ensure_ascii=False)}\n\n"
