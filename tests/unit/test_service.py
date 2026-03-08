@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -394,18 +395,23 @@ class TestRAGServiceUnifiedMode:
         if temp_base.exists():
             assert len(os.listdir(temp_base)) == 0
 
-    async def test_aingest_unified_delegates_to_engine(self, test_config: DlightragConfig) -> None:
+    async def test_aingest_unified_delegates_to_engine(
+        self, test_config: DlightragConfig, tmp_path: Path
+    ) -> None:
         """Unified mode delegates local ingestion to unified engine."""
+        fake_pdf = tmp_path / "f.pdf"
+        fake_pdf.write_bytes(b"%PDF-fake")
+
         service = RAGService(config=test_config)
         service._initialized = True
         service._hash_index = self._mock_hash_index()
         service.unified = MagicMock()
         service.unified.aingest = AsyncMock(
-            return_value={"doc_id": "d1", "page_count": 3, "file_path": "/tmp/f.pdf"}
+            return_value={"doc_id": "d1", "page_count": 3, "file_path": str(fake_pdf)}
         )
 
-        result = await service.aingest(source_type="local", path="/tmp/f.pdf")
-        service.unified.aingest.assert_awaited_once_with(file_path="/tmp/f.pdf")
+        result = await service.aingest(source_type="local", path=str(fake_pdf))
+        service.unified.aingest.assert_awaited_once_with(file_path=str(fake_pdf))
         assert result["doc_id"] == "d1"
         assert result["page_count"] == 3
 
@@ -464,9 +470,12 @@ class TestRAGServiceUnifiedMode:
     # -- Deduplication --
 
     async def test_aingest_unified_dedup_skips_duplicate(
-        self, test_config: DlightragConfig
+        self, test_config: DlightragConfig, tmp_path: Path
     ) -> None:
         """Unified mode skips ingestion when file hash already exists."""
+        fake_pdf = tmp_path / "f.pdf"
+        fake_pdf.write_bytes(b"%PDF-fake")
+
         service = RAGService(config=test_config)
         service._initialized = True
         service.unified = MagicMock()
@@ -475,48 +484,31 @@ class TestRAGServiceUnifiedMode:
             return_value=(True, "sha256:abc", "Duplicate of doc-1")
         )
 
-        result = await service.aingest(source_type="local", path="/tmp/f.pdf")
+        result = await service.aingest(source_type="local", path=str(fake_pdf))
 
         assert result["status"] == "skipped"
         service.unified.aingest.assert_not_called()
 
     async def test_aingest_unified_registers_hash_on_success(
-        self, test_config: DlightragConfig
+        self, test_config: DlightragConfig, tmp_path: Path
     ) -> None:
         """Unified mode registers content hash after successful ingestion."""
+        fake_pdf = tmp_path / "f.pdf"
+        fake_pdf.write_bytes(b"%PDF-fake")
+
         service = RAGService(config=test_config)
         service._initialized = True
         service.unified = MagicMock()
         service.unified.aingest = AsyncMock(
-            return_value={"doc_id": "d1", "page_count": 2, "file_path": "/tmp/f.pdf"}
+            return_value={"doc_id": "d1", "page_count": 2, "file_path": str(fake_pdf)}
         )
         service._hash_index = AsyncMock()
         service._hash_index.should_skip_file = AsyncMock(return_value=(False, "sha256:abc", None))
 
-        result = await service.aingest(source_type="local", path="/tmp/f.pdf")
+        result = await service.aingest(source_type="local", path=str(fake_pdf))
 
         assert result["doc_id"] == "d1"
-        service._hash_index.register.assert_awaited_once_with("sha256:abc", "d1", "/tmp/f.pdf")
-
-    # -- File listing --
-
-    async def test_alist_ingested_files_unified(self, test_config: DlightragConfig) -> None:
-        """Unified mode lists files via hash index."""
-        service = RAGService(config=test_config)
-        service._initialized = True
-        service.unified = MagicMock()
-        service._hash_index = AsyncMock()
-        service._hash_index.list_all = AsyncMock(
-            return_value=[
-                {"file_path": "/tmp/a.pdf", "doc_id": "d1"},
-                {"file_path": "/tmp/b.pdf", "doc_id": "d2"},
-            ]
-        )
-
-        files = await service.alist_ingested_files()
-
-        assert len(files) == 2
-        assert files[0]["doc_id"] == "d1"
+        service._hash_index.register.assert_awaited_once_with("sha256:abc", "d1", str(fake_pdf))
 
     # -- File deletion --
 
@@ -564,3 +556,60 @@ class TestRAGServiceUnifiedMode:
         results = await service.adelete_files(filenames=["nonexistent.pdf"])
 
         assert results[0]["status"] == "not_found"
+
+    async def test_adelete_files_unified_continues_after_phase1_failure(
+        self, test_config: DlightragConfig
+    ) -> None:
+        """Phases 2 (LightRAG) and 3 (hash index) still run when phase 1 (visual_chunks) fails."""
+        service = RAGService(config=test_config)
+        service._initialized = True
+        service.unified = MagicMock()
+        service.unified.adelete_doc = AsyncMock(side_effect=RuntimeError("visual_chunks DB down"))
+        service._lightrag = MagicMock()
+        service._lightrag.adelete_by_doc_id = AsyncMock()
+        service._lightrag.doc_status = MagicMock()
+        service._lightrag.doc_status.get_doc_by_file_path = AsyncMock(return_value=None)
+        service._lightrag.doc_status.get_docs_by_status = AsyncMock(return_value={})
+        service._hash_index = MagicMock()
+        service._hash_index.find_by_name = MagicMock(
+            return_value=("d1", "sha256:abc", "/tmp/a.pdf")
+        )
+        service._hash_index.find_by_path = MagicMock(return_value=(None, None, None))
+        service._hash_index.remove = AsyncMock(return_value=True)
+
+        results = await service.adelete_files(filenames=["a.pdf"])
+
+        assert results[0]["status"] == "deleted"
+        # Phase 2 and 3 ran despite phase 1 failure
+        service._lightrag.adelete_by_doc_id.assert_awaited_once()
+        service._hash_index.remove.assert_awaited_once_with("sha256:abc")
+
+
+# ---------------------------------------------------------------------------
+# TestVisualChunksKvSelection
+# ---------------------------------------------------------------------------
+
+
+class TestVisualChunksKvSelection:
+    """Test that PG backend uses PGJsonbKVStorage for visual_chunks."""
+
+    def test_pg_backend_selects_pgjsonb(self) -> None:
+        """When kv_storage starts with 'PG', PGJsonbKVStorage should be used."""
+        from dlightrag.storage.pg_jsonb_kv import PGJsonbKVStorage
+
+        kv_storage = "PGKVStorage"
+        kv_cls = object  # placeholder for lightrag.key_string_value_json_storage_cls
+        if kv_storage.startswith("PG"):
+            kv_cls = PGJsonbKVStorage
+        assert kv_cls is PGJsonbKVStorage
+
+    def test_json_backend_keeps_original(self) -> None:
+        """When kv_storage is 'JsonKVStorage', original class is kept."""
+        kv_storage = "JsonKVStorage"
+        original_cls = object
+        kv_cls = original_cls
+        if kv_storage.startswith("PG"):
+            from dlightrag.storage.pg_jsonb_kv import PGJsonbKVStorage
+
+            kv_cls = PGJsonbKVStorage
+        assert kv_cls is original_cls

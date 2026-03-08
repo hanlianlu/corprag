@@ -462,6 +462,7 @@ class RAGService:
             base_url=emb_base_url,
             api_key=emb_api_key,
             dim=config.embedding_dim,
+            batch_size=config.embedding_func_max_async,
             provider=embed_provider,
         )
 
@@ -493,8 +494,14 @@ class RAGService:
         await lightrag.initialize_storages()
         self._lightrag = lightrag
 
-        # Create visual_chunks KV store (same backend as other KV stores)
+        # Create visual_chunks KV store
+        # PGKVStorage hardcodes namespace handlers and breaks on custom namespaces
+        # like "visual_chunks". Use our PGJsonbKVStorage (generic JSONB table) instead.
         kv_cls = lightrag.key_string_value_json_storage_cls
+        if config.kv_storage.startswith("PG"):
+            from dlightrag.storage.pg_jsonb_kv import PGJsonbKVStorage
+
+            kv_cls = PGJsonbKVStorage
         visual_chunks = kv_cls(
             namespace="visual_chunks",
             workspace=config.workspace,
