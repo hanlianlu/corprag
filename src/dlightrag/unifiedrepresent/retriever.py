@@ -8,7 +8,7 @@ visual reranking -> VLM answer generation.
 from __future__ import annotations
 
 import base64
-import io
+import json
 import logging
 from collections.abc import AsyncIterator, Callable
 from typing import Any, Literal, cast
@@ -101,10 +101,20 @@ class VisualRetriever:
         # Phase 2: Visual resolution
         chunk_id_list = list(chunk_ids)
         visual_data = await self.visual_chunks.get_by_ids(chunk_id_list)
-        # visual_data is a list (same order as input); filter out None/missing
-        resolved = {
-            cid: vd for cid, vd in zip(chunk_id_list, visual_data, strict=False) if vd is not None
-        }
+        # visual_data is a list (same order as input); filter out None/missing.
+        # Some KV backends (e.g., PG) may return JSONB as raw strings — parse them.
+        resolved: dict[str, dict] = {}
+        for cid, vd in zip(chunk_id_list, visual_data, strict=False):
+            if vd is None:
+                continue
+            if isinstance(vd, str):
+                try:
+                    vd = json.loads(vd)
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning("Skipping unparseable visual_chunk %s", cid)
+                    continue
+            if isinstance(vd, dict):
+                resolved[cid] = vd
 
         # Phase 3: Visual reranking (optional)
         if self.rerank_backend == "llm" and self.vision_model_func and resolved:
@@ -173,30 +183,17 @@ class VisualRetriever:
             return {"answer": None, **retrieval}
 
         # Phase 4: Build multimodal prompt and call VLM
-        from PIL import Image
-
         from dlightrag.unifiedrepresent.prompts import UNIFIED_ANSWER_SYSTEM_PROMPT
 
-        # Build KG text context
         kg_context = self._format_kg_context(retrieval["contexts"])
-
-        # Collect page images from media
-        images = []
-        for item in retrieval["raw"]["media"]:
-            img_data = item.get("image_data")
-            if img_data:
-                img_bytes = base64.b64decode(img_data)
-                img = Image.open(io.BytesIO(img_bytes))
-                images.append(img)
-
-        # Build prompt
         user_prompt = f"Knowledge Graph Context:\n{kg_context}\n\nQuestion: {query}"
 
-        # Call VLM with system prompt + user prompt + images
+        messages = self._build_vlm_messages(
+            UNIFIED_ANSWER_SYSTEM_PROMPT, user_prompt, retrieval["raw"]["media"]
+        )
         answer_text = await self.vision_model_func(
             user_prompt,
-            system_prompt=UNIFIED_ANSWER_SYSTEM_PROMPT,
-            images=images if images else None,
+            messages=messages,
         )
 
         return {"answer": answer_text, **retrieval}
@@ -217,25 +214,17 @@ class VisualRetriever:
         if not self.vision_model_func:
             return retrieval["contexts"], retrieval["raw"], None
 
-        from PIL import Image
-
         from dlightrag.unifiedrepresent.prompts import UNIFIED_ANSWER_SYSTEM_PROMPT
 
         kg_context = self._format_kg_context(retrieval["contexts"])
-        images = []
-        for item in retrieval["raw"]["media"]:
-            img_data = item.get("image_data")
-            if img_data:
-                img_bytes = base64.b64decode(img_data)
-                images.append(Image.open(io.BytesIO(img_bytes)))
-
         user_prompt = f"Knowledge Graph Context:\n{kg_context}\n\nQuestion: {query}"
 
-        # Call VLM with stream=True
+        messages = self._build_vlm_messages(
+            UNIFIED_ANSWER_SYSTEM_PROMPT, user_prompt, retrieval["raw"]["media"]
+        )
         token_iterator = await self.vision_model_func(
             user_prompt,
-            system_prompt=UNIFIED_ANSWER_SYSTEM_PROMPT,
-            images=images if images else None,
+            messages=messages,
             stream=True,
         )
 
@@ -263,9 +252,11 @@ class VisualRetriever:
         if not resolved or not self.vision_model_func:
             return dict(list(resolved.items())[:top_k])
 
+        vision_model_func = self.vision_model_func
         prompt = VISUAL_RERANK_PROMPT.format(query=query)
         sem = asyncio.Semaphore(4)
         chunk_ids = list(resolved.keys())
+        logger.info("[Visual Rerank] Scoring %d chunks (pointwise VLM)", len(chunk_ids))
 
         async def _score_one(cid: str) -> tuple[str, float]:
             vd = resolved[cid]
@@ -275,7 +266,7 @@ class VisualRetriever:
             async with sem:
                 try:
                     img_bytes = base64.b64decode(img_data)
-                    resp = await self.vision_model_func(prompt, image_data=img_bytes)
+                    resp = await vision_model_func(prompt, image_data=img_bytes)
                     return cid, self._parse_rerank_score(resp)
                 except Exception:
                     logger.warning("VLM rerank failed for chunk %s", cid, exc_info=True)
@@ -288,6 +279,8 @@ class VisualRetriever:
         for cid, score in scored[:top_k]:
             resolved[cid]["relevance_score"] = score
             reranked[cid] = resolved[cid]
+        scores_str = ", ".join(f"{s:.1f}" for _, s in scored[:top_k])
+        logger.info("[Visual Rerank] Top %d scores: [%s]", top_k, scores_str)
         return reranked
 
     @staticmethod
@@ -365,6 +358,25 @@ class VisualRetriever:
                 exc_info=True,
             )
             return dict(list(resolved.items())[:top_k])
+
+    @staticmethod
+    def _build_vlm_messages(system_prompt: str, user_prompt: str, media: list[dict]) -> list[dict]:
+        """Build OpenAI-format multimodal messages with inline base64 images."""
+        content: list[dict] = []
+        for item in media:
+            img_data = item.get("image_data")
+            if img_data:
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{img_data}"},
+                    }
+                )
+        content.append({"type": "text", "text": user_prompt})
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": content},
+        ]
 
     def _format_kg_context(self, contexts: dict) -> str:
         """Format KG context (entities + relationships) as text for VLM prompt."""

@@ -454,6 +454,7 @@ class RAGService:
                 api_key=emb_api_key,
                 provider=embed_provider,
             ),
+            model_name=config.embedding_model,
         )
 
         # VisualEmbedder for image embedding (reuses persistent httpx client)

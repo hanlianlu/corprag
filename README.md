@@ -3,22 +3,23 @@
 [![PyPI](https://img.shields.io/pypi/v/dlightrag)](https://pypi.org/project/dlightrag/)
 [![CI](https://github.com/hanlianlu/dlightrag/actions/workflows/ci.yml/badge.svg)](https://github.com/hanlianlu/dlightrag/actions/workflows/ci.yml)
 
-Dual-mode Multimodal RAG package built upon [LightRAG](https://github.com/HKUDS/LightRAG) with additional enhancements as a production ready unified service.
+Dual-mode multimodal RAG built on [LightRAG](https://github.com/HKUDS/LightRAG) — knowledge graph + vector retrieval as a modern and unified production-ready service.
 
 ## Features
 
-- 🌐 **Flexible data sourcing** -- Ingest from local filesystem, Azure Blob Storage, or Snowflake tables
-- 🗂️ **Multimodal ingestion with granular enhancements** -- PDF, Word, Excel, PowerPoint, images, and more via parsing engine
-- 🔭 **Knowledge graph + Vector semantic** -- Ingestion and Retrieval with LightRAG paradigm 
-- ↕️ **Reranking** -- LLM-based listwise OR Reranker from Cohere, Jina, Aliyun, Azure Cohere; Point any backend at a custom endpoint (Xinference, Ollama etc.)
-- ✨ **Retrieval enrichment** -- Enhanced answer and retrieval formation for better citation and reference
-- 🔗 **Cross-workspace federation** -- Query across multiple workspaces in a single request with round-robin result merging and RBAC-ready interface
-- 🔍 **Content-aware deduplication** -- Files are hashed by content, preventing duplicate ingestion when only metadata changes
-- 🔌 **Three interfaces** -- Python SDK, REST API, and MCP server
+- **Dual multimodal RAG modes** — caption mode (parse → caption → embed) for pipeline based mulitimodal paradigm; unified mode (render → multimodal embed) for more modern multimodal paradigm
+- **Knowledge graph + vector retrieval** — fusional search with LightRAG's foundation
+- **Multimodal ingestion** — PDF, Word, Excel, PowerPoint, images, etc.
+- **Reranking** — generic LLM-based listwise; Specialized rerankers support from Cohere, Jina, Aliyun, Azure Cohere; Support any additional backend via custom endpoint
+- **Cross-workspace federation** — query across workspaces with round-robin merging
+- **Content-aware dedup** — files hashed by content, preventing duplicate ingestion
+- **Flexible sourcing** — local filesystem, Azure Blob Storage, Snowflake
+- **Three interfaces** — Python SDK, REST API, MCP server
+
 
 ## Quick Start
 
-### Option A: Python SDK
+### Python SDK
 
 ```bash
 uv add dlightrag        # or: pip install dlightrag
@@ -29,21 +30,14 @@ import asyncio
 from dlightrag import RAGService, DlightragConfig
 
 async def main():
-    # Minimal config example -- just needs an OpenAI API key
     config = DlightragConfig(openai_api_key="sk-...")
-
-    # Initialize (connects to PostgreSQL, sets up RAG engine)
     service = await RAGService.create(config=config)
 
-    # Ingest documents
-    result = await service.aingest(source_type="local", path="./docs")
-    print(f"Ingested {result['processed']} documents")
+    await service.aingest(source_type="local", path="./docs")
 
-    # Retrieve (structured contexts + sources, no LLM answer)
     result = await service.aretrieve(query="What are the key findings?")
     print(result.contexts)
 
-    # Answer (LLM-generated answer + structured contexts + sources)
     result = await service.aanswer(query="What are the key findings?")
     print(result.answer)
 
@@ -52,72 +46,42 @@ async def main():
 asyncio.run(main())
 ```
 
-> **Note:** The SDK requires a running PostgreSQL instance with pgvector + AGE extensions, or use JSON fallback for development (see [Configuration](#configuration)).
+> Requires PostgreSQL with pgvector + AGE, or JSON fallback for development (see [Configuration](#configuration)).
 
-
-### Option B: Self-Hosted Server (Docker)
+### Docker (Self-Hosted)
 
 ```bash
-git clone https://github.com/hanlianlu/dlightrag.git
-cd dlightrag
-cp .env.example .env
-# Edit .env -- at minimum set DLIGHTRAG_OPENAI_API_KEY
+git clone https://github.com/hanlianlu/dlightrag.git && cd dlightrag
+cp .env.example .env    # edit .env — at minimum set DLIGHTRAG_OPENAI_API_KEY
 docker compose up
 ```
 
-Everything is included: PostgreSQL (pgvector + AGE), REST API (`:8100`), and MCP server (`:8101`).
+Includes PostgreSQL (pgvector + AGE), REST API (`:8100`), and MCP server (`:8101`).
 
-> **Local model servers (Ollama, Xinference, etc.):** If your model server runs on the host machine, use `host.docker.internal` instead of `localhost` in the relevant base URL settings (e.g. `DLIGHTRAG_OPENAI_BASE_URL=http://host.docker.internal:11434/v1`).
+> **Local models (Ollama, Xinference, etc.):** use `host.docker.internal` instead of `localhost` in base URL settings.
 
 ```bash
-# Health check
 curl http://localhost:8100/health
 
-# Ingest documents (into default workspace)
 curl -X POST http://localhost:8100/ingest \
   -H "Content-Type: application/json" \
   -d '{"source_type": "local", "path": "/app/dlightrag_storage/sources"}'
 
-# Ingest into a specific workspace
-curl -X POST http://localhost:8100/ingest \
-  -H "Content-Type: application/json" \
-  -d '{"source_type": "local", "path": "/data/project-a", "workspace": "project-a"}'
-
-# Retrieve (contexts + sources, no LLM answer)
 curl -X POST http://localhost:8100/retrieve \
   -H "Content-Type: application/json" \
   -d '{"query": "What are the key findings?"}'
 
-# Cross-workspace retrieval
-curl -X POST http://localhost:8100/retrieve \
-  -H "Content-Type: application/json" \
-  -d '{"query": "What are the key findings?", "workspaces": ["project-a", "project-b"]}'
-
-# Answer (LLM-generated answer + contexts + sources)
 curl -X POST http://localhost:8100/answer \
   -H "Content-Type: application/json" \
-  -d '{"query": "What are the key findings?"}'
-
-# Answer with SSE streaming (tokens arrive in real-time)
-curl -N -X POST http://localhost:8100/answer \
-  -H "Content-Type: application/json" \
   -d '{"query": "What are the key findings?", "stream": true}'
-
-# List available workspaces
-curl http://localhost:8100/workspaces
 ```
 
-
-### Option C: MCP Server (for AI Agents)
+### MCP Server (for AI Agents)
 
 ```bash
 uv tool install dlightrag   # or: pip install dlightrag
 dlightrag-mcp --env-file /path/to/.env
 ```
-
-Create a `.env` with `DLIGHTRAG_*` variables — see [`.env.example`](.env.example) for a full template.
-
-Example MCP client configuration (works with Claude Desktop, VS Code, Cursor, or any MCP-compatible agent):
 
 ```json
 {
@@ -130,87 +94,59 @@ Example MCP client configuration (works with Claude Desktop, VS Code, Cursor, or
 }
 ```
 
-Available MCP tools: `retrieve`, `answer`, `ingest`, `list_files`, `delete_files`, `list_workspaces`. All tools support workspace isolation — `ingest`/`list_files`/`delete_files` accept optional `workspace`, while `retrieve`/`answer` accept optional `workspaces` list for cross-workspace federated search.
-
-> **Note:** Like the SDK, the MCP server requires PostgreSQL with pgvector + AGE, or JSON fallback storage (see [Configuration](#configuration)). Use `--env-file` to point to your `.env` with `DLIGHTRAG_*` variables (API keys, database, etc.).
-
-
-## Local Development
-
-```bash
-git clone https://github.com/hanlianlu/dlightrag.git
-cd dlightrag
-
-# Configure environment
-cp .env.example .env
-
-# Edit .env -- at minimum set DLIGHTRAG_OPENAI_API_KEY
-
-# Install dependencies
-uv sync
-
-# Start PostgreSQL (pick one)
-docker compose up postgres -d        # via Docker
-
-# starts all services including PostgreSQL, API, and MCP
-docker compose up  -d
-```
-
-
-### Testing
-
-```bash
-uv run pytest tests/unit                    # unit tests (no external services)
-uv run pytest tests/integration             # integration tests (requires PostgreSQL)
-uv run pytest                               # all tests
-uv run pytest --cov-report=html             # + HTML report → htmlcov/index.html
-```
-
-
-### Linting
-
-```bash
-uv run ruff check src/ tests/ scripts/              # lint check
-uv run ruff format --check src/ tests/ scripts/     # format check
-
-uv run ruff check --fix src/ tests/ scripts/
-uv run ruff format src/ tests/ scripts/
-```
-
-> **Tip:** To skip PostgreSQL entirely during development, set these in your `.env`:
-> ```
-> DLIGHTRAG_VECTOR_STORAGE=NanoVectorDBStorage
-> DLIGHTRAG_GRAPH_STORAGE=NetworkXStorage
-> DLIGHTRAG_KV_STORAGE=JsonKVStorage
-> DLIGHTRAG_DOC_STATUS_STORAGE=JsonDocStatusStorage
-> ```
-
-> **Note:** Excel-to-PDF conversion requires [LibreOffice](https://www.libreoffice.org/) (`libreoffice` on PATH). If not installed, Excel files are ingested as-is without conversion. The Docker image includes LibreOffice.
+Tools: `retrieve`, `answer`, `ingest`, `list_files`, `delete_files`, `list_workspaces` — all with workspace isolation.
 
 
 ## Configuration
 
-All configuration is via `DLIGHTRAG_` environment variables, a `.env` file, or constructor arguments.
+All settings via `DLIGHTRAG_` env vars, `.env` file, or constructor args. See [`.env.example`](.env.example) for the full reference.
 
-**Priority order** (highest to lowest):
-1. Constructor args -- `DlightragConfig(openai_api_key="sk-...")`
-2. Environment variables -- `DLIGHTRAG_OPENAI_API_KEY=sk-...`
-3. `.env` file
-4. Defaults
+**Priority:** constructor args > env vars > `.env` file > defaults
 
-### LLM Provider
+### RAG Mode
+
+The first decision — determines your ingestion pipeline, model requirements, and retrieval behavior.
+
+| Mode | Pipeline | Best for |
+|------|----------|----------|
+| `caption` (default) | Document parsing → VLM captioning → text embedding → KG | Text-heavy documents, structured elements |
+| `unified` | Page rendering → multimodal embedding → VLM entity extraction → KG | Visually rich documents (charts, diagrams, complex layouts) |
+
+**Model usage by stage:**
+
+| Stage | Caption | Unified |
+|-------|---------|---------|
+| Image captioning | `VISION_MODEL` ¹ | `VISION_MODEL` |
+| Table / equation captioning | `CHAT_MODEL` | — |
+| Entity extraction | `CHAT_MODEL` | `CHAT_MODEL` |
+| Embedding | `EMBEDDING_MODEL` | `EMBEDDING_MODEL` (multimodal) |
+| Rerank | `RERANK_*` via LightRAG | `VISION_MODEL` ² or `RERANK_*` API |
+| Answer generation | `CHAT_MODEL` | `VISION_MODEL` (sees page images) |
+
+¹ Falls back to `CHAT_MODEL` if vision model not configured.
+² When `RERANK_BACKEND=llm` (pointwise VLM scoring).
+
+For unified mode, set `DLIGHTRAG_RAG_MODE=unified` and point embedding/vision at multimodal models:
+
+```bash
+DLIGHTRAG_RAG_MODE=unified
+DLIGHTRAG_EMBEDDING_MODEL=Qwen3-VL-Embedding    # must be multimodal
+DLIGHTRAG_EMBEDDING_DIM=4096
+DLIGHTRAG_VISION_MODEL=qwen3-vl-32b
+```
+
+> **Limitations:** Snowflake is text-only (no visual embedding). A workspace is locked to one mode after first ingestion. Page images ~3-7 MB/page at 250 DPI.
+
+### Providers
 
 | Variable | Default | Description |
 |---|---|---|
 | `DLIGHTRAG_LLM_PROVIDER` | `openai` | `openai`, `azure_openai`, `anthropic`, `google_gemini`, `qwen`, `minimax`, `xinference`, `openrouter` |
-| `DLIGHTRAG_EMBEDDING_PROVIDER` | (follows `llm_provider`) | Override embedding provider (e.g., `openai` when using Anthropic) |
+| `DLIGHTRAG_EMBEDDING_PROVIDER` | (follows `llm_provider`) | Override embedding provider |
 | `DLIGHTRAG_VISION_PROVIDER` | (follows `llm_provider`) | Override vision provider |
 | `DLIGHTRAG_EMBEDDING_MODEL` | `text-embedding-3-large` | Embedding model |
 
-Each provider has its own API key. Model names are unified across providers.
-For **Ollama**, use `openai` provider with `DLIGHTRAG_OPENAI_BASE_URL=http://host.docker.internal:11434/v1`.
-
-See [.env.example](.env.example) for all provider-specific variables.
+Each provider uses its own API key. For **Ollama**, use `openai` provider with `DLIGHTRAG_OPENAI_BASE_URL` pointing to Ollama.
 
 ### Storage Backends
 
@@ -221,145 +157,86 @@ See [.env.example](.env.example) for all provider-specific variables.
 | `DLIGHTRAG_KV_STORAGE` | `PGKVStorage` | PGKVStorage, JsonKVStorage, RedisKVStorage, ... |
 | `DLIGHTRAG_DOC_STATUS_STORAGE` | `PGDocStatusStorage` | PGDocStatusStorage, JsonDocStatusStorage, ... |
 
-See [.env.example](.env.example) for all available configuration options.
-
 ### Workspaces
 
-Workspaces provide data isolation — each workspace has its own knowledge graph, vector store, and document index. Isolation works across all storage backend combinations:
+Each workspace has its own knowledge graph, vector store, and document index. `DLIGHTRAG_WORKSPACE` (default: `default`) is automatically bridged to backend-specific env vars — no manual setup needed.
 
 | Backend type | Isolation mechanism |
 |---|---|
 | PostgreSQL (PG*) | `workspace` column / graph name in same database |
-| Neo4j / Memgraph | Label prefix via `NEO4J_WORKSPACE` / `MEMGRAPH_WORKSPACE` env var |
-| Milvus / Qdrant | Collection prefix via LightRAG constructor `workspace` param |
-| MongoDB / Redis | Collection scope via `MONGODB_WORKSPACE` / `REDIS_WORKSPACE` env var |
+| Neo4j / Memgraph | Label prefix |
+| Milvus / Qdrant | Collection prefix |
+| MongoDB / Redis | Collection scope |
 | JSON / Nano / NetworkX / Faiss | Subdirectory under `working_dir/<workspace>/` |
 
-| Variable | Default | Description |
-|---|---|---|
-| `DLIGHTRAG_WORKSPACE` | `default` | Default workspace name |
-
-DlightRAG automatically bridges `DLIGHTRAG_WORKSPACE` to the backend-specific env var (e.g. `POSTGRES_WORKSPACE`, `NEO4J_WORKSPACE`) and passes it via LightRAG's constructor — no manual env var setup needed.
-
-**Usage in endpoints:**
-- Write operations (`/ingest`, `/files` DELETE) accept an optional `workspace` parameter
-- Read operations (`/retrieve`, `/answer`) accept an optional `workspaces` list for cross-workspace federated search (round-robin result merging)
-- `GET /workspaces` discovers available workspaces (PG: queries database, filesystem backends: scans `working_dir` subdirectories)
-- When omitted, the default workspace is used
-
 ### Reranking
-
-Five backends are available. The `cohere`, `jina`, and `aliyun` backends use LightRAG's built-in rerank functions and can target any API-compatible service via `RERANK_BASE_URL`.
 
 | Variable | Default | Description |
 |---|---|---|
 | `DLIGHTRAG_RERANK_BACKEND` | `llm` | `llm`, `cohere`, `jina`, `aliyun`, `azure_cohere` |
 | `DLIGHTRAG_RERANK_MODEL` | (backend default) | Model name sent to the endpoint |
 | `DLIGHTRAG_RERANK_BASE_URL` | (provider default) | Custom endpoint URL for any compatible service |
-| `DLIGHTRAG_RERANK_API_KEY` | — | Generic API key (falls back to provider-specific keys) |
+| `DLIGHTRAG_RERANK_API_KEY` | — | API key (falls back to provider-specific keys) |
 
-**Backend defaults** (used when `RERANK_MODEL` / `RERANK_API_KEY` are not set):
-
-| Backend | Default model | Provider-specific key |
+| Backend | Default model | Key |
 |---|---|---|
-| `llm` | (follows `CHAT_MODEL`) | (follows `LLM_PROVIDER` credentials) |
+| `llm` | (follows `CHAT_MODEL`) | (follows `LLM_PROVIDER`) |
 | `cohere` | `rerank-v4.0-pro` | `DLIGHTRAG_COHERE_API_KEY` |
 | `jina` | `jina-reranker-v3` | `DLIGHTRAG_JINA_API_KEY` |
 | `aliyun` | `qwen3-rerank` | `DLIGHTRAG_ALIYUN_RERANK_API_KEY` |
-| `azure_cohere` | `Cohere-rerank-v4.0-pro` | `DLIGHTRAG_AZURE_COHERE_API_KEY` + `DLIGHTRAG_AZURE_COHERE_ENDPOINT` |
+| `azure_cohere` | `Cohere-rerank-v4.0-pro` | `DLIGHTRAG_AZURE_COHERE_API_KEY` |
 
-**Examples:**
-
-```bash
-# Cohere (direct)
-DLIGHTRAG_RERANK_BACKEND=cohere
-DLIGHTRAG_COHERE_API_KEY=your-key
-
-# Local reranker via Xinference / LiteLLM / any Cohere-compatible endpoint
-DLIGHTRAG_RERANK_BACKEND=cohere
-DLIGHTRAG_RERANK_MODEL=bge-reranker-v2-m3
-DLIGHTRAG_RERANK_BASE_URL=http://host.docker.internal:9997/v1/rerank
-
-# LLM-based listwise reranker (default -- no extra config needed)
-DLIGHTRAG_RERANK_BACKEND=llm
-```
-
-See [.env.example](.env.example) for all reranking options.
-
-
-## Unified Representational Mode (Mode 2)
-
-DlightRAG supports two RAG modes:
-
-| Mode | Pipeline | Best For |
-|------|----------|----------|
-| `caption` (default) | RAGAnything: document parsing → VLM captioning → text embedding → KG | Text-heavy documents, structured element extraction |
-| `unified` | Visual: page rendering → multimodal embedding → VLM entity extraction → KG | Visually rich documents (charts, diagrams, complex layouts) |
-
-### Configuration
-
-Set `DLIGHTRAG_RAG_MODE=unified` and point the standard embedding/vision/reranking fields at multimodal models. No separate `VISUAL_*` config exists — unified mode reuses the same config fields with multimodal models. See [.env.example](.env.example) for more details.
-
-```bash
-DLIGHTRAG_RAG_MODE=unified
-DLIGHTRAG_PAGE_RENDER_DPI=250                     # default 250
-
-# Embedding must be multimodal (images + text → same vector space)
-DLIGHTRAG_EMBEDDING_PROVIDER=xinference           # or openai, qwen, etc.
-DLIGHTRAG_EMBEDDING_MODEL=Qwen3-VL-Embedding
-DLIGHTRAG_EMBEDDING_DIM=4096
-
-# Vision model (page description during ingestion + answer generation during query)
-DLIGHTRAG_VISION_MODEL=qwen3-vl-32b
-
-# Reranking (optional, multimodal reranker recommended)
-DLIGHTRAG_ENABLE_RERANK=true
-DLIGHTRAG_RERANK_BACKEND=cohere                   # use cohere/jina/aliyun binding
-DLIGHTRAG_RERANK_MODEL=Qwen3-VL-Reranker
-DLIGHTRAG_RERANK_BASE_URL=http://localhost:9997/v1/rerank
-```
-
-### Limitations
-
-- **Snowflake uses text-only pipeline** — Snowflake data is inserted via `LightRAG.ainsert()` (no visual embedding, since it's structured text)
-- **Per-workspace mode lock** — a workspace uses a single RAG mode (caption or unified) because ingestion pipelines are incompatible; cannot switch after first ingestion
-- **Storage** — page images in `visual_chunks` KV store: ~3-7 MB/page at 250 DPI
+Point any backend at a local reranker (Xinference, LiteLLM, etc.) via `RERANK_BASE_URL` + `RERANK_MODEL`.
 
 
 ## REST API
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/ingest` | Ingest documents from local, Azure Blob, or Snowflake. Optional `workspace` param. |
-| `POST` | `/retrieve` | Retrieve contexts and sources (no LLM answer). Optional `workspaces` list for cross-workspace search. |
-| `POST` | `/answer` | LLM-generated answer with contexts and sources. Set `stream: true` for SSE. Optional `workspaces` list. |
-| `GET` | `/files` | List ingested documents. Optional `?workspace=` query param. |
-| `DELETE` | `/files` | Delete documents. Optional `workspace` param. |
-| `GET` | `/workspaces` | List all available workspaces. |
-| `GET` | `/health` | Health check with storage status. |
+| `POST` | `/ingest` | Ingest from local, Azure Blob, or Snowflake |
+| `POST` | `/retrieve` | Contexts + sources (no LLM answer) |
+| `POST` | `/answer` | LLM answer + contexts + sources (`stream: true` for SSE) |
+| `GET` | `/files` | List ingested documents |
+| `DELETE` | `/files` | Delete documents |
+| `GET` | `/workspaces` | List available workspaces |
+| `GET` | `/health` | Health check with storage status |
 
-Set `DLIGHTRAG_API_AUTH_TOKEN` to enable bearer token authentication.
+All write endpoints accept optional `workspace`; read endpoints accept `workspaces` list for cross-workspace federated search. Set `DLIGHTRAG_API_AUTH_TOKEN` to enable bearer auth.
 
-### SSE Streaming (`POST /answer`)
+### SSE Streaming
 
-Set `"stream": true` in the request body to receive Server-Sent Events instead of a JSON response. Events are newline-delimited JSON with a `type` field:
+Set `"stream": true` to receive Server-Sent Events:
 
 | Event type | Payload | Description |
 |---|---|---|
-| `context` | `{type, data, raw}` | Retrieved contexts and sources (sent first) |
-| `token` | `{type, content}` | A single LLM answer token |
-| `done` | `{type}` | Stream completed successfully |
-| `error` | `{type, message}` | Error occurred mid-stream |
+| `context` | `{type, data, raw}` | Contexts and sources (sent first) |
+| `token` | `{type, content}` | LLM answer token |
+| `done` | `{type}` | Stream complete |
+| `error` | `{type, message}` | Error mid-stream |
 
+
+## Development
+
+```bash
+git clone https://github.com/hanlianlu/dlightrag.git && cd dlightrag
+cp .env.example .env && uv sync
+docker compose up -d                # PostgreSQL + API + MCP
+docker compose up postgres -d       # PostgreSQL only
 ```
-data: {"type": "context", "data": {"chunks": [...]}, "raw": {"sources": [...]}}
 
-data: {"type": "token", "content": "The"}
-
-data: {"type": "token", "content": " key"}
-
-data: {"type": "done"}
+```bash
+uv run pytest tests/unit            # unit tests (no external services)
+uv run pytest tests/integration     # integration tests (requires PostgreSQL)
+uv run ruff check src/ tests/ scripts/ && uv run ruff format --check src/ tests/ scripts/
 ```
+
+> **Skip PostgreSQL** for development:
+> ```
+> DLIGHTRAG_VECTOR_STORAGE=NanoVectorDBStorage
+> DLIGHTRAG_GRAPH_STORAGE=NetworkXStorage
+> DLIGHTRAG_KV_STORAGE=JsonKVStorage
+> DLIGHTRAG_DOC_STATUS_STORAGE=JsonDocStatusStorage
+> ```
 
 
 ## Architecture
@@ -373,8 +250,8 @@ data: {"type": "done"}
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE) for details.
+Apache License 2.0 — see [LICENSE](LICENSE).
 
 ---
 
-Built by HanlianLyu. Contributions welcome! Please open issues or pull requests on GitHub.
+Built by HanlianLyu. Contributions welcome!

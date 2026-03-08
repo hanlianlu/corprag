@@ -78,6 +78,73 @@ async def _drop_storages(lightrag: object, *, dry_run: bool) -> int:
     return dropped
 
 
+async def _clean_pg_orphan_tables(workspace: str, *, dry_run: bool) -> int:
+    """Clean orphaned PG vector tables from other modes or old embedding models.
+
+    LightRAG creates suffixed vector tables like ``lightrag_vdb_entity_<model>_<dim>d``
+    per embedding model. Switching modes or models leaves orphaned tables that the
+    normal ``storage.drop()`` path doesn't reach. This finds ALL ``lightrag_vdb_*``
+    and ``dlightrag_*`` tables and deletes workspace data from any not already handled.
+
+    Uses the asyncpg pool directly (same pattern as PGHashIndex).
+    """
+    try:
+        from lightrag.kg.postgres_impl import ClientManager
+
+        db = await ClientManager.get_client()
+        pool = db.pool
+        if pool is None:
+            return 0
+    except Exception:
+        return 0
+
+    try:
+        async with pool.acquire() as conn:
+            table_rows = await conn.fetch(
+                "SELECT tablename FROM pg_tables "
+                "WHERE schemaname = 'public' "
+                "AND (tablename LIKE 'lightrag_vdb_%' OR tablename LIKE 'dlightrag_%') "
+                "ORDER BY tablename"
+            )
+            if not table_rows:
+                return 0
+
+            cleaned = 0
+            for row in table_rows:
+                table = row["tablename"]
+                # Check if table has a workspace column
+                col = await conn.fetchrow(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_name = $1 AND column_name = 'workspace'",
+                    table,
+                )
+                if col is None:
+                    continue
+
+                count_row = await conn.fetchrow(
+                    f'SELECT COUNT(*) as count FROM "{table}" WHERE workspace = $1',
+                    workspace,
+                )
+                count = count_row["count"] if count_row else 0
+                if count == 0:
+                    continue
+
+                if dry_run:
+                    print(f"  [DRY RUN] orphan table {table}: {count} rows")
+                else:
+                    await conn.execute(
+                        f'DELETE FROM "{table}" WHERE workspace = $1',
+                        workspace,
+                    )
+                    print(f"  orphan table {table}: deleted {count} rows")
+                cleaned += 1
+
+            return cleaned
+    except Exception as exc:
+        print(f"  orphan table cleanup: ERROR — {exc}")
+        return 0
+
+
 # ── local files ──────────────────────────────────────────────────
 
 
@@ -154,6 +221,13 @@ async def reset_all(
 
         print(f"\nStorages ({len(_STORAGE_ATTRS)}):")
         stats["storages_dropped"] = await _drop_storages(lightrag, dry_run=dry_run)
+
+        # Clean orphaned PG tables (other modes / old embedding models)
+        if config.kv_storage.startswith("PG"):
+            print("\nOrphan PG tables:")
+            orphans = await _clean_pg_orphan_tables(config.workspace, dry_run=dry_run)
+            if orphans == 0:
+                print("  (none found)")
 
         # Clean DlightRAG hash_index if present
         hash_index = getattr(service.ingestion, "_hash_index", None)

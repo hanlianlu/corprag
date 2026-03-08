@@ -99,19 +99,29 @@ class PGJsonbKVStorage(BaseKVStorage):
         async with self._get_pool().acquire() as conn:
             await conn.executemany(_UPSERT, rows)
 
+    @staticmethod
+    def _parse_data(raw: Any) -> dict[str, Any]:
+        """Parse JSONB data — asyncpg usually returns a dict, but some pool
+        configurations may return a raw JSON string instead."""
+        if isinstance(raw, dict):
+            return raw
+        if isinstance(raw, str):
+            return json.loads(raw)
+        return raw
+
     async def get_by_id(self, id: str) -> dict[str, Any] | None:
         async with self._get_pool().acquire() as conn:
             row = await conn.fetchrow(_GET_BY_ID, self.workspace, self.namespace, id)
             if row is None:
                 return None
-            return row["data"]
+            return self._parse_data(row["data"])
 
     async def get_by_ids(self, ids: list[str]) -> list[dict[str, Any] | None]:
         if not ids:
             return []
         async with self._get_pool().acquire() as conn:
             rows = await conn.fetch(_GET_BY_IDS, self.workspace, self.namespace, ids)
-        lookup = {row["id"]: row["data"] for row in rows}
+        lookup = {row["id"]: self._parse_data(row["data"]) for row in rows}
         return [lookup.get(id_) for id_ in ids]
 
     async def filter_keys(self, keys: set[str]) -> set[str]:
