@@ -133,7 +133,9 @@ def _project_chunk_context(
 
 def _is_visual_chunk(row: dict[str, Any]) -> bool:
     sidecar = row.get("sidecar")
-    return isinstance(sidecar, dict) and sidecar.get("type") == "drawing"
+    return bool(row.get("_has_visual_asset")) or (
+        isinstance(sidecar, dict) and sidecar.get("type") == "drawing"
+    )
 
 
 def _display_file_name(value: Any) -> str:

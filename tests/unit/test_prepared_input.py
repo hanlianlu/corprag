@@ -3,12 +3,12 @@
 
 import pytest
 
-from dlightrag.application.answer_runs.prepared_input import (
+from dlightrag.engine.agent.session.effects import canonical_json
+from dlightrag.engine.runtime import (
     MAX_PREPARED_INPUT_BYTES,
     PreparedInputTooLargeError,
     require_prepared_input_bounds,
 )
-from dlightrag.engine.agent.session.effects import canonical_json
 
 
 def test_exactly_8mib_passes_and_one_byte_over_fails() -> None:

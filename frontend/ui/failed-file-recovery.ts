@@ -5,30 +5,35 @@ import {msg, str, updateWhenLocaleChanges} from '@lit/localize';
 import {html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {repeat} from 'lit/directives/repeat.js';
 import {
+  corpusRunActive,
+  getCorpusRunStatus,
+  resumeCorpusRun,
+  type WebCorpusRunReceipt,
+  type WebCorpusRunStatus,
+} from '../api/corpus-runs.ts';
+import {
   FilesApiError,
-  getFailedFileRetryStatus,
   getFailedFiles,
   startFailedFileRetry,
   type WebFailedFilesPage,
-  type WebFailedRecoveryJob,
 } from '../api/files.ts';
 import {isAbortError} from '../lib/errors.ts';
 import {LightElement} from '../lib/lit-host.ts';
 import {requestToast} from './toast-request.ts';
 import {modalResult} from './modal.ts';
-import type {ToastRequestDetail} from './toast.ts';
 import recoveryStyles from '../styles/failed-file-recovery.module.css';
 import {FailedFileRecoverySession} from './failed-file-recovery-session.ts';
 
-const ACTIVE_RECOVERY_STATES = new Set(['queued', 'running']);
-
 type PageLoadState = 'idle' | 'loading' | 'error';
-type ActiveRecoveryJob = WebFailedRecoveryJob & {status: 'queued' | 'running'};
+type RecoveryRun = WebCorpusRunReceipt | (WebCorpusRunStatus & {workspace: string});
 
-function isRecoveryActive(
-  job: WebFailedRecoveryJob | null | undefined,
-): job is ActiveRecoveryJob {
-  return job != null && ACTIVE_RECOVERY_STATES.has(job.status);
+function waitingForRepair(
+  run: RecoveryRun | null | undefined,
+): run is WebCorpusRunStatus & {workspace: string} {
+  return run !== null
+    && run !== undefined
+    && 'phase' in run
+    && run.phase === 'waiting_for_repair';
 }
 
 function normalizePage(page: WebFailedFilesPage): WebFailedFilesPage {
@@ -36,7 +41,6 @@ function normalizePage(page: WebFailedFilesPage): WebFailedFilesPage {
     ...page,
     failed: Array.isArray(page.failed) ? page.failed : [],
     nextCursor: page.nextCursor ?? null,
-    activeRecovery: page.activeRecovery ?? null,
   };
 }
 
@@ -83,7 +87,7 @@ export class DlFailedFileRecovery extends LightElement {
   declare loading: boolean;
   declare error: string | null;
   declare loadMoreState: PageLoadState;
-  declare recovery: WebFailedRecoveryJob | null;
+  declare recovery: RecoveryRun | null;
   declare recoveryPending: boolean;
 
   readonly #session = new FailedFileRecoverySession();
@@ -130,7 +134,6 @@ export class DlFailedFileRecovery extends LightElement {
   async refresh(showLoading = true): Promise<void> {
     if (!this.active || !this.workspace) return;
     const workspace = this.workspace;
-    const observedRecovery = this.recovery;
     const {controller, generation} = this.#session.startList();
     if (showLoading) this.loading = true;
     this.error = null;
@@ -138,17 +141,11 @@ export class DlFailedFileRecovery extends LightElement {
     try {
       const response = await getFailedFiles(workspace, null, controller.signal);
       if (!this.#session.isListCurrent(controller, workspace, this.workspace, generation, this.active)) return;
-      const page = normalizePage(response);
-      this.page = page;
-      const pageRecovery = page.activeRecovery;
-      const liveRecovery = this.recovery;
-      // A mutation or poll that completed after this request began owns newer
-      // state even when the delayed page still reports an older non-null job.
-      const recovery = liveRecovery !== observedRecovery
-        ? liveRecovery
-        : pageRecovery ?? (isRecoveryActive(liveRecovery) ? liveRecovery : null);
-      this.recovery = recovery;
-      if (isRecoveryActive(recovery)) this.#schedulePoll(workspace, recovery.jobId);
+      this.page = normalizePage(response);
+      const recovery = this.recovery;
+      if (corpusRunActive(recovery) && !waitingForRepair(recovery)) {
+        this.#schedulePoll(workspace, recovery.statusUrl);
+      }
     } catch (error) {
       if (isAbortError(error) || !this.#session.isListCurrent(controller, workspace, this.workspace, generation, this.active)) return;
       this.page = null;
@@ -158,9 +155,9 @@ export class DlFailedFileRecovery extends LightElement {
           id: 'inspectorFiles.recovery.loadFailed',
         }),
       );
-      const liveRecovery = this.recovery;
-      if (isRecoveryActive(liveRecovery)) {
-        this.#schedulePoll(workspace, liveRecovery.jobId);
+      const recovery = this.recovery;
+      if (corpusRunActive(recovery) && !waitingForRepair(recovery)) {
+        this.#schedulePoll(workspace, recovery.statusUrl);
       }
     } finally {
       if (this.#session.finishList(controller)) this.loading = false;
@@ -194,12 +191,18 @@ export class DlFailedFileRecovery extends LightElement {
     }
 
     const failed = this.page?.failed ?? [];
-    const recoveryActive = isRecoveryActive(this.recovery);
-    const recoveryBusy = this.recovery !== null;
-    if (failed.length === 0 && !recoveryActive) return nothing;
+    const repairRun = waitingForRepair(this.recovery) ? this.recovery : null;
+    const repairWaiting = repairRun !== null;
+    const recoveryActive = corpusRunActive(this.recovery) && !repairWaiting;
+    const recoveryBusy = this.recovery !== null && !repairWaiting;
+    if (failed.length === 0 && !recoveryActive && !repairWaiting) return nothing;
     const count = `${failed.length}${this.page?.nextCursor ? '+' : ''}`;
-    const heading = recoveryActive
-      ? msg('Document recovery in progress', {id: 'inspectorFiles.recovery.inProgress'})
+    const heading = repairWaiting
+      ? msg('Corpus repair confirmation required', {
+        id: 'inspectorFiles.recovery.repairRequired',
+      })
+      : recoveryActive
+        ? msg('Document recovery in progress', {id: 'inspectorFiles.recovery.inProgress'})
       : failed.length === 1 && !this.page?.nextCursor
         ? msg('1 document needs attention', {id: 'inspectorFiles.recovery.oneNeedsAttention'})
         : msg(str`${count} documents need attention`, {
@@ -270,20 +273,33 @@ export class DlFailedFileRecovery extends LightElement {
                 </button>
               </div>
             ` : nothing}
-            <div class=${recoveryStyles['failed-file-recovery-note']}>
-              ${msg('Retry uses stored sources. Parsing, embedding, and model usage may apply.', {
-                id: 'inspectorFiles.recovery.usageNotice',
-              })}
-            </div>
+            ${repairWaiting ? html`
+              <div class=${recoveryStyles['failed-file-recovery-note']} role="status">
+                <strong>${repairRun?.repairReason ?? msg('The upstream corpus outcome needs inspection.', {
+                  id: 'inspectorFiles.recovery.repairReasonFallback',
+                })}</strong>
+                <span>${repairRun?.repairRemedy ?? msg('Repair the corpus, then resume this same Run.', {
+                  id: 'inspectorFiles.recovery.repairRemedyFallback',
+                })}</span>
+              </div>
+            ` : html`
+              <div class=${recoveryStyles['failed-file-recovery-note']}>
+                ${msg('Retry uses stored sources. Parsing, embedding, and model usage may apply.', {
+                  id: 'inspectorFiles.recovery.usageNotice',
+                })}
+              </div>
+            `}
           </div>
         </details>
         <button class=${`dl-btn ${recoveryStyles['failed-file-retry']}`} type="button"
                 ?disabled=${recoveryBusy || this.recoveryPending || failed.length === 0}
                 aria-busy=${this.recoveryPending ? 'true' : 'false'}
                 @click=${this.#confirmRetry}>
-          ${recoveryActive
-            ? msg('Running…', {id: 'inspectorFiles.recovery.running'})
-            : msg('Retry all', {id: 'inspectorFiles.recovery.retryAll'})}
+          ${repairWaiting
+            ? msg('Resume after repair', {id: 'inspectorFiles.recovery.resumeRepair'})
+            : recoveryActive
+              ? msg('Running…', {id: 'inspectorFiles.recovery.running'})
+              : msg('Retry all', {id: 'inspectorFiles.recovery.retryAll'})}
         </button>
       </div>
       ${this.#confirmDialog()}
@@ -297,7 +313,6 @@ export class DlFailedFileRecovery extends LightElement {
     if (!cursor || !workspace || this.loadMoreState === 'loading') return;
     const controller = this.#session.startLoadMore();
     const generation = this.#session.contextGeneration;
-    const observedRecovery = this.recovery;
     this.loadMoreState = 'loading';
     try {
       const response = await getFailedFiles(workspace, cursor, controller.signal);
@@ -309,20 +324,11 @@ export class DlFailedFileRecovery extends LightElement {
       const older = normalizePage(response);
       const seen = new Set(page.failed.map((item) => item.documentId));
       const appended = older.failed.filter((item) => !seen.has(item.documentId));
-      const liveRecovery = this.recovery;
-      const recovery = liveRecovery !== observedRecovery
-        ? liveRecovery
-        : older.activeRecovery ?? liveRecovery;
       this.page = {
         ...page,
         failed: [...page.failed, ...appended],
         nextCursor: older.nextCursor,
-        activeRecovery: recovery,
       };
-      this.recovery = recovery;
-      if (isRecoveryActive(recovery)) {
-        this.#schedulePoll(workspace, recovery.jobId);
-      }
       this.loadMoreState = 'idle';
     } catch (error) {
       if (isAbortError(error) || !this.#session.isLoadMoreCurrent(controller, generation)) return;
@@ -347,8 +353,12 @@ export class DlFailedFileRecovery extends LightElement {
 
   #confirmRetry = async (event: Event): Promise<void> => {
     const trigger = event.currentTarget as HTMLButtonElement;
+    if (waitingForRepair(this.recovery)) {
+      await this.#resumeRepair();
+      return;
+    }
     const dialog = this.querySelector<HTMLDialogElement>('#retry-failed-files-dialog');
-    if (!dialog || this.recoveryPending || isRecoveryActive(this.recovery)) return;
+    if (!dialog || this.recoveryPending || corpusRunActive(this.recovery)) return;
     this.#retryTrigger = trigger;
     const controller = this.#session.startModal();
     const result = await modalResult(
@@ -369,17 +379,17 @@ export class DlFailedFileRecovery extends LightElement {
     const generation = this.#session.contextGeneration;
     this.recoveryPending = true;
     try {
-      const job = await startFailedFileRetry(workspace, controller.signal);
+      const run = await startFailedFileRetry(workspace, controller.signal);
       if (!this.#session.isMutationCurrent(controller, workspace, this.workspace, generation, this.active)) return;
-      this.recovery = job;
-      if (isRecoveryActive(job)) {
+      this.recovery = run;
+      if (corpusRunActive(run)) {
         requestToast(this, {
           message: msg('Document recovery started.', {id: 'inspectorFiles.recovery.started'}),
           duration: 3000,
         });
-        this.#schedulePoll(workspace, job.jobId);
+        this.#schedulePoll(workspace, run.statusUrl);
       } else {
-        await this.#settleRecovery(job);
+        await this.#settleRecovery(run);
       }
     } catch (error) {
       if (isAbortError(error) || !this.#session.isMutationCurrent(controller, workspace, this.workspace, generation, this.active)) return;
@@ -397,22 +407,63 @@ export class DlFailedFileRecovery extends LightElement {
     }
   }
 
-  async #poll(workspace: string, jobId: string): Promise<void> {
+  async #resumeRepair(): Promise<void> {
+    const waiting = this.recovery;
+    const workspace = this.workspace;
+    if (!waitingForRepair(waiting) || this.recoveryPending || !workspace) return;
+    const controller = this.#session.startMutation();
+    const generation = this.#session.contextGeneration;
+    this.recoveryPending = true;
+    try {
+      const resumed = await resumeCorpusRun(waiting.resumeUrl, controller.signal);
+      if (!this.#session.isMutationCurrent(
+        controller, workspace, this.workspace, generation, this.active,
+      )) return;
+      this.recovery = {...resumed, workspace};
+      requestToast(this, {
+        message: msg('Corpus repair resume accepted.', {
+          id: 'inspectorFiles.recovery.resumeAccepted',
+        }),
+        duration: 3000,
+      });
+      if (corpusRunActive(resumed) && !waitingForRepair(this.recovery)) {
+        this.#schedulePoll(workspace, resumed.statusUrl);
+      } else if (!waitingForRepair(this.recovery)) {
+        await this.#settleRecovery(this.recovery);
+      }
+    } catch (error) {
+      if (isAbortError(error) || !this.#session.isMutationCurrent(
+        controller, workspace, this.workspace, generation, this.active,
+      )) return;
+      requestToast(this, {
+        message: msg('Corpus repair resume failed.', {
+          id: 'inspectorFiles.recovery.resumeFailed',
+        }),
+        duration: 4000,
+      });
+    } finally {
+      if (this.#session.finishMutation(controller)) this.recoveryPending = false;
+    }
+  }
+
+  async #poll(workspace: string, statusUrl: string): Promise<void> {
     const controller = this.#session.startPollRequest();
     try {
-      const job = await getFailedFileRetryStatus(workspace, jobId, controller.signal);
+      const status = await getCorpusRunStatus(statusUrl, controller.signal);
       if (
         !this.#session.isPollCurrent(controller)
         || workspace !== this.workspace
         || !this.active
         || !this.isConnected
       ) return;
-      this.recovery = job;
-      if (isRecoveryActive(job)) {
-        this.#schedulePoll(workspace, jobId);
+      const run = {...status, workspace};
+      this.recovery = run;
+      if (waitingForRepair(run)) return;
+      if (corpusRunActive(run)) {
+        this.#schedulePoll(workspace, statusUrl);
         return;
       }
-      await this.#settleRecovery(job);
+      await this.#settleRecovery(run);
     } catch (error) {
       if (isAbortError(error)) return;
       if (
@@ -432,16 +483,16 @@ export class DlFailedFileRecovery extends LightElement {
         );
         return;
       }
-      this.#schedulePoll(workspace, jobId);
+      this.#schedulePoll(workspace, statusUrl);
     } finally {
       this.#session.finishPollRequest(controller);
     }
   }
 
-  async #settleRecovery(job: WebFailedRecoveryJob): Promise<void> {
+  async #settleRecovery(run: RecoveryRun): Promise<void> {
     const workspace = this.workspace;
     const generation = this.#session.contextGeneration;
-    this.recovery = job;
+    this.recovery = run;
     await this.refresh(false);
     if (
       workspace !== this.workspace
@@ -453,15 +504,9 @@ export class DlFailedFileRecovery extends LightElement {
       bubbles: true,
       composed: true,
     }));
-    if (job.status === 'succeeded' || job.status === 'partial') {
+    if (run.status === 'succeeded') {
       requestToast(this, {
-        message: job.failed > 0
-          ? msg(str`Recovery finished: ${job.succeeded} succeeded, ${job.failed} still failed.`, {
-            id: 'inspectorFiles.recovery.finishedPartial',
-          })
-          : msg(str`Recovery finished: ${job.succeeded} succeeded.`, {
-            id: 'inspectorFiles.recovery.finished',
-          }),
+        message: msg('Document recovery finished.', {id: 'inspectorFiles.recovery.finished'}),
         duration: 5000,
       });
       return;
@@ -472,9 +517,9 @@ export class DlFailedFileRecovery extends LightElement {
     });
   }
 
-  #schedulePoll(workspace: string, jobId: string): void {
-    this.#session.schedulePoll(workspace, jobId, (nextWorkspace, nextJob) => {
-      void this.#poll(nextWorkspace, nextJob);
+  #schedulePoll(workspace: string, statusUrl: string): void {
+    this.#session.schedulePoll(workspace, statusUrl, (nextWorkspace, nextStatusUrl) => {
+      void this.#poll(nextWorkspace, nextStatusUrl);
     });
   }
 

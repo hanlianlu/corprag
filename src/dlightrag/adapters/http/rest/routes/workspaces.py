@@ -9,7 +9,6 @@ from dlightrag.adapters.http.rest.auth import get_current_user
 from dlightrag.adapters.http.rest.models import (
     WorkspaceCreateRequest,
     WorkspaceCreateResponse,
-    WorkspaceDeleteResponse,
     WorkspacesResponse,
 )
 from dlightrag.application.access import AccessAction, UserContext
@@ -21,9 +20,12 @@ from dlightrag.application.corpus_admin import (
     normalize_workspace,
     validate_workspace_name,
 )
-from dlightrag.application.errors import WorkspaceWriteFencedError
 
-from .deps import enforce_access, filter_workspace_records, get_application, raise_fenced_http
+from .deps import (
+    enforce_access,
+    filter_workspace_records,
+    get_application,
+)
 
 router = APIRouter()
 
@@ -104,37 +106,6 @@ async def create_workspace(
         "workspace": workspace,
         "display_name": display_name,
         "created": True,
-    }
-
-
-@router.delete("/workspaces/{workspace}", response_model=WorkspaceDeleteResponse)
-async def delete_workspace(
-    workspace: str,
-    request: Request,
-    keep_files: bool = Query(default=False),
-    dry_run: bool = Query(default=False),
-    user: UserContext = Depends(get_current_user),
-) -> dict[str, Any]:
-    """Delete/reset one workspace and remove its registry row."""
-    application = get_application(request)
-    try:
-        label = validate_workspace_name(workspace)
-        normalized = normalize_workspace(label)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await enforce_access(request, user, AccessAction.WORKSPACE_DELETE, workspace=normalized)
-    try:
-        result = await application.corpora.reset(
-            workspace_ids=(normalized,),
-            keep_files=keep_files,
-            dry_run=dry_run,
-        )
-    except WorkspaceWriteFencedError as exc:
-        raise raise_fenced_http(exc) from exc
-    return {
-        "workspace": normalized,
-        "deleted": not dry_run,
-        "result": result,
     }
 
 

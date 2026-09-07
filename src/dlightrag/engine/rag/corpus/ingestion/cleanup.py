@@ -2,12 +2,17 @@
 """LightRAG deletion helpers."""
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from inspect import isawaitable
 from pathlib import Path
 from typing import Any
 
 from dlightrag.engine.rag.corpus.contracts import DocStatusLookup
 from dlightrag.engine.rag.corpus.metadata_index import MetadataIndexProtocol
+from dlightrag.engine.rag.retrieval.metadata_fields import (
+    INGEST_FINALIZATION_COMPLETE_FIELD,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +50,18 @@ async def collect_deletion_context(
 
     metadata_lookup_failed = False
     status_lookup_failed = False
+
+    # A canonical Product Document id is an exact owned identity too.
+    if metadata_index is not None:
+        try:
+            direct_read = metadata_index.get(normalized)
+            direct = await direct_read if isawaitable(direct_read) else None
+            if isinstance(direct, Mapping):
+                ctx.doc_ids.add(normalized)
+                ctx.sources_used.append("metadata_index")
+        except Exception as exc:
+            metadata_lookup_failed = True
+            logger.warning("Metadata document lookup failed for %s: %s", identifier, exc)
 
     # An exact durable locator owns identity. A filename fallback is permitted
     # only when the caller supplied a bare display name and exact resolution
@@ -113,33 +130,75 @@ async def cascade_delete(
     lightrag: Any,
     metadata_index: Any | None = None,
 ) -> dict[str, Any]:
-    """Cascade deletion with per-layer fault isolation.
+    """Hide first, inspect the complete public deletion contract, then clean up."""
+    stats: dict[str, Any] = {"docs_deleted": 0, "errors": [], "outcomes": []}
 
-    Each layer is wrapped in try/except so failures in one layer don't
-    prevent cleanup in subsequent layers.
+    for doc_id in sorted(ctx.doc_ids):
+        previous_metadata = None
+        if metadata_index is not None:
+            try:
+                previous_metadata = await metadata_index.get(doc_id)
+            except Exception as exc:
+                stats["errors"].append(f"Visibility lookup ({doc_id}) failed")
+                stats["outcomes"].append({"doc_id": doc_id, "status": "waiting_for_repair"})
+                logger.warning("cascade_delete visibility lookup failed for %s: %s", doc_id, exc)
+                continue
+        # Hide before the first destructive LightRAG effect. If the marker
+        # cannot be persisted, do not proceed with a potentially visible
+        # partial deletion.
+        if metadata_index is not None:
+            try:
+                await metadata_index.upsert(
+                    doc_id,
+                    {INGEST_FINALIZATION_COMPLETE_FIELD: False},
+                )
+            except Exception as exc:
+                stats["errors"].append(f"Visibility barrier ({doc_id}) failed")
+                stats["outcomes"].append({"doc_id": doc_id, "status": "failed"})
+                logger.warning("cascade_delete visibility hide failed for %s: %s", doc_id, exc)
+                continue
 
-    Layers:
-        1. LightRAG cross-backend cleanup (adelete_by_doc_id)
-        2. DlightRAG metadata index entries
-    """
-    stats: dict[str, Any] = {"docs_deleted": 0, "errors": []}
-
-    for doc_id in ctx.doc_ids:
-        # Layer 1: LightRAG (full_docs, doc_status, text_chunks, chunks_vdb, KG)
         try:
-            await lightrag.adelete_by_doc_id(doc_id, delete_llm_cache=True)
-            stats["docs_deleted"] += 1
-        except Exception as exc:
-            stats["errors"].append(f"Layer 1 LightRAG ({doc_id}): {exc}")
-            logger.warning("cascade_delete Layer 1 failed for %s: %s", doc_id, exc)
+            deletion = await lightrag.adelete_by_doc_id(doc_id, delete_llm_cache=True)
+        except BaseException as exc:
+            stats["errors"].append(f"Upstream deletion ({doc_id}) is ambiguous")
+            stats["outcomes"].append({"doc_id": doc_id, "status": "waiting_for_repair"})
+            logger.warning("cascade_delete upstream call failed for %s: %s", doc_id, exc)
+            continue
+        raw_status = (
+            deletion.get("status")
+            if isinstance(deletion, dict)
+            else getattr(deletion, "status", None)
+        )
+        status = str(getattr(raw_status, "value", raw_status) or "").strip().lower()
+        if status == "not_allowed":
+            # Public LightRAG guarantees this rejection made no write. Restore
+            # the exact DlightRAG-owned visibility projection.
+            if metadata_index is not None and isinstance(previous_metadata, Mapping):
+                try:
+                    await metadata_index.upsert(doc_id, previous_metadata)
+                except Exception as exc:
+                    stats["errors"].append(f"Visibility restore ({doc_id}) failed")
+                    stats["outcomes"].append({"doc_id": doc_id, "status": "waiting_for_repair"})
+                    logger.warning("cascade_delete visibility restore failed: %s", exc)
+                    continue
+            stats["outcomes"].append({"doc_id": doc_id, "status": "rejected"})
+            continue
+        if status not in {"success", "not_found"}:
+            stats["errors"].append(f"Upstream deletion ({doc_id}) is ambiguous")
+            stats["outcomes"].append({"doc_id": doc_id, "status": "waiting_for_repair"})
+            continue
 
-        # Layer 2: DlightRAG metadata index
         if metadata_index is not None:
             try:
                 await metadata_index.delete(doc_id)
             except Exception as exc:
-                stats["errors"].append(f"Layer 2 metadata ({doc_id}): {exc}")
-                logger.warning("cascade_delete Layer 2 failed for %s: %s", doc_id, exc)
+                stats["errors"].append(f"Projection cleanup ({doc_id}) failed")
+                stats["outcomes"].append({"doc_id": doc_id, "status": "waiting_for_repair"})
+                logger.warning("cascade_delete projection cleanup failed for %s: %s", doc_id, exc)
+                continue
+        stats["docs_deleted"] += 1
+        stats["outcomes"].append({"doc_id": doc_id, "status": "deleted", "upstream": status})
 
     return stats
 
@@ -155,8 +214,8 @@ def remove_deleted_files(file_paths: set[str], input_dir: str) -> int:
       the corresponding ``.mineru_raw`` / ``.docling_raw`` directories
     - Collision-suffixed variants (``<name>.pdf_001.parsed/``, etc.)
 
-    Best-effort — failures are logged but never raised, so a missing file
-    on disk does not block the DB-level deletion from succeeding.
+    Missing paths are idempotent. Any observed I/O failure is raised so the
+    durable mutation cannot report success with retained requested bytes.
 
     Args:
         file_paths: Absolute paths to ingested files (from LightRAG doc_status).
@@ -171,6 +230,7 @@ def remove_deleted_files(file_paths: set[str], input_dir: str) -> int:
     from lightrag.constants import PARSED_ARTIFACT_DIR_SUFFIXES, PARSED_DIR_NAME
 
     removed = 0
+    failures: list[OSError] = []
     input_root = Path(input_dir)
     default_parsed_root = input_root / PARSED_DIR_NAME
     _collision_re = re.compile(r"_\d{3}$")
@@ -198,8 +258,9 @@ def remove_deleted_files(file_paths: set[str], input_dir: str) -> int:
                 if candidate.exists() and candidate.is_file():
                     candidate.unlink()
                     removed += 1
-            except OSError:
-                logger.debug("Failed to remove source file: %s", candidate, exc_info=True)
+            except OSError as exc:
+                failures.append(exc)
+                logger.warning("Failed to remove source file: %s", candidate, exc_info=True)
 
         # 2. Remove parsed artifact directories under __parsed__/. LightRAG
         #    versions have used both the full source filename and its stem as
@@ -217,12 +278,19 @@ def remove_deleted_files(file_paths: set[str], input_dir: str) -> int:
                             continue
                         artifact_base = _collision_re.sub("", entry_name[: -len(suffix)])
                         if artifact_base in artifact_bases:
-                            shutil.rmtree(entry, ignore_errors=True)
-                            removed += 1
+                            try:
+                                shutil.rmtree(entry)
+                            except OSError as exc:
+                                failures.append(exc)
+                            else:
+                                removed += 1
                             break
-            except OSError:
-                logger.debug("Failed to scan parsed dir: %s", parsed_root, exc_info=True)
+            except OSError as exc:
+                failures.append(exc)
+                logger.warning("Failed to scan parsed dir: %s", parsed_root, exc_info=True)
 
+    if failures:
+        raise OSError("one or more requested corpus source files could not be removed")
     return removed
 
 

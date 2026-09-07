@@ -6,7 +6,6 @@ import logging
 import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable, Sequence
-from typing import Any
 
 from dlightrag.engine.rag.workspace.lifecycle import await_shared_cleanup, defer_cancellation
 from dlightrag.engine.rag.workspace.ports import CorpusSchemaError, CorpusUnavailableError
@@ -16,6 +15,7 @@ from dlightrag.engine.rag.workspace.workspaces import require_canonical_workspac
 logger = logging.getLogger(__name__)
 
 type WorkspaceBuilder = Callable[[str], Awaitable[WorkspaceRag]]
+type WorkspaceStateCallback = Callable[[str], None]
 
 
 class WorkspaceUnavailableError(CorpusUnavailableError):
@@ -37,29 +37,22 @@ class WorkspacePool:
         initial_backoff_seconds: float = 15.0,
         max_backoff_seconds: float = 300.0,
         warm_concurrency: int = 8,
+        on_workspace_unavailable: WorkspaceStateCallback | None = None,
+        on_workspace_available: WorkspaceStateCallback | None = None,
     ) -> None:
         self._build = build
         self._clock = clock
         self._initial_backoff = initial_backoff_seconds
         self._max_backoff = max_backoff_seconds
         self._warm_semaphore = asyncio.Semaphore(warm_concurrency)
+        self._on_workspace_unavailable = on_workspace_unavailable
+        self._on_workspace_available = on_workspace_available
         self._runtimes: dict[str, WorkspaceRag] = {}
         self._locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._backoff: dict[str, tuple[float, float]] = {}
         self._workspace_flights: dict[str, asyncio.Task[WorkspaceRag]] = {}
         self._close_task: asyncio.Task[asyncio.CancelledError | None] | None = None
         self._closed = False
-
-    async def get_pipeline_status(self, workspace_id: str) -> dict[str, Any] | None:
-        """Read one loaded runtime's pipeline status without warming it."""
-        workspace = require_canonical_workspace_id(workspace_id)
-        if self._closed:
-            return None
-        async with self._locks[workspace]:
-            runtime = self._runtimes.get(workspace)
-            if runtime is None or self._closed:
-                return None
-            return await runtime.aget_pipeline_status()
 
     async def is_loaded(self, workspace_id: str) -> bool:
         """Return whether one runtime is loaded, synchronized with lifecycle changes."""
@@ -178,6 +171,16 @@ class WorkspacePool:
                 except CorpusSchemaError:
                     raise
                 except Exception as exc:
+                    from dlightrag.engine.dependencies import classify_transient_dependency
+
+                    if (
+                        classify_transient_dependency(
+                            exc,
+                            component_hint="corpus_storage",
+                        )
+                        != "corpus_storage"
+                    ):
+                        raise
                     failed = self._backoff.get(workspace)
                     interval = (
                         self._initial_backoff
@@ -189,19 +192,18 @@ class WorkspacePool:
                         "Workspace '%s' construction failed; retry in %.0fs",
                         workspace,
                         interval,
-                        exc_info=True,
+                        extra={"error_type": type(exc).__name__},
                     )
-                    detail = str(exc)
-                    if exc.__cause__ is None:
-                        detail = f"{type(exc).__name__}: {detail}"
+                    self._notify_workspace_state(self._on_workspace_unavailable, workspace)
                     raise WorkspaceUnavailableError(
-                        f"Workspace '{workspace}' is unavailable: {detail}"
+                        f"Workspace '{workspace}' is temporarily unavailable ({type(exc).__name__})"
                     ) from exc
                 if self._closed:
                     await self._close_unpublished_runtime(workspace, runtime)
                     raise WorkspaceUnavailableError("Workspace pool is closed")
                 self._runtimes[workspace] = runtime
                 self._backoff.pop(workspace, None)
+                self._notify_workspace_state(self._on_workspace_available, workspace)
                 return runtime
 
     async def _close_unpublished_runtime(
@@ -277,6 +279,18 @@ class WorkspacePool:
         self._locks.clear()
         return cancellation
 
+    @staticmethod
+    def _notify_workspace_state(
+        callback: WorkspaceStateCallback | None,
+        workspace: str,
+    ) -> None:
+        if callback is None:
+            return
+        try:
+            callback(workspace)
+        except Exception:
+            logger.warning("Workspace health callback failed", exc_info=True)
+
     def _raise_during_backoff(self, workspace: str) -> None:
         failed = self._backoff.get(workspace)
         if failed is None:
@@ -289,4 +303,4 @@ class WorkspacePool:
             )
 
 
-__all__ = ["WorkspacePool", "WorkspaceUnavailableError"]
+__all__ = ["WorkspacePool", "WorkspaceStateCallback", "WorkspaceUnavailableError"]

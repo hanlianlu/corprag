@@ -112,13 +112,13 @@ export class FailedFileRecoverySession {
 
   schedulePoll(
     workspace: string,
-    jobId: string,
-    tick: (workspace: string, jobId: string) => void,
+    statusUrl: string,
+    tick: (workspace: string, statusUrl: string) => void,
   ): void {
     this.stopPolling();
     this.#pollTimer = window.setTimeout(() => {
       this.#pollTimer = null;
-      tick(workspace, jobId);
+      tick(workspace, statusUrl);
     }, RECOVERY_POLL_INTERVAL_MS);
   }
 

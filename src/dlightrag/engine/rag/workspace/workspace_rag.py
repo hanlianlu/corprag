@@ -30,7 +30,6 @@ from dlightrag.engine.rag.corpus.contracts import (
     SourceType,
     VisualAssetSize,
 )
-from dlightrag.engine.rag.corpus.ingest_jobs import RetryOutcomeUncertainError
 from dlightrag.engine.rag.corpus.ingestion.document_embedding import (
     build_document_embedder,
     resolve_direct_image_embedding_enabled,
@@ -38,8 +37,8 @@ from dlightrag.engine.rag.corpus.ingestion.document_embedding import (
 from dlightrag.engine.rag.corpus.ingestion.engine import (
     PreparedIngestFile,
     UnifiedIngestionEngine,
-    ingest_finalization_complete,
 )
+from dlightrag.engine.rag.corpus.ingestion.errors import RetryOutcomeUncertainError
 from dlightrag.engine.rag.corpus.ingestion.paths import (
     iter_ingestable_files,
     lightrag_archived_source_path,
@@ -68,6 +67,7 @@ from dlightrag.engine.rag.retrieval.rerank import (
     build_product_reranker,
     rerank_consumes_images,
 )
+from dlightrag.engine.rag.retrieval.visibility import ingest_finalization_complete
 from dlightrag.engine.rag.workspace.lifecycle import (
     defer_cancellation,
     shutdown_lightrag_worker_pools,
@@ -417,12 +417,10 @@ class WorkspaceRag:
         if lightrag.chunks_vdb is not None:
             from dlightrag.engine.rag.retrieval.filtering import FilteredVectorStorage
 
-            if corpus_stores.filtered_vectors is None:
-                raise RuntimeError("Corpus backend did not provide filtered vector search")
-
             filtered_vdb = FilteredVectorStorage(
                 original=lightrag.chunks_vdb,
                 embedding_func=embedding_func,
+                visibility_lookup=corpus_stores.metadata_index,
                 filtered_search=corpus_stores.filtered_vectors,
             )
             lightrag.chunks_vdb = filtered_vdb  # type: ignore[assignment]
@@ -436,6 +434,7 @@ class WorkspaceRag:
 
             lightrag.text_chunks = FilteredChunkStore(  # type: ignore[assignment]
                 original=lightrag.text_chunks,
+                visibility_lookup=corpus_stores.metadata_index,
                 scoped_reader=corpus_stores.scoped_chunk_reader,
             )
 
@@ -448,6 +447,7 @@ class WorkspaceRag:
 
         self._visual_asset_resolver = VisualAssetResolver(
             stores=self._lightrag_stores,
+            visibility_lookup=corpus_stores.metadata_index,
             thumb_cache=ThumbnailCache(max_size=settings.thumb_cache_size),
         )
 
@@ -592,6 +592,7 @@ class WorkspaceRag:
         *,
         keep_files: bool = False,
         dry_run: bool = False,
+        preserve_run_sources_after: str | None = None,
     ) -> dict[str, Any]:
         """Completely remove this workspace -- all data, graph schemas, and files.
 
@@ -608,6 +609,7 @@ class WorkspaceRag:
             maintenance=self.backend.maintenance,
             keep_files=keep_files,
             dry_run=dry_run,
+            preserve_run_sources_after=preserve_run_sources_after,
         )
         if not dry_run:
             self._initialized = False
@@ -712,6 +714,7 @@ class WorkspaceRag:
         title: str | None = None,
         author: str | None = None,
         metadata: dict[str, Any] | None = None,
+        track_id: str | None = None,
     ) -> dict[str, Any]:
         """Ingest one local file through the unified LightRAG path."""
         if self._ingestion_engine is None:
@@ -737,6 +740,7 @@ class WorkspaceRag:
             title=title,
             author=author,
             metadata=metadata,
+            track_id=track_id,
         )
         return result
 
@@ -749,6 +753,7 @@ class WorkspaceRag:
         title: str | None = None,
         author: str | None = None,
         metadata: dict[str, Any] | None = None,
+        track_id: str | None = None,
     ) -> dict[str, Any]:
         """Ingest local files through one LightRAG staged batch."""
         if self._ingestion_engine is None:
@@ -784,6 +789,7 @@ class WorkspaceRag:
             title=title,
             author=author,
             metadata=metadata,
+            track_id=track_id,
         )
         return result
 
@@ -795,6 +801,7 @@ class WorkspaceRag:
         title: str | None = None,
         author: str | None = None,
         metadata: dict[str, Any] | None = None,
+        track_id: str | None = None,
     ) -> dict[str, Any]:
         """Ingest explicitly listed local files with per-document metadata."""
         if self._ingestion_engine is None:
@@ -835,6 +842,7 @@ class WorkspaceRag:
             title=title,
             author=author,
             metadata=metadata,
+            track_id=track_id,
         )
         return result
 
@@ -895,6 +903,7 @@ class WorkspaceRag:
         progress_callback: RemoteIngestProgressCallback | None = None,
         resume_from_window: int = 0,
         retain_source_file: bool | None = None,
+        track_id: str | None = None,
     ) -> dict[str, Any]:
         """Download remote objects into ephemeral parser batches and ingest them."""
         if self._ingestion_engine is None:
@@ -1091,6 +1100,7 @@ class WorkspaceRag:
                     title=title,
                     author=author,
                     metadata=metadata,
+                    track_id=track_id,
                 )
 
                 processed += int(batch_result.get("processed") or 0)
@@ -1156,6 +1166,7 @@ class WorkspaceRag:
         retain_source_file: bool | None = None,
         _progress_callback: RemoteIngestProgressCallback | None = None,
         _resume_from_window: int = 0,
+        _track_id: str | None = None,
     ) -> dict[str, Any]:
         """Ingest documents from a caller-provided async data source.
 
@@ -1194,6 +1205,7 @@ class WorkspaceRag:
                 progress_callback=_progress_callback,
                 resume_from_window=_resume_from_window,
                 retain_source_file=retain_source_file,
+                track_id=_track_id,
             )
         finally:
             if close is not None:
@@ -1226,6 +1238,7 @@ class WorkspaceRag:
                 retain_source_file=kwargs.get("retain_source_file"),
                 _progress_callback=kwargs.get("_progress_callback"),
                 _resume_from_window=int(kwargs.get("_resume_from_window") or 0),
+                _track_id=kwargs.get("_track_id"),
             )
             if len(documents) == 1:
                 return self._single_file_result(result)
@@ -1266,6 +1279,7 @@ class WorkspaceRag:
             retain_source_file=kwargs.get("retain_source_file"),
             _progress_callback=kwargs.get("_progress_callback"),
             _resume_from_window=int(kwargs.get("_resume_from_window") or 0),
+            _track_id=kwargs.get("_track_id"),
         )
         if len(urls) == 1:
             return self._single_file_result(result)
@@ -1293,6 +1307,7 @@ class WorkspaceRag:
             "retain_source_file": kwargs.get("retain_source_file"),
             "_progress_callback": kwargs.get("_progress_callback"),
             "_resume_from_window": int(kwargs.get("_resume_from_window") or 0),
+            "_track_id": kwargs.get("_track_id"),
         }
         documents = _ingest_documents(kwargs.get("documents"))
         if documents is not None:
@@ -1377,6 +1392,7 @@ class WorkspaceRag:
         self._require_writer("ingestion")
         self._ensure_initialized()
         replace = self._resolve_replace(kwargs.pop("replace", None))
+        track_id = kwargs.pop("_track_id", None)
 
         if self._ingestion_engine is not None and source_type == "local":
             documents = _ingest_documents(kwargs.get("documents"))
@@ -1387,6 +1403,7 @@ class WorkspaceRag:
                     title=kwargs.get("title"),
                     author=kwargs.get("author"),
                     metadata=kwargs.get("metadata"),
+                    track_id=track_id,
                 )
             path_str = kwargs.get("path")
             if not path_str:
@@ -1398,6 +1415,7 @@ class WorkspaceRag:
                 "title": kwargs.get("title"),
                 "author": kwargs.get("author"),
                 "metadata": kwargs.get("metadata"),
+                "track_id": track_id,
             }
             if local_path.is_file():
                 return await self._aingest_local_file(local_path, **common_kwargs)
@@ -1408,6 +1426,7 @@ class WorkspaceRag:
                 **common_kwargs,
             )
 
+        kwargs["_track_id"] = track_id
         if self._ingestion_engine is not None and source_type == "azure_blob":
             return await self._aingest_azure_blob(replace=replace, **kwargs)
 
@@ -1676,7 +1695,7 @@ class WorkspaceRag:
     async def aget_metadata(self, doc_id: str) -> dict[str, Any]:
         """Get document metadata by ID."""
         result = await self._metadata_index.get(doc_id)  # type: ignore[union-attr]
-        if not result:
+        if not ingest_finalization_complete(result):
             return {}
         return {key: value for key, value in result.items() if key not in _INTERNAL_FIELDS}
 
@@ -1692,6 +1711,8 @@ class WorkspaceRag:
         if self._metadata_index is None:
             raise RuntimeError("Metadata index not initialized")
         normalized = normalize_user_metadata(data)
+        if not await self._metadata_index.is_visible(doc_id):
+            raise KeyError(doc_id)
         updated = await self._metadata_index.merge_custom_metadata(
             doc_id,
             {
@@ -1709,48 +1730,6 @@ class WorkspaceRag:
         return await self._metadata_index.query(filters)
 
     # === FILE MANAGEMENT API ===
-
-    async def afail_unfinished_docs(self, *, reason: str) -> int:
-        """Park unfinished documents as FAILED so no startup sweep resumes them.
-
-        LightRAG's recovery resets PARSING/ANALYZING/PROCESSING back to PENDING
-        and picks them up again, which would silently undo a cancellation.
-        """
-        self._ensure_initialized()
-        if self._lightrag_stores is None:
-            return 0
-
-        from dataclasses import asdict
-
-        from lightrag.base import DocStatus
-
-        unfinished = (
-            DocStatus.PENDING,
-            DocStatus.PARSING,
-            DocStatus.ANALYZING,
-            DocStatus.PROCESSING,
-            DocStatus.PREPROCESSED,
-        )
-        updated = 0
-        async for docs in self._lightrag_stores.iter_doc_status_pages(unfinished):
-            doc_ids = list(docs)
-            full_rows = await self._lightrag_stores.get_full_doc_statuses(doc_ids)
-            missing = set(doc_ids).difference(full_rows)
-            if missing:
-                raise RuntimeError(
-                    f"document-status rows disappeared during cancellation: {sorted(missing)}"
-                )
-            updates: dict[str, Any] = {}
-            for doc_id in doc_ids:
-                # Echo the full row back so no field is dropped on the way through.
-                row = asdict(full_rows[doc_id])
-                row["status"] = DocStatus.FAILED.value
-                row["error_msg"] = reason
-                updates[doc_id] = row
-            if updates:
-                await self._lightrag_stores.doc_status.upsert(updates)
-                updated += len(updates)
-        return updated
 
     async def _iter_failed_doc_pages(self) -> AsyncIterator[list[dict[str, Any]]]:
         """Yield full failed-document presentation rows one bounded page at a time."""
@@ -1777,12 +1756,36 @@ class WorkspaceRag:
                 for doc_id in doc_ids
             ]
 
+    async def aretryable_document_ids(self) -> tuple[str, ...]:
+        """Snapshot FAILED plus PROCESSED-but-unfinalized Product Documents."""
+        self._require_writer("failed-document retry")
+        self._ensure_initialized()
+        if self._lightrag_stores is None or self._metadata_index is None:
+            raise RuntimeError("retry document stores are unavailable")
+        from lightrag.base import DocStatus
+
+        cohort: list[str] = []
+        async for rows in self._lightrag_stores.iter_doc_status_pages(
+            (DocStatus.FAILED, DocStatus.PROCESSED)
+        ):
+            full = await self._lightrag_stores.get_full_doc_statuses(list(rows))
+            for doc_id, row in full.items():
+                status = _normalized_retry_status(row)
+                if status == "failed":
+                    cohort.append(doc_id)
+                    continue
+                metadata = await self._metadata_index.get(doc_id)
+                if not ingest_finalization_complete(metadata):
+                    cohort.append(doc_id)
+        return tuple(dict.fromkeys(cohort))
+
     async def aretry_failed_docs(
         self,
         *,
         cohort_doc_ids: Sequence[str] | None = None,
         cohort_callback: Callable[[tuple[str, ...]], Awaitable[None]] | None = None,
         outcome_callback: Callable[[str, str, dict[str, Any]], Awaitable[None]] | None = None,
+        track_id: str | None = None,
     ) -> dict[str, Any]:
         """Retry one frozen FAILED cohort and report compact per-document outcomes."""
         self._require_writer("failed-document retry")
@@ -1814,7 +1817,7 @@ class WorkspaceRag:
             else:
                 failed_count += 1
             target = succeeded if outcome == "succeeded" else still_failed
-            if len(target) < 100:
+            if len(target) < 500:
                 target.append(detail)
             else:
                 details_truncated = True
@@ -1903,6 +1906,7 @@ class WorkspaceRag:
                     download_locator,
                     display_filename,
                     retry_metadata,
+                    track_id=track_id,
                 )
                 processed = result.get("processed")
                 if result.get("errors") or (isinstance(processed, int | float) and processed < 1):
@@ -1950,7 +1954,6 @@ class WorkspaceRag:
                 # identity-invalid result is not an ambiguous finalization
                 # error and must never be reconciled from PROCESSED to success.
                 # A reported mismatch may name a pre-existing unrelated doc.
-                await self._fail_processed_retry_identity(doc_id)
                 logger.warning("Retry returned invalid identity for doc_id=%s", doc_id)
                 await record(
                     doc_id,
@@ -2001,31 +2004,6 @@ class WorkspaceRag:
         if status == "failed":
             return "failed"
         return None
-
-    async def _fail_processed_retry_identity(self, doc_id: str) -> None:
-        """Keep a same-ID mismatch discoverable, or leave its outcome pending."""
-        if self._lightrag_stores is None:
-            raise RetryOutcomeUncertainError("retry document status store is unavailable")
-        try:
-            row = await self._lightrag_stores.get_doc_status(doc_id)
-        except Exception as exc:
-            raise RetryOutcomeUncertainError("retry mismatch status read failed") from exc
-        if not isinstance(row, Mapping):
-            raise RetryOutcomeUncertainError("retry mismatch status is unavailable")
-        status = _normalized_retry_status(row)
-        if status == "failed":
-            return
-        if status != "processed":
-            raise RetryOutcomeUncertainError("retry mismatch status is not terminal")
-        failed = dict(row)
-        failed.update(
-            status="failed",
-            error_msg="retry ingestion returned mismatched document identity",
-        )
-        try:
-            await self._lightrag_stores.doc_status.upsert({doc_id: failed})
-        except Exception as exc:
-            raise RetryOutcomeUncertainError("retry mismatch failure marker is uncertain") from exc
 
     async def _retry_cohort_entries(self, cohort_doc_ids: Sequence[str]) -> list[dict[str, Any]]:
         """Project named durable items, including already-committed success."""
@@ -2137,6 +2115,8 @@ class WorkspaceRag:
         download_locator: str,
         display_filename: str,
         retry_metadata: Mapping[str, Any] | None = None,
+        *,
+        track_id: str | None = None,
     ) -> dict[str, Any]:
         """Materialize one validated locator while preserving source provenance."""
         source_type, parts = self._validate_retry_source_contract(source_uri, download_locator)
@@ -2179,10 +2159,11 @@ class WorkspaceRag:
             "replacement_ownership": replacement_ownership,
         }
         if source_type == "local":
-            return await self._aingest_local_retry_locator(**retry_kwargs)
+            return await self._aingest_local_retry_locator(**retry_kwargs, track_id=track_id)
         return await self._aingest_remote_retry_locator(
             source_type=source_type,
             parts=parts,
+            track_id=track_id,
             **retry_kwargs,
         )
 
@@ -2199,6 +2180,7 @@ class WorkspaceRag:
         metadata: dict[str, Any] | None = None,
         replacement_doc_ids: tuple[str, ...] = (),
         replacement_ownership: tuple[tuple[str, str, str], ...] = (),
+        track_id: str | None = None,
     ) -> dict[str, Any]:
         """Download one remote retry locator and replay it in the same-ID seam.
 
@@ -2266,7 +2248,9 @@ class WorkspaceRag:
             )
             try:
                 await source.amaterialize_document(source_document, parser_path)
-                result = await self._ingestion_engine.aingest_files([prepared], replace=False)
+                result = await self._ingestion_engine.aingest_files(
+                    [prepared], replace=False, track_id=track_id
+                )
                 return self._single_file_result(result)
             finally:
                 await asyncio.to_thread(_remove_remote_parser_sources, [prepared])
@@ -2288,6 +2272,7 @@ class WorkspaceRag:
         metadata: Mapping[str, Any] | None = None,
         replacement_doc_ids: tuple[str, ...] = (),
         replacement_ownership: tuple[tuple[str, str, str], ...] = (),
+        track_id: str | None = None,
     ) -> dict[str, Any]:
         if self._ingestion_engine is None:
             raise RuntimeError("Ingestion engine not initialized")
@@ -2304,7 +2289,9 @@ class WorkspaceRag:
             replacement_doc_ids=replacement_doc_ids,
             replacement_ownership=replacement_ownership,
         )
-        result = await self._ingestion_engine.aingest_files([item], replace=False)
+        result = await self._ingestion_engine.aingest_files(
+            [item], replace=False, track_id=track_id
+        )
         return self._single_file_result(result)
 
     async def adelete_files(
@@ -2315,7 +2302,8 @@ class WorkspaceRag:
         dry_run: bool = False,
     ) -> list[dict[str, Any]]:
         """Unified file deletion — DB records and physical files."""
-        self._require_writer("file deletion")
+        if not dry_run:
+            self._require_writer("file deletion")
         self._ensure_initialized()
         from dlightrag.engine.rag.corpus.ingestion.cleanup import (
             cascade_delete,
@@ -2351,39 +2339,30 @@ class WorkspaceRag:
                 lightrag=self._lightrag,
                 metadata_index=self._metadata_index,
             )
+            outcomes = [
+                dict(item) for item in stats.get("outcomes") or () if isinstance(item, Mapping)
+            ]
+            outcome_states = {str(item.get("status") or "") for item in outcomes}
             if not ctx.doc_ids:
                 status = "not_found"
-            elif stats.get("errors"):
-                status = "deleted_with_errors"
+            elif "waiting_for_repair" in outcome_states:
+                status = "waiting_for_repair"
+            elif "failed" in outcome_states or "rejected" in outcome_states:
+                status = "rejected"
             else:
-                status = "deleted"
-                # Remove physical files after successful DB cleanup.
-                remove_deleted_files(
-                    ctx.file_paths,
-                    str(self.settings.input_root / self.workspace_id),
-                )
+                try:
+                    removed = remove_deleted_files(
+                        ctx.file_paths,
+                        str(self.settings.input_root / self.workspace_id),
+                    )
+                    stats["files_removed"] = removed
+                    status = "deleted"
+                except OSError:
+                    stats.setdefault("errors", []).append("Physical source cleanup is ambiguous")
+                    status = "waiting_for_repair"
 
             results.append({"identifier": identifier, "status": status, **stats})
         return results
-
-    async def aget_pipeline_status(self) -> dict[str, Any]:
-        """Return LightRAG pipeline_status for progress reporting."""
-        from lightrag.kg.shared_storage import get_namespace_data
-
-        if self._lightrag is None:
-            return {"busy": False, "latest_message": "No LightRAG instance"}
-
-        ns = await get_namespace_data("pipeline_status", workspace=self.workspace_id)
-        return {
-            "busy": bool(ns.get("busy", False)),
-            "job_name": ns.get("job_name", ""),
-            "latest_message": ns.get("latest_message", ""),
-            "docs": ns.get("docs", 0),
-            "batchs": ns.get("batchs", 0),
-            "cur_batch": ns.get("cur_batch", 0),
-            "pending_enqueues": int(ns.get("pending_enqueues", 0) or 0),
-            "history_messages": list(ns.get("history_messages", [])[-10:]),
-        }
 
 
 async def _aiter_chunks[T](

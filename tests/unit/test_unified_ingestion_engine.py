@@ -148,7 +148,10 @@ async def test_document_ingest_resolves_lightrag_parser_rules(tmp_path: Path) ->
     assert kwargs["parse_engine"] == ["mineru"]
     assert kwargs["process_options"] == ["iteP"]
     deps["lightrag"].apipeline_process_enqueue_documents.assert_awaited_once()
-    assert deps["metadata_index"].upsert.await_count == 2
+    assert deps["metadata_index"].upsert.await_count == 3
+    assert deps["metadata_index"].upsert.await_args_list[0].args[1] == {
+        _FINALIZATION_COMPLETE_KEY: False
+    }
 
 
 async def test_ingest_waits_when_processing_is_queued_behind_busy_owner(
@@ -299,6 +302,64 @@ async def test_document_ingest_preserves_lightrag_parser_engine_params(
 
     kwargs = deps["lightrag"].apipeline_enqueue_documents.await_args.kwargs
     assert kwargs["parse_engine"] == ["mineru(page_range=1-3)"]
+
+
+@pytest.mark.parametrize(
+    "fault_phase",
+    [
+        pytest.param("visual", id="required-visual-fusion"),
+        pytest.param("bm25", id="required-bm25-labels"),
+        pytest.param("metadata_source_readiness", id="metadata-source-and-readiness-marker"),
+    ],
+)
+async def test_required_product_document_finalizer_fault_replays_before_readiness(
+    fault_phase: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed required finalizer cannot publish; retry replays the same document."""
+    engine, deps = _make_engine()
+    metadata = {
+        "filename": "report.pdf",
+        "source_uri": "local://default/report.pdf",
+        "download_locator": "/shared/default/report.pdf",
+        _FINALIZATION_COMPLETE_KEY: False,
+    }
+    visual = AsyncMock()
+    bm25 = AsyncMock()
+    monkeypatch.setattr(engine, "_overwrite_sidecar_image_vectors", visual)
+    monkeypatch.setattr(engine, "_label_bm25_languages", bm25)
+    if fault_phase == "visual":
+        visual.side_effect = [RuntimeError("visual finalizer unavailable"), None]
+    elif fault_phase == "bm25":
+        bm25.side_effect = [RuntimeError("BM25 finalizer unavailable"), None]
+    else:
+        deps["metadata_index"].upsert.side_effect = [
+            RuntimeError("metadata/source/readiness commit unavailable"),
+            None,
+        ]
+
+    with pytest.raises(RuntimeError):
+        await engine._finalize_ingested_document(
+            doc_id="doc-report",
+            metadata_record=metadata,
+            parse_engine="mineru",
+            process_options="iteP",
+        )
+
+    # No compensating write marks an unfinished document ready. The exact same
+    # idempotent finalization can then complete without replaying LightRAG ingest.
+    result = await engine._finalize_ingested_document(
+        doc_id="doc-report",
+        metadata_record=metadata,
+        parse_engine="mineru",
+        process_options="iteP",
+    )
+
+    assert result["doc_id"] == "doc-report"
+    assert deps["lightrag"].apipeline_enqueue_documents.await_count == 0
+    committed = deps["metadata_index"].upsert.await_args.args[1]
+    assert committed[_FINALIZATION_COMPLETE_KEY] is True
+    assert committed["source_uri"] == "local://default/report.pdf"
 
 
 async def test_document_ingest_labels_bm25_chunk_languages(tmp_path: Path) -> None:
@@ -679,7 +740,7 @@ async def test_failed_document_cleanup_requires_documented_delete_success(
         await engine.aingest_files([source], replace=False)
 
     deps["metadata_index"].delete.assert_not_awaited()
-    deps["metadata_index"].upsert.assert_not_awaited()
+    assert deps["metadata_index"].upsert.await_args.args[1] == {_FINALIZATION_COMPLETE_KEY: False}
     deps["lightrag"].apipeline_enqueue_documents.assert_not_awaited()
 
 
@@ -697,7 +758,7 @@ async def test_failed_document_ingest_fails_closed_when_status_snapshot_disappea
 
     deps["lightrag"].adelete_by_doc_id.assert_not_awaited()
     deps["metadata_index"].delete.assert_not_awaited()
-    deps["metadata_index"].upsert.assert_not_awaited()
+    assert deps["metadata_index"].upsert.await_args.args[1] == {_FINALIZATION_COMPLETE_KEY: False}
 
 
 async def test_failed_document_retry_cancellation_restores_discoverability(
@@ -729,13 +790,12 @@ async def test_failed_document_retry_cancellation_restores_discoverability(
         await engine.aingest_files([source], replace=False)
 
     doc_id = compute_mdhash_id(normalize_document_file_path(source), prefix="doc-")
-    restored = deps["stores"].doc_status.upsert.await_args.args[0][doc_id]
-    assert restored["status"] == "failed"
-    assert restored["chunks_list"] == []
-    assert restored["error_msg"] == "document replacement was interrupted"
-    restored_metadata = deps["metadata_index"].upsert.await_args.args[1]
-    assert restored_metadata["title"] == original_metadata["title"]
-    assert restored_metadata["custom_metadata"] == original_metadata["custom_metadata"]
+    deps["stores"].doc_status.upsert.assert_not_awaited()
+    first_metadata_write = deps["metadata_index"].upsert.await_args_list[0]
+    assert first_metadata_write.args == (
+        doc_id,
+        {"_dlightrag_finalization_complete": False},
+    )
 
 
 async def test_concurrent_single_file_replacements_serialize_cleanup(
@@ -807,7 +867,7 @@ async def test_delete_time_cancellation_after_status_delete_does_not_restore_zom
     deps["lightrag"].apipeline_enqueue_documents.assert_not_awaited()
 
 
-async def test_cancellation_after_processing_commit_marks_replacement_failed(
+async def test_cancellation_after_processing_commit_keeps_upstream_processed_and_hidden(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "failed.pdf"
@@ -836,7 +896,7 @@ async def test_cancellation_after_processing_commit_marks_replacement_failed(
     async def upsert_metadata(*_args: object) -> None:
         nonlocal metadata_writes
         metadata_writes += 1
-        if metadata_writes == 2:
+        if metadata_writes == 3:
             raise asyncio.CancelledError
 
     deps["lightrag"].adelete_by_doc_id.side_effect = delete
@@ -846,10 +906,14 @@ async def test_cancellation_after_processing_commit_marks_replacement_failed(
     with pytest.raises(asyncio.CancelledError):
         await engine.aingest_files([source])
 
-    assert statuses[doc_id]["status"] == "failed"
+    assert statuses[doc_id]["status"] == "processed"
     assert statuses[doc_id]["chunks_list"] == ["new-chunk"]
-    assert statuses[doc_id]["error_msg"] == "document post-processing failed"
-    deps["stores"].doc_status.upsert.assert_awaited_once()
+    assert "error_msg" not in statuses[doc_id]
+    deps["stores"].doc_status.upsert.assert_not_awaited()
+    assert (
+        deps["metadata_index"].upsert.await_args_list[0].args[1][_FINALIZATION_COMPLETE_KEY]
+        is False
+    )
 
 
 async def test_remote_locator_replacement_deletes_old_metadata_only_after_new_commit(
@@ -1154,7 +1218,7 @@ async def test_document_ingest_uses_lightrag_canonical_doc_id(tmp_path: Path) ->
         prefix="doc-",
     )
     assert result["doc_id"] == expected_doc_id
-    assert deps["metadata_index"].upsert.await_count == 2
+    assert deps["metadata_index"].upsert.await_count == 3
     assert all(
         call.args[0] == expected_doc_id for call in deps["metadata_index"].upsert.await_args_list
     )
@@ -1246,13 +1310,12 @@ async def test_batch_pending_metadata_is_persisted_before_parser_enqueue_failure
     ]
 
 
-async def test_post_processing_failure_transitions_processed_status_to_failed(
+async def test_post_processing_failure_keeps_processed_status_hidden_for_retry(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "report.pdf"
     source.write_bytes(b"%PDF-1.4")
     engine, deps = _make_engine()
-    doc_id = compute_mdhash_id(normalize_document_file_path(source), prefix="doc-")
     processed = {"status": "processed", "chunks_list": ["chunk-a"], "content_hash": "hash"}
     deps["stores"].get_doc_status.side_effect = [None, processed]
     writes = 0
@@ -1269,10 +1332,12 @@ async def test_post_processing_failure_transitions_processed_status_to_failed(
 
     assert result["processed"] == 0
     assert result["errors"] == ["report.pdf: document processing failed"]
-    failed = deps["stores"].doc_status.upsert.await_args.args[0][doc_id]
-    assert failed["status"] == "failed"
-    assert failed["chunks_list"] == ["chunk-a"]
-    assert failed["error_msg"] == "document post-processing failed"
+    assert processed["status"] == "processed"
+    deps["stores"].doc_status.upsert.assert_not_awaited()
+    assert (
+        deps["metadata_index"].upsert.await_args_list[0].args[1][_FINALIZATION_COMPLETE_KEY]
+        is False
+    )
 
 
 async def test_batch_finalization_aggregates_failed_and_processed_documents(
@@ -1851,7 +1916,7 @@ async def test_sidecar_image_vectors_delegate_document_inputs(tmp_path: Path) ->
     deps["stores"].overwrite_chunk_vectors.assert_awaited_once()
 
 
-async def test_sidecar_image_embed_failure_is_non_fatal(tmp_path: Path) -> None:
+async def test_sidecar_image_embed_failure_fails_finalization(tmp_path: Path) -> None:
     import json
 
     artifact_dir = tmp_path / "sample.parsed"
@@ -1880,19 +1945,17 @@ async def test_sidecar_image_embed_failure_is_non_fatal(tmp_path: Path) -> None:
         side_effect=RuntimeError("provider rejected oversized image")
     )
 
-    # A single unembeddable image must not raise or fail the whole document.
-    await engine._overwrite_sidecar_image_vectors(
-        doc_id="doc-1",
-        sidecar_location=artifact_dir.as_uri(),
-        chunk_ids={"doc-1-mm-drawing-000"},
-    )
+    with pytest.raises(RuntimeError, match="provider rejected"):
+        await engine._overwrite_sidecar_image_vectors(
+            doc_id="doc-1",
+            sidecar_location=artifact_dir.as_uri(),
+            chunk_ids={"doc-1-mm-drawing-000"},
+        )
 
     deps["stores"].overwrite_chunk_vectors.assert_not_awaited()
 
 
-async def test_sidecar_unreadable_image_falls_back_to_text(tmp_path: Path) -> None:
-    # The shared executor uses text for an unreadable image while its healthy
-    # sibling in the same batch still gets a fused vector.
+async def test_sidecar_unreadable_image_fails_required_visual_fusion(tmp_path: Path) -> None:
     import json
 
     artifact_dir = tmp_path / "sample.parsed"
@@ -1929,18 +1992,14 @@ async def test_sidecar_unreadable_image_falls_back_to_text(tmp_path: Path) -> No
         DocumentEmbeddingTrace(fused=1, text=1, fused_to_text_fallback=0, failed=0),
     )
 
-    await engine._overwrite_sidecar_image_vectors(
-        doc_id="doc-1",
-        sidecar_location=artifact_dir.as_uri(),
-        chunk_ids={good_chunk, bad_chunk},
-    )
+    with pytest.raises(RuntimeError, match="required sidecar visual fusion"):
+        await engine._overwrite_sidecar_image_vectors(
+            doc_id="doc-1",
+            sidecar_location=artifact_dir.as_uri(),
+            chunk_ids={good_chunk, bad_chunk},
+        )
 
-    deps["stores"].overwrite_chunk_vectors.assert_awaited_once()
-    stored = deps["stores"].overwrite_chunk_vectors.await_args.args[0]
-    assert stored == {
-        good_chunk: [0.5, 0.6],
-        bad_chunk: [0.7, 0.8],
-    }
+    deps["stores"].overwrite_chunk_vectors.assert_not_awaited()
 
 
 def test_resolve_sidecar_uri_handles_file_scheme() -> None:
@@ -2122,7 +2181,7 @@ async def test_replacement_revalidates_locator_ownership_after_lock_wait(
 
 
 @pytest.mark.parametrize("boundary", ["vectors", "bm25"])
-async def test_finalization_cancellation_boundaries_mark_failed(
+async def test_finalization_cancellation_keeps_upstream_processed_and_unpublished(
     tmp_path: Path, boundary: str
 ) -> None:
     source = tmp_path / f"{boundary}.pdf"
@@ -2153,8 +2212,13 @@ async def test_finalization_cancellation_boundaries_mark_failed(
     with pytest.raises(asyncio.CancelledError):
         await engine.aingest_files([source])
 
-    assert statuses[doc_id]["status"] == "failed"
-    assert statuses[doc_id]["error_msg"] == "document post-processing failed"
+    assert statuses[doc_id]["status"] == "processed"
+    assert "error_msg" not in statuses[doc_id]
+    deps["stores"].doc_status.upsert.assert_not_awaited()
+    assert (
+        deps["metadata_index"].upsert.await_args_list[0].args[1][_FINALIZATION_COMPLETE_KEY]
+        is False
+    )
 
 
 async def test_failed_old_to_new_replacement_restores_only_old_failed_identity(
@@ -2211,10 +2275,9 @@ async def test_failed_old_to_new_replacement_restores_only_old_failed_identity(
     result = await engine.aingest_files([item], replace=True)
 
     assert result["processed"] == 0
-    assert set(statuses) == {old_id}
-    assert statuses[old_id]["status"] == "failed"
-    assert statuses[old_id]["chunks_list"] == []
+    assert statuses == {}
     assert set(metadata) == {old_id}
+    assert metadata[old_id]["_dlightrag_finalization_complete"] is False
     assert deps["lightrag"].adelete_by_doc_id.await_count == 2
 
 
@@ -2270,9 +2333,9 @@ async def test_outer_enqueue_failure_settles_partial_candidate_and_old_anchor(
     with pytest.raises(type(failure)):
         await engine.aingest_files([item], replace=True)
 
-    assert set(statuses) == {old_id}
-    assert statuses[old_id]["status"] == "failed"
+    assert statuses == {}
     assert set(metadata) == {old_id}
+    assert metadata[old_id]["_dlightrag_finalization_complete"] is False
 
 
 async def test_old_metadata_retirement_failure_does_not_publish_deleted_candidate(
@@ -2329,7 +2392,9 @@ async def test_old_metadata_retirement_failure_does_not_publish_deleted_candidat
     assert result["processed"] == 0
     assert result["results"] == []
     assert result["errors"]
-    assert set(statuses) == {old_id}
+    assert statuses == {}
+    assert set(metadata) == {old_id}
+    assert metadata[old_id]["_dlightrag_finalization_complete"] is False
 
 
 async def test_incomplete_finalization_marker_replays_without_reenqueue(
@@ -2350,22 +2415,25 @@ async def test_incomplete_finalization_marker_replays_without_reenqueue(
         _FINALIZATION_COMPLETE_KEY: False,
     }
     engine._overwrite_sidecar_image_vectors = AsyncMock()  # type: ignore[method-assign]
+    engine._label_bm25_languages = AsyncMock()  # type: ignore[method-assign]
 
     result = await engine.aingest_file(source)
 
     assert result["doc_id"] == doc_id
     assert result["source_kind"] == "document"
     deps["lightrag"].apipeline_enqueue_documents.assert_not_awaited()
+    deps["lightrag"].apipeline_process_enqueue_documents.assert_not_awaited()
     engine._overwrite_sidecar_image_vectors.assert_awaited_once()  # type: ignore[attr-defined]
+    engine._label_bm25_languages.assert_awaited_once_with(["chunk"])  # type: ignore[attr-defined]
+    deps["stores"].doc_status.upsert.assert_not_awaited()
     _, completed = deps["metadata_index"].upsert.await_args.args
     assert completed[_FINALIZATION_COMPLETE_KEY] is True
 
 
 @pytest.mark.parametrize("original", [RuntimeError("vectors failed"), asyncio.CancelledError()])
-async def test_finalization_marker_write_failure_preserves_uncertainty_or_cancellation(
+async def test_finalizer_failure_preserves_upstream_status_and_original_error(
     tmp_path: Path, original: BaseException
 ) -> None:
-    from dlightrag.engine.rag.corpus.ingest_jobs import RetryOutcomeUncertainError
 
     source = tmp_path / "report.pdf"
     source.write_bytes(b"content")
@@ -2381,9 +2449,7 @@ async def test_finalization_marker_write_failure_preserves_uncertainty_or_cancel
     deps["stores"].doc_status.upsert.side_effect = RuntimeError("status store down")
 
     expected = (
-        asyncio.CancelledError
-        if isinstance(original, asyncio.CancelledError)
-        else RetryOutcomeUncertainError
+        asyncio.CancelledError if isinstance(original, asyncio.CancelledError) else RuntimeError
     )
     with pytest.raises(expected):
         await engine.aingest_file(source)
@@ -2391,6 +2457,7 @@ async def test_finalization_marker_write_failure_preserves_uncertainty_or_cancel
     assert statuses[doc_id]["status"] == "processed"
     first_metadata = deps["metadata_index"].upsert.await_args_list[0].args[1]
     assert first_metadata[_FINALIZATION_COMPLETE_KEY] is False
+    deps["stores"].doc_status.upsert.assert_not_awaited()
 
 
 async def test_metadata_only_old_tombstone_enqueue_failure_removes_candidate_intent(
@@ -2701,8 +2768,9 @@ async def test_replacement_marker_failure_after_retirement_leaves_retriable_cand
     assert result["errors"] == ["incoming.pdf: document processing failed"]
     assert old_id not in metadata
     assert metadata[new_id][_FINALIZATION_COMPLETE_KEY] is False
-    assert statuses[new_id]["status"] == "failed"
-    assert statuses[new_id]["error_msg"] == "document post-processing failed"
+    assert statuses[new_id]["status"] == "processed"
+    assert "error_msg" not in statuses[new_id]
+    deps["stores"].doc_status.upsert.assert_not_awaited()
 
 
 async def test_unrelated_candidate_with_metadata_tombstones_collapses_only_safe_surplus(

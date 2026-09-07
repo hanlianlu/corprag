@@ -4,10 +4,9 @@
 import datetime
 from typing import Any, Literal, Self
 
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import Field, model_validator
 
 from dlightrag.application.access import validate_query_workspace_selection
-from dlightrag.application.answer_runs import AnswerRunPhase, AnswerRunStatus
 from dlightrag.application.answer_runs.citations import SourceReferencePayload
 from dlightrag.application.answer_runs.client_contracts import (
     MAX_HISTORY_CONTENT_CHARS,
@@ -17,6 +16,7 @@ from dlightrag.application.answer_runs.client_contracts import (
     RetrieveRequestContract,
 )
 from dlightrag.application.corpus_admin import IngestSpec
+from dlightrag.application.runs import RunPhase, RunStatus
 
 # Maximum UTF-8 history payload plus query/workspace/JSON framing. Shared by the
 # REST multipart parser and its receive-layer body cap.
@@ -72,8 +72,14 @@ class AnswerRequest(QueryWorkspaceSelection, AnswerRequestContract):
 class DeleteRequest(ClientContractModel):
     file_paths: list[str] | None = None
     filenames: list[str] | None = None
+    document_ids: list[str] | None = None
     workspace: str | None = None
-    dry_run: bool = False
+
+
+class RetryRequest(ClientContractModel):
+    workspace: str | None = None
+    document_ids: list[str] | None = None
+    selector: Literal["all_retryable"] | None = "all_retryable"
 
 
 class WorkspaceCreateRequest(ClientContractModel):
@@ -87,8 +93,7 @@ class ResetRequest(ClientContractModel):
     """Request to reset a workspace."""
 
     workspace: str | None = None
-    keep_files: bool = False
-    dry_run: bool = False
+    supersedes_run_id: str | None = None
 
 
 class MetadataUpdateRequest(ClientContractModel):
@@ -170,11 +175,13 @@ class AnswerResponse(RetrievalResponse):
     evidence: dict[str, Any] = Field(default_factory=dict)
 
 
-class AnswerRunDescriptor(ClientContractModel):
-    """The 202 acceptance every answer request receives, replay included."""
+class RunDescriptor(ClientContractModel):
+    """Common durable Run acceptance descriptor."""
 
     run_id: str
-    status: AnswerRunStatus
+    run_kind: Literal["retrieval", "answer", "corpus_mutation"]
+    lane: Literal["query", "corpus_mutation"]
+    status: RunStatus
     status_url: str
     events_url: str
     cancel_url: str
@@ -182,49 +189,20 @@ class AnswerRunDescriptor(ClientContractModel):
     continuation_kind: str | None = None
 
 
-class AnswerRunStatusResponse(AnswerRunDescriptor):
+class RunStatusResponse(RunDescriptor):
     """Authoritative lifecycle state, plus the canonical result once it exists."""
 
-    phase: AnswerRunPhase | None = None
+    phase: RunPhase | None = None
     durable_progress_version: int = 0
     cancel_requested: bool = False
-    result: AnswerResponse | None = None
+    result: dict[str, Any] | None = None
     error_kind: str | None = None
     error_message: str | None = None
+    repair_reason: str | None = None
+    repair_remedy: str | None = None
     created_at: datetime.datetime | None = None
     started_at: datetime.datetime | None = None
     finished_at: datetime.datetime | None = None
-
-
-class IngestJobStatusResponse(ClientContractModel):
-    # Job rows carry queue bookkeeping (lease_owner, lease_expires_at) that clients
-    # must not see; ignoring extras drops it instead of failing response validation.
-    model_config = ConfigDict(extra="ignore")
-
-    job_id: str
-    workspace: str | None = None
-    source_type: str | None = None
-    status: str
-    status_url: str | None = None
-    request: dict[str, Any] | None = None
-    total_items: int | None = None
-    processed_items: int | None = None
-    failed_items: int | None = None
-    current_window: int | None = None
-    errors: list[str] | None = None
-    errors_truncated: bool | None = None
-    result: dict[str, Any] | None = None
-    created_at: datetime.datetime | str | None = None
-    updated_at: datetime.datetime | str | None = None
-    started_at: datetime.datetime | str | None = None
-    finished_at: datetime.datetime | str | None = None
-
-
-class UploadIngestJobResponse(IngestJobStatusResponse):
-    """Ingest job response for direct file uploads (adds the persisted path)."""
-
-    uploaded_file: str | None = None
-    filename: str | None = None
 
 
 class FileListResponse(ClientContractModel):
@@ -289,11 +267,6 @@ class SearchMetadataResponse(ClientContractModel):
 class MetadataUpdateResponse(ClientContractModel):
     status: Literal["success"]
     doc_id: str
-
-
-class ResetResponse(ClientContractModel):
-    workspaces: dict[str, Any]
-    total_errors: int
 
 
 class ErrorDetail(ClientContractModel):

@@ -170,13 +170,21 @@ IP/geo/bot policy, request quotas/rates, and connection caps. DlightRAG ships no
 in-process WAF or rate limiter. SIEM systems such as Sentinel observe/correlate;
 they are not an inline blocker.
 
-Accepted answer runs queue rather than fail under local worker saturation, so
-monitor PostgreSQL/blob growth and rate-limit acceptance. `none` and `simple`
-collapse callers into one deployment owner and require an already restricted
-network boundary.
+Accepted Retrieval and Answer Runs queue rather than fail under local worker
+saturation, up to the deployment-wide nonterminal Query-lane fuse (30,000 by
+default). Corpus Mutation Runs use a separate validated 1,000-Run admission
+fuse and deployment-wide active bound of two. The controlled full-fuse,
+authorization, sanitation, and 10k-client evidence is recorded in the
+[Slice 6 validation report](validation/run-runtime-slice-6.md). Monitor
+PostgreSQL/blob growth and rate-limit acceptance before either safety bound.
+`none` and `simple` collapse callers into one deployment owner and require an
+already restricted network boundary.
 
-`GET /health` and `GET /ready` are unauthenticated by design. Health never
-queries PostgreSQL; readiness short-caches its database/corpus verdict.
+`GET /health` and `GET /ready` are unauthenticated by design. Health performs
+no database, corpus, parser, or model I/O. Readiness short-caches only the
+writable Operational State verdict; it does not probe corpus or provider state.
+Both surfaces expose only fixed component details and storage class names, never
+credentials, endpoint URIs, or inherited environment values.
 
 ### Per-Surface Front Doors
 
@@ -229,22 +237,21 @@ are a canonical ID or `*`. Action patterns may be exact, `*`, a prefix such as
 | Action | Meaning |
 |---|---|
 | `workspace.query` | Retrieve/answer |
-| `workspace.ingest` | Start ingestion |
+| `workspace.ingest` | Start ingestion/replacement/retry, including repair resume for those actions |
 | `workspace.list_files` | List files |
-| `workspace.delete_files` | Delete files |
+| `workspace.delete_files` | Delete files, including repair resume for deletion |
 | `workspace.download_source` | Download retained source |
 | `workspace.read_metadata` | Read metadata |
 | `workspace.update_metadata` | Update metadata |
 | `workspace.read_visual_asset` | Read rendered visuals |
-| `workspace.create`, `.delete`, `.reset` | Workspace lifecycle |
+| `workspace.create`, `.reset` | Workspace creation and identity-preserving Corpus Reset, including repair resume/supersession for reset |
 | `workspace.storage_status` | Read storage/promotion state |
-| `job.read`, `job.cancel` | Read/cancel ingest jobs |
 | `model_catalogue.write` | Change deployment-wide model catalogue |
 
 | Preset | Expansion |
 |---|---|
 | `reader` | query, list/download files, read metadata/visual assets |
-| `editor` | reader + ingest, metadata/file mutation, job read/cancel |
+| `editor` | reader + ingest and metadata/file mutation |
 | `admin` | every action |
 
 Presets affect only Actions, never Workspace matching. Deployment-wide actions
@@ -261,10 +268,15 @@ Explicit workspace requests are checked before acceptance. `all_workspaces`
 expands only to currently authorized query workspaces. Source/visual routes
 recheck permission against the actual workspace.
 
-An accepted run pins its resolved workspace set, not mutable claims. Later rule
-or IdP changes do not revoke that run; follow-up/fork recheck current access.
-JWT changes become visible when a new token arrives, so use short lifetimes where
-revocation latency matters.
+An accepted Retrieval or Answer Run pins its resolved Workspace set for
+execution, not mutable claims. Later rule or IdP changes do not revoke execution
+of that Run; follow-up/fork recheck current access. Corpus Mutation status,
+events, cancellation, and repair resumption recheck access to the Run's declared
+Workspace and fail closed. REST status/event projection and MCP status
+projection recheck current source-download and visual-asset actions; canonical
+results never persist authorization-dependent URLs. Trusted Application callers
+supply their own Retrieval projection. JWT changes become visible when a new
+token arrives, so use short lifetimes where revocation latency matters.
 
 Use a policy/membership store for user-managed, deny, hierarchy, or resource-level
 policy. Use separate deployments/databases or PostgreSQL RLS where regulation
@@ -276,14 +288,20 @@ Public source payloads expose stable `source_uri` and, on HTTP surfaces, a
 projected `download_url` containing only document ID and workspace. They never
 expose local paths or stored locators. REST/Web download routes recheck
 `workspace.download_source` before streaming retained bytes or redirecting to
-Azure, S3, or queryless HTTPS.
+Azure, S3, or queryless HTTPS. Authorization is necessary but not sufficient:
+the metadata row must also carry `_dlightrag_finalization_complete=true`.
+Guessed IDs for pending, failed-finalization, legacy-unproven, or direct
+LightRAG-bypass documents return 404. Full and thumbnail image routes enforce
+the same rule, including on cache hits.
 
 Signed/query-bearing URLs are fetch credentials, not durable locators. Retain
 the bytes or provide a separate queryless `download_uri`; signed queries never
 become public provenance or source-contract logs.
 
-Durable ingest jobs necessarily retain complete fetch input for recovery. Treat
-that database as secret storage, restrict access, and keep pruning enabled.
+Durable Corpus Mutation Runs retain the bounded accepted fetch input, upstream
+handoff checkpoint, and operator repair confirmation needed for recovery until
+the fixed seven-day terminal retention floor permits pruning. Treat Operational State as secret
+storage and restrict its access.
 
 ## Answer Resources And Execution
 

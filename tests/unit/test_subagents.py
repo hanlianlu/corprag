@@ -34,7 +34,7 @@ from dlightrag.engine.answer.tools.subagents import (
     child_session_id,
     subagent_tools,
 )
-from dlightrag.engine.runtime import RunCancelledError
+from dlightrag.engine.runtime import RunCancellationObserved
 from tests.in_memory_session_repository import InMemoryAgentSessionRepository
 from tests.tool_helpers import tool_runtime
 from tests.unit.conftest import answer_image_policy, answer_model_profile
@@ -174,7 +174,7 @@ async def test_spawn_many_runs_in_parallel_and_aggregates_usage() -> None:
 
 
 async def test_spawn_checks_parent_cancellation_before_starting_children() -> None:
-    cancelled = AsyncMock(side_effect=RunCancelledError)
+    cancelled = AsyncMock(side_effect=RunCancellationObserved)
     runner = AsyncMock()
     host = SubagentHost(
         parent_session_id=SessionId.new(),
@@ -201,7 +201,7 @@ async def test_spawn_propagates_parent_cancel_and_finishes_persisted_child() -> 
         _call_id: str,
         _snapshot: ChildContextSnapshot,
     ) -> ChildOutcome:
-        raise RunCancelledError
+        raise RunCancellationObserved
 
     host = SubagentHost(
         parent_session_id=SessionId.new(),
@@ -707,10 +707,10 @@ async def test_parent_cancel_marks_the_child_cancelled() -> None:
 
     class _CancelSession(_FakeSession):
         async def check_cancelled(self) -> None:
-            raise RunCancelledError
+            raise RunCancellationObserved
 
     parent_id = SessionId.new()
-    with pytest.raises(RunCancelledError):
+    with pytest.raises(RunCancellationObserved):
         await run_child_session(
             orchestrator=_child_orchestrator(model),
             repository=InMemoryAgentSessionRepository(),  # type: ignore[arg-type]

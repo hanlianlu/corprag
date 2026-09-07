@@ -6,8 +6,8 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from dlightrag.engine.dependencies import TransientDependencyError
 from dlightrag.engine.rag.corpus.contracts import DocStatusLookup
-from dlightrag.engine.rag.corpus.ingest_jobs import IngestJobStore
 from dlightrag.engine.rag.corpus.metadata_index import MetadataIndexProtocol
 from dlightrag.engine.rag.retrieval.ports import (
     BM25Search,
@@ -22,8 +22,11 @@ class CorpusSchemaError(RuntimeError):
     """The deployed corpus schema is incompatible with this software revision."""
 
 
-class CorpusUnavailableError(RuntimeError):
+class CorpusUnavailableError(TransientDependencyError):
     """The configured corpus backend cannot currently be reached."""
+
+    def __init__(self, detail: str | None = None) -> None:
+        super().__init__("corpus_storage", detail or "Corpus storage is temporarily unavailable")
 
 
 class WorkspaceWriteFencedError(RuntimeError):
@@ -57,8 +60,6 @@ class CorpusMaintenanceStore(Protocol):
 
     async def clean_orphan_rows(self, workspace: str, *, dry_run: bool) -> int: ...
 
-    async def delete_workspace_record(self, workspace: str) -> bool: ...
-
     async def list_workspace_records(self) -> tuple[dict[str, Any], ...]: ...
 
     async def list_workspace_records_page(
@@ -86,7 +87,7 @@ class CorpusMaintenanceStore(Protocol):
         """Gate one workspace write behind the promotion fence and drain protocol.
 
         Raises ``WorkspaceWriteFencedError`` when the workspace write fence is
-        active. Ingest jobs use the same gate on their store instead.
+        active. Corpus Mutation Runs use this same cross-process gate.
         """
         ...
 
@@ -138,7 +139,6 @@ class WorkspaceCorpusBackend:
     coordination: CorpusCoordination
     maintenance: CorpusMaintenanceStore
     runtime: CorpusRuntimeBinder
-    ingest_jobs: IngestJobStore
     promotion: PromotionWorker | None = None
 
 

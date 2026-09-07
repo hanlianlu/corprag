@@ -53,7 +53,6 @@ from dlightrag.application.answer_runs import (
     AnswerRuntimeUnavailableError,
     ChildRosterCursorError,
     ChildRosterPageRequest,
-    IdempotencyKeyConflict,
 )
 from dlightrag.application.answer_runs.results import (
     project_answer_result,
@@ -61,6 +60,7 @@ from dlightrag.application.answer_runs.results import (
 )
 from dlightrag.application.answer_runs.sources import SourceDownloadLinkBuilder
 from dlightrag.application.corpus_admin import normalize_workspace_ids
+from dlightrag.application.runs import IdempotencyKeyConflict, RunCapacityExceededError
 from dlightrag.application.web_conversations import (
     ConversationSubmissionConflict,
     LinkedTurn,
@@ -183,7 +183,11 @@ async def start_answer_run(
             "submission_conflict",
             "This submission id was already used for a different request",
         ) from None
-    except AnswerRuntimeUnavailableError, WebConversationUnavailableError:
+    except (
+        AnswerRuntimeUnavailableError,
+        RunCapacityExceededError,
+        WebConversationUnavailableError,
+    ):
         raise _command_error(
             503, "service_unavailable", "Answer submission is temporarily unavailable"
         ) from None
@@ -214,7 +218,7 @@ async def accepted_answer_submission(
     return await accepted_answer(request, submission)
 
 
-@router.get("/answer/{run_id}", response_model=ConversationTurn)
+@router.get("/runs/{run_id}", response_model=ConversationTurn)
 async def answer_run_status(
     run_id: str,
     request: Request,
@@ -230,16 +234,6 @@ async def answer_run_status(
     return project_conversation_turn(
         turn, downloadable_workspaces=downloadable, visual_workspaces=visual
     )
-
-
-@router.post("/answer/{run_id}/resume", response_model=ConversationTurn)
-async def resume_answer_run(
-    run_id: str,
-    request: Request,
-    conversation_service: WebConversationService = Depends(get_web_conversation_service),
-) -> ConversationTurn:
-    """Reattach through the same authoritative Web turn projection."""
-    return await answer_run_status(run_id, request, conversation_service)
 
 
 @router.post("/answer/{run_id}/steer", status_code=202)
@@ -338,6 +332,10 @@ async def _continue_answer_run(
             "submission_conflict",
             "This submission id was already used for a different continuation",
         ) from None
+    except RunCapacityExceededError:
+        raise _command_error(
+            503, "service_unavailable", "Answer submission is temporarily unavailable"
+        ) from None
     if submission is None:
         raise _command_error(
             409,
@@ -379,7 +377,7 @@ async def fork_answer_run(
     )
 
 
-@router.delete("/answer/{run_id}", response_model=ConversationTurn)
+@router.delete("/runs/{run_id}", response_model=ConversationTurn)
 async def cancel_answer_run(
     run_id: str,
     request: Request,
@@ -391,7 +389,7 @@ async def cancel_answer_run(
     turn = await conversation_service.turn_for_run(user, run_id)
     if turn is None:
         raise HTTPException(status_code=404, detail="Answer run not found")
-    outcome = await get_application(request).answers.cancel(
+    outcome = await get_application(request).runs.cancel(
         owner_id=owner_id_from_user(user), run_id=run_id
     )
     if outcome.run is None:
@@ -509,7 +507,7 @@ async def answer_artifact_presentation(
     )
 
 
-@router.get("/answer/{run_id}/events")
+@router.get("/runs/{run_id}/events")
 async def answer_run_events(
     run_id: str,
     request: Request,
@@ -526,7 +524,7 @@ async def answer_run_events(
             detail="Answer run events expired; read its result from the conversation",
         )
     downloadable, visual = await _projection_workspaces(request, turn.run.request_input())
-    events = get_application(request).answers.subscribe(
+    events = get_application(request).runs.subscribe(
         owner_id=owner_id_from_user(user),
         run_id=run_id,
         after_sequence=resume_cursor(request),

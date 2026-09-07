@@ -51,10 +51,12 @@ from dlightrag.engine.answer.tools.subagents import (
     ChildRequest,
     SpawnAgentInput,
 )
+from dlightrag.engine.dependencies import classify_transient_dependency
 from dlightrag.engine.runtime import (
-    ANSWER_RUN_LEASE_SECONDS,
+    RUN_LEASE_SECONDS,
+    IncompatibleActiveRunError,
     LeaseLostError,
-    RunCancelledError,
+    RunCancellationObserved,
     RunExecutionError,
     RunSession,
 )
@@ -73,7 +75,7 @@ from dlightrag.engine.runtime.settlements import (
 )
 
 logger = logging.getLogger(__name__)
-_CHILD_LEASE_HEARTBEAT_SECONDS = ANSWER_RUN_LEASE_SECONDS / 3
+_CHILD_LEASE_HEARTBEAT_SECONDS = RUN_LEASE_SECONDS / 3
 
 
 def _research_dynamic_context_reserve(profile: ModelProfile) -> int:
@@ -81,10 +83,6 @@ def _research_dynamic_context_reserve(profile: ModelProfile) -> int:
     hard_limit = CONTEXT_POLICY.hard_input_limit(profile)
     trigger = CONTEXT_POLICY.compaction_trigger(profile)
     return max(0, hard_limit - trigger)
-
-
-class IncompatibleActiveRunError(RuntimeError):
-    """An accepted run cannot execute under this binary's Answer contract."""
 
 
 class FetchedResourceBuffer:
@@ -443,7 +441,7 @@ class ResearchRuntimeEffects:
             )
         except asyncio.CancelledError:
             raise
-        except RunCancelledError as exc:
+        except RunCancellationObserved as exc:
             if emitted:
                 await self._session.reset_output()
             raise AgentOperationCancelled(exc) from exc
@@ -452,7 +450,15 @@ class ResearchRuntimeEffects:
                 await self._session.reset_output()
             if is_provider_context_overflow(exc):
                 raise ProviderContextOverflow from exc
-            raise ProviderAttemptFailed(str(exc), retryable=True) from exc
+            retryable = (
+                classify_transient_dependency(exc, component_hint="providers") == "providers"
+            )
+            raise ProviderAttemptFailed(
+                "Model provider is temporarily unavailable"
+                if retryable
+                else "Model provider rejected the request",
+                retryable=retryable,
+            ) from exc
 
         streamed_text = "".join(emitted)
         if assistant.tool_calls or streamed_text != assistant.text:
@@ -649,7 +655,7 @@ class ResearchRuntimeEffects:
     async def _check_cancelled(self) -> None:
         try:
             await self._session.check_cancelled()
-        except RunCancelledError as exc:
+        except RunCancellationObserved as exc:
             raise AgentOperationCancelled(exc) from exc
 
 
@@ -697,7 +703,7 @@ async def _drive_answer_operation(
         return await runtime.drive(session_id=session_id, operation_id=operation_id)
     except (
         asyncio.CancelledError,
-        RunCancelledError,
+        RunCancellationObserved,
         AgentOperationCancelled,
     ) as exc:
         await runtime.cancel(session_id=session_id, operation_id=operation_id)
@@ -854,7 +860,7 @@ async def run_child_session(
         )
     except (
         asyncio.CancelledError,
-        RunCancelledError,
+        RunCancellationObserved,
         AgentOperationCancelled,
     ) as exc:
         await runtime.cancel(session_id=child_id, operation_id=accepted.operation_id)

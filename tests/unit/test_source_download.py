@@ -14,6 +14,9 @@ from dlightrag.engine.rag.corpus.downloads import (
     SourceDownloadUnavailableError,
 )
 from dlightrag.engine.rag.corpus.sources.aws_s3 import S3CredentialsUnavailable
+from dlightrag.engine.rag.retrieval.metadata_fields import (
+    INGEST_FINALIZATION_COMPLETE_FIELD,
+)
 from tests.config_helpers import mutate_config
 
 
@@ -23,6 +26,9 @@ def _service(
     *,
     workspace: str = "default",
 ) -> SourceDownloadService:
+    metadata = metadata_index.get.return_value
+    if isinstance(metadata, dict):
+        metadata.setdefault(INGEST_FINALIZATION_COMPLETE_FIELD, True)
     return SourceDownloadService(
         settings=rag_settings(test_config),
         metadata_index=metadata_index,
@@ -91,6 +97,33 @@ async def test_local_download_repairs_known_lightrag_archive_transition(test_con
             "file_path": str(archived.resolve()),
         },
     )
+
+
+@pytest.mark.parametrize("marker", [False, None])
+async def test_unpublished_document_is_not_found(test_config, marker: object) -> None:
+    metadata_index = AsyncMock()
+    metadata_index.get.return_value = {
+        "download_locator": "https://cdn.example.com/report.pdf",
+        INGEST_FINALIZATION_COMPLETE_FIELD: marker,
+    }
+
+    with pytest.raises(SourceDownloadNotFoundError):
+        await _service(test_config, metadata_index).prepare("doc-hidden")
+
+
+async def test_missing_finalization_marker_is_not_found(test_config) -> None:
+    metadata_index = AsyncMock()
+    metadata_index.get.return_value = {
+        "download_locator": "https://cdn.example.com/report.pdf",
+    }
+    service = SourceDownloadService(
+        settings=rag_settings(test_config),
+        metadata_index=metadata_index,
+        workspace_id="default",
+    )
+
+    with pytest.raises(SourceDownloadNotFoundError):
+        await service.prepare("doc-hidden")
 
 
 async def test_missing_document_is_not_found(test_config) -> None:

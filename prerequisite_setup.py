@@ -319,7 +319,7 @@ def write_config_yaml(
     if unknown:
         raise ValueError(
             "Legacy or unknown DlightRAG config fields were found; replace them with the "
-            f"3.0 eight-section schema before running setup (unknown: {sorted(unknown)})"
+            f"3.0 nine-section schema before running setup (unknown: {sorted(unknown)})"
         )
     answer = data.setdefault("answer", {})
     agent = answer.setdefault("agent", {})

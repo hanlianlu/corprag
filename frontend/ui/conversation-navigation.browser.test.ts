@@ -153,6 +153,23 @@ it('publishes list item intent and owns menu keyboard behavior through ARIA', as
   expect(customElements.get('conversation-list')).to.equal(undefined);
 });
 
+it('renders JavaScript-sensitive conversation titles as inert exact text', async () => {
+  const title = 'line\u2028separator\u2029</script><script>window.__conversationTitleRan=true</script>';
+  const sensitive = {...first, title};
+  const browser = window as Window & {__conversationTitleRan?: boolean};
+  delete browser.__conversationTitleRan;
+  window.fetch = async () => conversationPage([sensitive]);
+
+  await conversationStore.loadList();
+  const list = document.createElement('dl-conversation-list') as DlConversationList;
+  document.body.appendChild(list);
+  await list.updateComplete;
+
+  expect(list.querySelector<HTMLButtonElement>('.conversation-select')?.textContent).to.equal(title);
+  expect(list.querySelector('script')).to.equal(null);
+  expect(browser.__conversationTitleRan).to.equal(undefined);
+});
+
 it('keeps accessible Load older and retry controls outside list ownership', async () => {
   const older = {...first, conversation_id: 'conversation-older', title: 'Older notes'};
   const urls: string[] = [];

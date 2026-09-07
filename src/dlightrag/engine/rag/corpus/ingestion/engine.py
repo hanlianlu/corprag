@@ -10,7 +10,7 @@ from contextlib import AsyncExitStack
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any
 
 from lightrag.constants import FULL_DOCS_FORMAT_PENDING_PARSE
 from lightrag.parser.routing import (
@@ -23,11 +23,11 @@ from lightrag.utils import compute_mdhash_id
 from lightrag.utils_pipeline import normalize_document_file_path, resolve_sidecar_uri
 
 from dlightrag.engine.ai.telemetry import NOOP_TELEMETRY, Telemetry
-from dlightrag.engine.rag.corpus.ingest_jobs import RetryOutcomeUncertainError
 from dlightrag.engine.rag.corpus.ingestion.document_embedding import (
     DocumentEmbeddingInput,
     RobustDocumentEmbedder,
 )
+from dlightrag.engine.rag.corpus.ingestion.errors import RetryOutcomeUncertainError
 from dlightrag.engine.rag.corpus.ingestion.lightrag_sidecar import collect_lightrag_drawing_assets
 from dlightrag.engine.rag.corpus.ingestion.paths import lightrag_archived_source_path
 from dlightrag.engine.rag.corpus.sources.source_contract import (
@@ -39,6 +39,7 @@ from dlightrag.engine.rag.retrieval.metadata_fields import (
     extract_system_metadata,
     normalize_user_metadata,
 )
+from dlightrag.engine.rag.retrieval.visibility import ingest_finalization_complete
 from dlightrag.engine.rag.workspace.lifecycle import await_shared_cleanup, defer_cancellation
 
 logger = logging.getLogger(__name__)
@@ -178,6 +179,7 @@ class UnifiedIngestionEngine:
         title: str | None = None,
         author: str | None = None,
         metadata: Mapping[str, Any] | None = None,
+        track_id: str | None = None,
     ) -> dict[str, Any]:
         """Ingest one file through the same locked compensation core as batches."""
         file_path = Path(path)
@@ -203,7 +205,9 @@ class UnifiedIngestionEngine:
                 else display_filename_explicit
             ),
         )
-        batch = await self.aingest_files([item], replace=replace, _raise_finalization_errors=True)
+        batch = await self.aingest_files(
+            [item], replace=replace, track_id=track_id, _raise_finalization_errors=True
+        )
         results = batch.get("results")
         if isinstance(results, list) and results:
             result = results[0]
@@ -222,6 +226,7 @@ class UnifiedIngestionEngine:
         title: str | None = None,
         author: str | None = None,
         metadata: Mapping[str, Any] | None = None,
+        track_id: str | None = None,
         _raise_finalization_errors: bool = False,
     ) -> dict[str, Any]:
         """Ingest local files as one LightRAG staged batch.
@@ -381,6 +386,7 @@ class UnifiedIngestionEngine:
                         parse_engine=[entry.parse_engine for entry in enqueue_entries],
                         process_options=[entry.process_options for entry in enqueue_entries],
                         chunk_options=chunk_options,
+                        track_id=track_id,
                     )
                     await self._process_enqueued([entry.doc_id for entry in enqueue_entries])
 
@@ -780,23 +786,19 @@ class UnifiedIngestionEngine:
         self,
         snapshots: dict[str, tuple[dict[str, Any] | None, dict[str, Any] | None]],
     ) -> None:
-        """Restore only safe missing anchors, never overwrite a committed replacement."""
-        for doc_id, (status_snapshot, metadata_snapshot) in snapshots.items():
-            current_status = await self._stores.get_doc_status(doc_id)
-            status_missing = current_status is None
-            if status_missing and status_snapshot is not None:
-                marker = dict(status_snapshot)
-                marker.update(
-                    status="failed",
-                    error_msg="document replacement was interrupted",
-                    chunks_list=[],
-                    chunks_count=0,
-                )
-                await self._stores.doc_status.upsert({doc_id: marker})
-            if metadata_snapshot is not None:
-                current_metadata = await self._metadata_index.get(doc_id)
-                if (status_snapshot is not None and status_missing) or current_metadata is None:
-                    await self._metadata_index.upsert(doc_id, metadata_snapshot)
+        """Retain only a DlightRAG-owned hidden repair identity.
+
+        LightRAG document status is upstream state and is never reconstructed
+        from a local snapshot after a destructive handoff.
+        """
+        for doc_id, (_status_snapshot, metadata_snapshot) in snapshots.items():
+            if metadata_snapshot is None:
+                continue
+            current_metadata = await self._metadata_index.get(doc_id)
+            if current_metadata is None:
+                unpublished_snapshot = dict(metadata_snapshot)
+                unpublished_snapshot[_FINALIZATION_COMPLETE_KEY] = False
+                await self._metadata_index.upsert(doc_id, unpublished_snapshot)
 
     async def _restore_cleanup_after_error(
         self,
@@ -825,6 +827,11 @@ class UnifiedIngestionEngine:
         """Remove a document, accepting only a validated metadata-only tombstone."""
         status_snapshot = await self._stores.get_doc_status(doc_id)
         metadata_snapshot = await self._metadata_index.get(doc_id)
+        # Publication must stop before the first destructive upstream effect.
+        await self._metadata_index.upsert(
+            doc_id,
+            {_FINALIZATION_COMPLETE_KEY: False},
+        )
         if not isinstance(status_snapshot, Mapping):
             if allow_metadata_tombstone and isinstance(metadata_snapshot, Mapping):
                 # A prior owner committed deletion but crashed before enqueue.
@@ -903,18 +910,16 @@ class UnifiedIngestionEngine:
         light_chunks = list((doc_status or {}).get("chunks_list") or [])
         finalized_metadata = _with_finalized_local_download_locator(metadata_record)
         finalized_metadata[_FINALIZATION_COMPLETE_KEY] = commit_complete
-        try:
-            await self._overwrite_sidecar_image_vectors(
-                doc_id=doc_id,
-                sidecar_location=_mapping_get(full_doc, "sidecar_location"),
-                chunk_ids=set(light_chunks),
-            )
-            await self._label_bm25_languages(light_chunks)
-            # The marker is the commit point: never advertise complete until
-            # every required product-layer finalizer has succeeded.
-            await self._metadata_index.upsert(doc_id, finalized_metadata)
-        except BaseException as error:
-            await self._raise_finalization_error(doc_id, doc_status, error)
+        await self._overwrite_sidecar_image_vectors(
+            doc_id=doc_id,
+            sidecar_location=_mapping_get(full_doc, "sidecar_location"),
+            chunk_ids=set(light_chunks),
+        )
+        await self._label_bm25_languages(light_chunks)
+        # The DlightRAG-owned marker is the only publication commit point.
+        # LightRAG's upstream PROCESSED status remains untouched when any
+        # idempotent finalizer fails, so retry re-enters finalization only.
+        await self._metadata_index.upsert(doc_id, finalized_metadata)
 
         return {
             "doc_id": doc_id,
@@ -940,40 +945,7 @@ class UnifiedIngestionEngine:
             raise RetryOutcomeUncertainError("replacement finalization status is uncertain")
         completed = _with_finalized_local_download_locator(metadata_record)
         completed[_FINALIZATION_COMPLETE_KEY] = True
-        try:
-            await self._metadata_index.upsert(doc_id, completed)
-        except BaseException as error:
-            await self._raise_finalization_error(doc_id, doc_status, error)
-
-    async def _raise_finalization_error(
-        self,
-        doc_id: str,
-        doc_status: Mapping[str, Any],
-        error: BaseException,
-    ) -> NoReturn:
-        """Park a committed corpus row before propagating finalizer failure."""
-        failed = dict(doc_status)
-        failed.update(status="failed", error_msg="document post-processing failed")
-        cancellation = (
-            defer_cancellation(None, error) if isinstance(error, asyncio.CancelledError) else None
-        )
-        marker_task = asyncio.create_task(self._stores.doc_status.upsert({doc_id: failed}))
-        marker_error: BaseException | None = None
-        try:
-            await await_shared_cleanup(marker_task)
-        except asyncio.CancelledError as exc:
-            cancellation = defer_cancellation(cancellation, exc)
-        except BaseException as exc:  # noqa: BLE001
-            marker_error = exc
-        if cancellation is not None:
-            # The incomplete metadata marker makes the processed row replayable
-            # even when the FAILED marker write also failed.
-            raise cancellation from None
-        if marker_error is not None:
-            raise RetryOutcomeUncertainError(
-                "document finalization failure marker is uncertain"
-            ) from marker_error
-        raise error
+        await self._metadata_index.upsert(doc_id, completed)
 
     def _parser_directives_for(self, file_path: Path) -> tuple[str, str, dict[str, Any] | None]:
         directives = resolve_parser_directives(
@@ -1062,16 +1034,16 @@ class UnifiedIngestionEngine:
             )
             for asset in assets
         ]
-        try:
-            embedded, trace = await self._document_embedder.aembed_documents(inputs)
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "Sidecar document embedding failed; preserving existing LightRAG vectors",
-                exc_info=True,
-            )
-            return
+        embedded, trace = await self._document_embedder.aembed_documents(inputs)
+        if (
+            trace.fused != len(inputs)
+            or trace.text
+            or trace.fused_to_text_fallback
+            or trace.failed
+            or any(item.mode != "fused" for item in embedded)
+            or {item.key for item in embedded} != {item.key for item in inputs}
+        ):
+            raise RuntimeError("required sidecar visual fusion did not complete")
         logger.debug(
             "Sidecar document embedding outcomes: fused=%d text=%d fallback=%d failed=%d",
             trace.fused,
@@ -1117,11 +1089,6 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: fh.read(1024 * 1024), b""):
             digest.update(chunk)
     return f"sha256:{digest.hexdigest()}"
-
-
-def ingest_finalization_complete(metadata: object) -> bool:
-    """Return whether required application finalization durably committed."""
-    return isinstance(metadata, Mapping) and metadata.get(_FINALIZATION_COMPLETE_KEY) is True
 
 
 def _prepare_ingest_item(
@@ -1229,5 +1196,4 @@ def _canonical_file_doc_id(path: Path) -> str:
 __all__ = [
     "PreparedIngestFile",
     "UnifiedIngestionEngine",
-    "ingest_finalization_complete",
 ]

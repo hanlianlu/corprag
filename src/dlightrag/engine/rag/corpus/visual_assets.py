@@ -10,6 +10,7 @@ from typing import Any
 
 from dlightrag.engine.ai.media import detect_image_mime, thumbnail_bytes
 from dlightrag.engine.rag.retrieval.provenance import hydrate_lightrag_chunk_provenance
+from dlightrag.engine.rag.retrieval.visibility import VisibleDocumentLookup
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +47,15 @@ class ThumbnailCache:
 class VisualAssetResolver:
     """Resolve images from LightRAG text chunk sidecar metadata."""
 
-    def __init__(self, *, stores: Any, thumb_cache: ThumbnailCache | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        stores: Any,
+        visibility_lookup: VisibleDocumentLookup,
+        thumb_cache: ThumbnailCache | None = None,
+    ) -> None:
         self._stores = stores
+        self._visibility_lookup = visibility_lookup
         self._thumb_cache = thumb_cache or ThumbnailCache()
 
     async def resolve(self, chunk_id: str) -> VisualAsset | None:
@@ -59,8 +67,11 @@ class VisualAssetResolver:
                 chunk_id,
             )
             return None
-        await hydrate_lightrag_chunk_provenance(self._stores, chunks)
         chunk = chunks[0]
+        doc_id = chunk.get("full_doc_id")
+        if not isinstance(doc_id, str) or not await self._visibility_lookup.is_visible(doc_id):
+            return None
+        await hydrate_lightrag_chunk_provenance(self._stores, chunks)
         image_data = chunk.get("image_data")
         if not isinstance(image_data, str) or not image_data:
             logger.warning(
@@ -83,12 +94,14 @@ class VisualAssetResolver:
         """Resolve a thumbnail for one chunk id."""
         max_px = max(1, int(max_px))
         cache_key = (chunk_id, max_px)
-        cached = self._thumb_cache.get(cache_key)
-        if cached is not None:
-            return cached
+        # Re-authorize on every read: a cached thumbnail must not outlive a
+        # document being hidden before replacement or deletion.
         full = await self.resolve(chunk_id)
         if full is None:
             return None
+        cached = self._thumb_cache.get(cache_key)
+        if cached is not None:
+            return cached
         data, media_type = await asyncio.to_thread(
             thumbnail_bytes,
             full.data,

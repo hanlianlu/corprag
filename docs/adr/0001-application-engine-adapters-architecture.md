@@ -1,89 +1,43 @@
 # Application, Engine, and Adapters
 
-DlightRAG's first-look source tree is three visible code zones plus one private composition factory: inbound adapters call Application; Application owns product use cases; Engine owns execution; concrete adapters implement Application or Engine interfaces.
+DlightRAG exposes three visible code zones plus one private composition root: inbound Adapters call Application, Application owns product use cases, Engine owns execution, and outbound Adapters implement narrow ports owned by Application or Engine. This keeps the request path short without flattening distinct execution and persistence responsibilities.
 
 ## Status
 
-Accepted. Implemented. Current-state diagrams live in `docs/architecture.md`.
-
-## Context
-
-Before this change the root mixed four taxonomies at once: product capabilities (`answer`, `rag`, `access`), architectural roles (`application`, `services`, `runtime`, `adapters`), transports (`api`, `web`, `mcp`, `sdk`), and a peer `services` package that already belonged to Application. Two folders named `agent` existed for legitimate reasons — a product-neutral kernel and an Answer host — but the names hid that distinction. Inbound HTTP and MCP reached through Application, services, and deep Engine types. The documented layering needed nine levels to explain one request.
-
-Pi coding-agent looks clearer because it exposes one product facade (`AgentSession`), one creation function (`createAgentSession`), and modes that call that facade directly. Pi is not smaller internally, and it is not a durable multi-capability service. The lesson worth copying is the short visible path, not a single `core` dump or local JSONL persistence.
-
-DlightRAG still has essential complexity that Pi does not: concurrent durable runs, PostgreSQL leases and fencing, corpus ingestion and retrieval, Fast and Research, REST plus browser plus MCP, Access, Memory, conversations, artifacts, and crash recovery. The reorganization must keep those seams. It must remove accidental hops, duplicate public Python surfaces, and folders that pretend to be owners.
+Accepted and implemented for source ownership and dependency direction. Pending product interfaces and persistence changes are governed by later ADRs without changing this decision.
 
 ## Decision
 
-Organize the installable product as three visible zones:
+The installable product uses these zones:
 
-1. **Application** — what the product does: configuration, access, lifecycle, health, Answer Runs, Corpus Administration, Retrieval, Memory integration, and Web Conversations.
-2. **Engine** — how the product executes: AI, Agent, Runtime, RAG, and Answer as sibling owners under Engine. Ownership is parallel; the dependency DAG is documented and enforced, not nested as fake parent directories.
-3. **Adapters** — concrete edge mechanisms: HTTP, MCP, PostgreSQL, and Observability.
+1. **Application** — product use cases, authorization, caller-facing contracts, configuration, lifecycle, and health.
+2. **Engine** — AI, Agent, Runtime, RAG, and Answer execution as sibling owners with an explicit dependency DAG.
+3. **Adapters** — HTTP and MCP inbound protocols plus concrete outbound mechanisms such as PostgreSQL and observability.
 
-The request path is:
+The ordinary request path is:
 
 ```text
-HTTP / MCP  ->  Application  ->  Engine
+HTTP / MCP -> Application -> Engine
 ```
 
-HTTP and MCP are the only inbound protocol adapters. They translate external calls into Application use cases.
+A private root composition module wires concrete Adapters into Application and then leaves the request path. Application does not import concrete persistence or transport implementations. Inbound Adapters import only Application facades and contracts. Engine does not import Application or Adapters.
 
-Offline BM25 and vector rebuilds are not a product zone and not Application use cases. They require writers to be stopped, so they must not start Application. They remain installed package commands: thin argument parsers that call Engine RAG and PostgreSQL rebuild functions already used after ingest. They are not repository scripts, Makefile targets, or Compose services. Repository scripts stay host-only. Workspace reset stays Corpus Administration because it deletes product data through the running application.
+Engine ownership remains a DAG rather than a directory hierarchy:
 
-Outbound adapters implement interfaces owned by Application or Engine. They do not sit on the inbound call path. PostgreSQL may implement Application conversation and corpus ports as well as Engine session and run ports.
-
-Composition exists, but it is not a public zone. A private root composition module wires adapters into Application. The root facade exports `Application`, `DlightragConfig`, `create_application`, and `__version__`. `create_application` asynchronously returns a started Application. Callers close it. Tests may inject in-memory implementations through Application's constructor.
-
-Inbound adapters may import only Application facades and Application-owned request, result, and error contracts. They must not deep-import Engine. Application owns the caller-facing Answer, Retrieval, Corpus Administration, Memory, and Web Conversation contracts, including errors transports must handle. Engine identities that leak today are wrapped or re-homed at the Application facade; they are not imported by HTTP or MCP. Engine must not import Application or Adapters. Offline rebuild commands may compose Engine RAG and PostgreSQL directly because they run with the application process stopped. Engine children keep today's allowed direction:
-
-- AI depends on no other product modules.
-- Agent may depend on AI.
-- Runtime may depend on Agent, not Answer or RAG.
-- RAG may depend on AI.
+- AI depends on no other product module;
+- Agent may depend on AI;
+- Runtime may depend on Agent but not Answer or RAG;
+- RAG may depend on AI;
 - Answer may depend on AI, Agent, RAG, and Runtime.
 
-Profile Memory remains the independent `dlightrag-memory` distribution. Application Memory is only the product capability gate over that package.
+A shared Runtime therefore accepts generic prepared envelopes and composition-injected operation executors; it does not import Answer or RAG request models. Concrete persistence is exposed through owner-specific semantic ports rather than through a universal database or corpus interface.
 
-The public Python HTTP SDK is retired. Application is the only in-process Python interface. REST is the only remote public interface. The existing async HTTP client moves inside the HTTP adapter for CLI and evaluation reuse. The sync client is deleted.
+Offline index repair remains an installed operator command rather than an Application use case. It may compose the concrete Engine and Adapter behavior required for an offline repair while writers are stopped, but that exception does not define the online product architecture or a common storage abstraction. Corpus Reset remains an authorized Application operation because it mutates product corpus state through the running service.
 
-## Why this shape
-
-A short visible path is the design goal. Extra directories that only classify modules add hops without hiding complexity. Extra public clients that only wrap REST add a third product surface without a third capability.
-
-Application cannot both be the use-case facade and import PostgreSQL. Adapters cannot each assemble the process graph. A private composition function is the remaining role: it runs once at process start, then drops out of the request path.
-
-Engine children stay siblings because their dependencies form a DAG, not a tree. Nesting Runtime under Agent, RAG under Answer, or everything under Answer would lie about ownership. Adding Foundation/Capability/Coordination/Product folders would lengthen paths while leaving each layer with one or two real modules.
-
-HTTP and the browser share one server lifetime and one SSE/cursor implementation. They belong together as one HTTP adapter, not as two first-class packages that import each other. MCP stays beside HTTP because it is a different protocol with its own process entry. The Python remote client is not a third inbound protocol; it is HTTP-adapter machinery.
-
-## Rejected alternatives
-
-- **Keep many first-class owners.** Filesystem peers would continue to look like equal architecture layers.
-- **Foundation / Core / Product / Adapters / Interfaces directories.** Classification layers without behavior.
-- **A public Bootstrap package.** Makes startup wiring look like a product capability.
-- **Let Application compose concrete adapters.** Reverses the facade: Application would depend on PostgreSQL and HTTP.
-- **Let each inbound adapter create PostgreSQL and engines.** Duplicates composition and couples transports to storage.
-- **Merge the generic Agent kernel into Answer.** Runtime, PostgreSQL, and services already consume Agent types; that merge inverts an enforced seam.
-- **Split RAG into top-level Corpus and Retrieval.** Both share one LightRAG workspace runtime and store bundle.
-- **A Pi-shaped `core` bucket.** Pi's own core is tens of thousands of lines; DlightRAG would hide owners, not reveal them.
-- **Vertical feature slices with per-feature Postgres.** Answer already consumes Knowledge and Memory; feature-local storage would either duplicate schema or create hidden cross-feature adapter imports.
-- **Keep a public Python SDK.** It is a REST wrapper, not a distinct capability. Application already is the in-process API.
-- **Keep or expand a sync HTTP client.** No production caller requires it.
-- **Compatibility shims for old Python paths.** Clean break is accepted; dual trees are the failure mode this work exists to remove.
-- **Rename operator config keys, REST paths, or PostgreSQL tables to match Python directories.** Those are different interfaces from source layout.
-- **Line-count gates.** Large files can be deep implementations; small files can be pass-throughs.
-- **A Maintenance inbound zone or Application rebuild use case.** Rebuild is exclusive offline repair of derived indexes. Routing it through Application fights the stop-writers invariant.
-- **Move shipped rebuild commands into repository scripts.** Those scripts are not installed. Wheel and image operators would lose the non-destructive repair entry.
-- **Treat rebuild as workspace reset.** Reset deletes corpus data. Rebuild keeps documents and rewrites derived indexes.
+Application is the only public in-process Python facade. REST is the public remote interface; internal HTTP clients used by CLI or evaluation remain Adapter machinery rather than a second product SDK.
 
 ## Consequences
 
-Implementers must move code by zone and milestone, not by file size. Canonical architecture, interfaces, and SVG diagrams stay current-state until the matching milestone. After the last milestone, the installable tree must contain only Application, Engine, and Adapters as visible product zones; `dlightrag-memory` remains a separate distribution.
+The source tree communicates ownership directly instead of introducing classification-only layers or feature-local copies of shared persistence. Fast and Research remain Answer strategies, the generic Agent kernel remains product-neutral, and RAG remains the Engine owner that composes upstream LightRAG behavior with DlightRAG-specific corpus semantics.
 
-The first-look story becomes one sentence: adapters call Application, Application calls Engine, composition is private. Readers should not need a nine-layer legend to find the request path.
-
-## Invariants this decision does not change
-
-Product behavior, REST paths, configuration keys, environment variables, PostgreSQL object names, and persistence semantics stay the same. Fast and Research remain one Answer product with one Agent Session tree. The generic Agent kernel stays product-neutral. RAG remains one workspace runtime with internal corpus and retrieval owners. Local filesystem tools and in-memory session repositories stay inside Agent as internal adapters, not top-level product adapters. Installed rebuild command names stay `dlightrag-rebuild-bm25` and `dlightrag-rebuild-vdb`.
+This ADR intentionally does not freeze REST paths, lifecycle states, configuration keys, storage classes, or persistence schemas. Those contracts are governed by their owning decisions and may change without weakening the Application → Engine dependency direction recorded here.

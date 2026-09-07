@@ -7,8 +7,8 @@ from typing import Any, Literal
 from pydantic import Field, field_validator
 
 from dlightrag.adapters.http.browser.presentation import AnswerPresentation
-from dlightrag.application.answer_runs import AnswerRunStatus
 from dlightrag.application.answer_runs.client_contracts import ClientContractModel
+from dlightrag.application.runs import RunStatus
 
 
 class ConversationSummary(ClientContractModel):
@@ -42,7 +42,7 @@ class ConversationTurn(ClientContractModel):
     turn_number: int
     answer_run_id: str
     submission_id: str
-    status: AnswerRunStatus
+    status: RunStatus
     cancel_requested: bool = False
     user_text: str
     assistant_text: str

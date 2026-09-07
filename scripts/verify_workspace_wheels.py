@@ -35,7 +35,7 @@ _EXPECTED_DLIGHTRAG_DEPENDENCIES = {
     "dlightrag-memory": set(),
 }
 _EXPECTED_EXTRAS = {
-    "dlightrag": set(),
+    "dlightrag": {"milvus"},
     "dlightrag-memory": set(),
 }
 _REQUIRED_ROOT_DEPENDENCIES = frozenset(
@@ -877,14 +877,17 @@ def _smoke_root_interfaces() -> None:
     from dlightrag import Application, create_application
     from dlightrag.adapters.http.client import AnswerRunClient
     from dlightrag.application.access import DEPLOYMENT_OWNER_ID
-    from dlightrag.application.config import AnswerSectionSettings, DlightragConfig, RuntimeConfig
-    from dlightrag.application.corpus_admin import CorpusAdmin, CorpusAdminSettings, IngestSpec
+    from dlightrag.application.config import (
+        DlightragConfig,
+        QueryLaneRuntimeConfig,
+        RuntimeConfig,
+    )
+    from dlightrag.application.corpus_admin import CorpusAdmin, CorpusAdminSettings
     from dlightrag.application.retrieval import (
         ProjectedRetrieval,
+        RetrievalOptions,
         RetrievalService,
         RetrievalSettings,
-        RetrieveProjection,
-        RetrieveRequest,
     )
     from dlightrag.application.settings import rag_settings
     from dlightrag.engine.agent import AgentSessionRuntime, ContextContribution, ToolRegistry
@@ -900,7 +903,7 @@ def _smoke_root_interfaces() -> None:
         IngestionSettings,
         PipelineSettings,
     )
-    from dlightrag.engine.runtime import answer_run_request_fingerprint
+    from dlightrag.engine.runtime import run_request_fingerprint
 
     class Planner:
         async def plan(self, query, **_kwargs):
@@ -963,15 +966,11 @@ def _smoke_root_interfaces() -> None:
             ),
             telemetry=NoopTelemetry(),
         )
-        response = await service.retrieve(
-            RetrieveRequest(
-                query="installed retrieval",
-                workspaces=("default",),
-                projection=RetrieveProjection(
-                    downloadable_workspaces=frozenset(),
-                    visual_workspaces=frozenset(),
-                ),
-            )
+        service.warm(("default",))
+        response = await service.retrieve_result(
+            "installed retrieval",
+            workspaces=("default",),
+            retrieval=RetrievalOptions(),
         )
         if response.contexts["chunks"][0]["chunk_id"] != "installed":
             raise ValueError("installed Retrieval service did not project RAG contexts")
@@ -996,29 +995,18 @@ def _smoke_root_interfaces() -> None:
                 }
             ]
 
-        async def start_job(workspace, source_type, **kwargs):
-            return {
-                "job_id": "installed-job",
-                "workspace": workspace,
-                "source_type": source_type,
-                "request": kwargs,
-            }
-
         pool = SimpleNamespace(acquire=acquire)
         maintenance = SimpleNamespace(list_workspace_records=list_workspace_records)
-        jobs = SimpleNamespace(start_job=start_job)
         service = CorpusAdmin(
             settings=CorpusAdminSettings(
                 default_workspace_id="default",
                 default_display_name="Default",
                 default_embedding_model="embed-model",
                 input_root=Path(tempfile.gettempdir()) / "installed-corpus",
-                ingest_timeout_seconds=5,
                 read_only=False,
             ),
             pool=cast(Any, pool),
             maintenance=cast(Any, maintenance),
-            ingest_jobs=cast(Any, jobs),
             file_panel=cast(Any, SimpleNamespace()),
             metadata_search=cast(Any, SimpleNamespace()),
             source_download_for=cast(Any, lambda _workspace: SimpleNamespace()),
@@ -1028,16 +1016,10 @@ def _smoke_root_interfaces() -> None:
         )
         if await service.list_workspaces() != ["installed", "default"]:
             raise ValueError("installed CorpusAdmin did not expose its workspace catalog")
-        job = await service.start_ingest_job(
-            "installed",
-            IngestSpec(source_type="s3", bucket="installed-bucket", prefix="docs/"),
-        )
-        if job["request"]["bucket"] != "installed-bucket":
-            raise ValueError("installed CorpusAdmin did not project its ingest contract")
 
     config = DlightragConfig(
         models=ModelsSettings(max_concurrency=2),
-        answer=AnswerSectionSettings(runtime=RuntimeConfig(answer_worker_concurrency=3)),
+        runtime=RuntimeConfig(query=QueryLaneRuntimeConfig(worker_concurrency=3)),
         corpus=CorpusSettings(
             ingestion=IngestionSettings(pipeline=PipelineSettings(max_concurrency=5))
         ),
@@ -1052,10 +1034,11 @@ def _smoke_root_interfaces() -> None:
         for name in (
             "create",
             "status",
+            "events",
+            "cancel",
+            "list_runs",
             "steer",
             "follow_up",
-            "cancel",
-            "resume",
             "fork",
             "children",
         )
@@ -1128,13 +1111,11 @@ def _smoke_root_interfaces() -> None:
             raise ValueError(f"installed root package still contains {retired_module}")
     if config.models.max_concurrency != 2:
         raise ValueError("installed root config did not preserve AI concurrency")
-    if config.answer.runtime.answer_worker_concurrency != 3:
+    if config.runtime.query.worker_concurrency != 3:
         raise ValueError("installed root config did not preserve Runtime concurrency")
     if settings.rag_pipeline_max_async != 5:
         raise ValueError("installed root mapping did not preserve RAG concurrency")
-    fingerprint = answer_run_request_fingerprint(
-        {"query": "installed wheel", "workspaces": ["default"]}
-    )
+    fingerprint = run_request_fingerprint({"query": "installed wheel", "workspaces": ["default"]})
     if len(fingerprint) != 64:
         raise ValueError("installed Runtime did not produce a SHA-256 request fingerprint")
     asyncio.run(retrieval_smoke())

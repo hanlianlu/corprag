@@ -563,8 +563,10 @@ async def test_metadata_indexes_are_workspace_leading_and_planner_usable(
         rows.append((_WORKSPACE_HOT, "doc-hot", "Quarterly Report draft hot.pdf"))
         await conn.executemany(
             """
-            INSERT INTO dlightrag_doc_metadata (workspace, doc_id, filename, filename_stem)
-            VALUES ($1, $2, $3, $3)
+            INSERT INTO dlightrag_doc_metadata
+                (workspace, doc_id, filename, filename_stem,
+                 _dlightrag_finalization_complete)
+            VALUES ($1, $2, $3, $3, TRUE)
             """,
             rows,
         )
@@ -674,8 +676,9 @@ async def test_metadata_indexes_are_workspace_leading_and_planner_usable(
         # bounded MD5 key with the equality recheck, where a B-tree could not.
         oversized = "x" * 10_000
         await conn.execute(
-            "INSERT INTO dlightrag_doc_metadata (workspace, doc_id, title) "
-            "VALUES ($1, 'doc-big-title', $2)",
+            "INSERT INTO dlightrag_doc_metadata "
+            "(workspace, doc_id, title, _dlightrag_finalization_complete) "
+            "VALUES ($1, 'doc-big-title', $2, TRUE)",
             _WORKSPACE_A,
             oversized,
         )

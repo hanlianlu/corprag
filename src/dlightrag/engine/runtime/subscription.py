@@ -15,7 +15,7 @@ import contextlib
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
 from typing import Protocol
 
-from dlightrag.engine.runtime.records import AnswerRunEvent
+from dlightrag.engine.runtime.records import RunEvent
 
 #: Poll cadence for a quiet run; a local commit wakes its subscribers sooner.
 EVENT_POLL_SECONDS = 1.0
@@ -28,7 +28,7 @@ class EventReader(Protocol):
 
     async def read_event_page(
         self, *, owner_id: str, run_id: str, after_sequence: int = 0
-    ) -> tuple[AnswerRunEvent, ...]: ...
+    ) -> tuple[RunEvent, ...]: ...
 
 
 class RunEventBroker:
@@ -64,7 +64,7 @@ async def follow_run_events(
     run_id: str,
     after_sequence: int = 0,
     is_finished: Callable[[], Awaitable[bool]],
-) -> AsyncGenerator[AnswerRunEvent]:
+) -> AsyncGenerator[RunEvent]:
     """Replay committed events after ``after_sequence``, then follow the run.
 
     The waiter is armed before every read, so an event committed while a page is

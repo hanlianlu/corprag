@@ -35,9 +35,9 @@ from lightrag.evaluation.eval_rag_quality import RAGEvaluator
 from lightrag.utils import logger
 
 from dlightrag.adapters.http.client import (
-    AnswerRunCancelledError,
     AnswerRunClient,
-    AnswerRunFailedError,
+    RunCancelledError,
+    RunFailedError,
 )
 from dlightrag.engine.ai.settings import ModelSettings
 
@@ -238,9 +238,9 @@ class DlightRAGAdapterEvaluator(RAGEvaluator):
                     "top_k": int(os.getenv("EVAL_QUERY_TOP_K", "10")),
                 }
             )
-        except AnswerRunCancelledError as exc:
+        except RunCancelledError as exc:
             raise EvalError(f"DlightRAG answer run was cancelled for: {question[:80]}") from exc
-        except AnswerRunFailedError as exc:
+        except RunFailedError as exc:
             raise EvalError(
                 f"DlightRAG answer run failed ({exc.error_kind}): {exc.public_message}"
             ) from exc

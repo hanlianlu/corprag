@@ -33,7 +33,7 @@ class _RecordingConnection:
     async def fetchrow(self, query: str, *args: Any) -> Any:
         self.queries.append(("fetchrow", query))
         self.query_args.append((query, args))
-        if "FROM dlightrag_answer_runs" in query:
+        if "FROM dlightrag_runs" in query:
             return {"durable_progress_version": 0, "cancel_requested": False}
         if "FROM dlightrag_answer_run_stages" in query:
             return None
@@ -42,7 +42,7 @@ class _RecordingConnection:
     async def fetchval(self, query: str, *args: Any) -> Any:
         self.queries.append(("fetchval", query))
         self.query_args.append((query, args))
-        if "UPDATE dlightrag_answer_runs" in query and "event_sequence" in query:
+        if "UPDATE dlightrag_runs" in query and "event_sequence" in query:
             return 7
         if "LEFT JOIN dlightrag_answer_evidence" in query:
             return None
@@ -103,7 +103,7 @@ def _assert_single_run_lock_without_progress_reselect(
     run_reads = [
         query
         for kind, query in connection.queries
-        if kind in {"fetchrow", "fetchval"} and "FROM dlightrag_answer_runs" in query
+        if kind in {"fetchrow", "fetchval"} and "FROM dlightrag_runs" in query
     ]
     assert len(run_reads) == 1
     assert "durable_progress_version" in run_reads[0]

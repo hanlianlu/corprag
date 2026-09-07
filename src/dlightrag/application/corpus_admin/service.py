@@ -4,8 +4,7 @@
 import datetime
 import logging
 import re
-import shutil
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -19,7 +18,6 @@ from dlightrag.application.errors import (
     StorageSchemaError,
     WorkspaceWriteFencedError,
 )
-from dlightrag.engine.ai.telemetry import safe_log_text
 from dlightrag.engine.rag.corpus.contracts import IngestDocument, SourceType, VisualAssetSize
 from dlightrag.engine.rag.corpus.downloads import (
     LocalDownloadTarget as _EngineLocalDownloadTarget,
@@ -36,19 +34,7 @@ from dlightrag.engine.rag.corpus.downloads import (
 from dlightrag.engine.rag.corpus.downloads import (
     SourceDownloadUnavailableError as _EngineSourceDownloadUnavailableError,
 )
-from dlightrag.engine.rag.corpus.ingest_jobs import JOB_STATES_WITH_RESULT, IngestJobSchemaError
-from dlightrag.engine.rag.corpus.ingestion.paths import is_explicit_upload_batch_dir
-from dlightrag.engine.rag.corpus.ingestion.uploads import (
-    UploadTooLargeError as _EngineUploadTooLargeError,
-)
-from dlightrag.engine.rag.corpus.ingestion.uploads import (
-    ignored_upload,
-    safe_upload_basename,
-    safe_upload_destination,
-    upload_batch_dir,
-    write_upload_stream,
-)
-from dlightrag.engine.rag.corpus.reset import areset_orphaned_workspace
+from dlightrag.engine.rag.corpus.ingestion.uploads import safe_upload_basename
 from dlightrag.engine.rag.retrieval import MetadataFilter
 from dlightrag.engine.rag.retrieval.metadata_fields import (
     MetadataValidationError as _EngineMetadataValidationError,
@@ -79,8 +65,6 @@ from .errors import (
     SourceDownloadNotFoundError,
     SourceDownloadTarget,
     SourceDownloadUnavailableError,
-    UnsafeUploadNameError,
-    UploadTooLargeError,
 )
 from .file_panel import (
     FailedFileRowPage,
@@ -363,17 +347,8 @@ def managed_local_ingest_documents(
     ]
 
 
-class CorpusIngestError(RuntimeError):
-    """A caller-awaited ingest job could not produce a successful result."""
-
-    def __init__(self, detail: str) -> None:
-        super().__init__(detail)
-        self.detail = detail
-
-
 class FilePanelSnapshot(TypedDict):
     files: list[dict[str, Any]]
-    pipeline_status: dict[str, Any]
     next_cursor: FilePanelCursor | None
     fetched_rows: int
 
@@ -384,65 +359,13 @@ class FailedFileSnapshot(TypedDict):
     fetched_rows: int
 
 
-class CorpusResetResult(TypedDict):
-    workspaces: dict[str, dict[str, Any]]
-    total_errors: int
-
-
 @dataclass(frozen=True, slots=True)
 class CorpusAdminSettings:
     default_workspace_id: str
     default_display_name: str
     default_embedding_model: str
     input_root: Path | str
-    ingest_timeout_seconds: float | None
     read_only: bool
-
-    def __post_init__(self) -> None:
-        if self.ingest_timeout_seconds is not None and self.ingest_timeout_seconds < 0:
-            raise ValueError("ingest timeout must be non-negative")
-
-
-class IngestJobs(Protocol):
-    async def start_recovery(self) -> None: ...
-
-    async def start_job(
-        self,
-        workspace: str,
-        source_type: SourceType,
-        *,
-        cleanup_paths: str | Path | Sequence[str | Path] | None = None,
-        **kwargs: Any,
-    ) -> dict[str, Any]: ...
-
-    async def start_retry_failed_job(self, workspace: str) -> dict[str, Any]: ...
-
-    async def await_job(
-        self,
-        job_id: str,
-        *,
-        timeout: float | None = None,
-    ) -> dict[str, Any] | None: ...
-
-    async def get_job(self, job_id: str) -> dict[str, Any] | None: ...
-
-    async def get_active_retry_failed_job(self, workspace: str) -> dict[str, Any] | None: ...
-
-    async def cancel_job(self, job_id: str, *, workspace: str) -> bool: ...
-
-    def has_active_workspace_job(self, workspace: str) -> bool: ...
-
-    async def cancel_for_workspace(self, workspace: str) -> int: ...
-
-    async def attach_reset_result(
-        self,
-        *,
-        workspace: str,
-        result: dict[str, Any],
-        dry_run: bool,
-    ) -> None: ...
-
-    async def close(self) -> None: ...
 
 
 class FilePanelStore(Protocol):
@@ -471,12 +394,6 @@ class MetadataSearchStore(Protocol):
     ) -> MetadataMatchRowPage: ...
 
 
-class UploadReader(Protocol):
-    """Minimal async reader contract for one streamed upload."""
-
-    async def read(self, size: int = -1) -> bytes: ...
-
-
 class SourceDownloadPreparer(Protocol):
     async def prepare(self, document_id: str) -> object: ...
 
@@ -493,7 +410,6 @@ class CorpusAdmin:
         settings: CorpusAdminSettings,
         pool: WorkspacePool,
         maintenance: CorpusMaintenanceStore,
-        ingest_jobs: IngestJobs,
         file_panel: FilePanelStore,
         metadata_search: MetadataSearchStore,
         source_download_for: SourceDownloadFactory,
@@ -505,7 +421,6 @@ class CorpusAdmin:
         self._settings = settings
         self._pool = pool
         self._maintenance = maintenance
-        self._ingest_jobs = ingest_jobs
         self._file_panel = file_panel
         self._metadata_search = metadata_search
         self._source_download_for = source_download_for
@@ -529,14 +444,6 @@ class CorpusAdmin:
         except CorpusSchemaError as exc:
             raise StorageSchemaError(str(exc)) from exc
 
-    async def start_recovery(self) -> None:
-        if self._settings.read_only:
-            return
-        try:
-            await self._ingest_jobs.start_recovery()
-        except IngestJobSchemaError as exc:
-            raise StorageSchemaError(str(exc)) from exc
-
     def start_promotion_worker(self) -> None:
         """Start the background promotion worker (writer roles only)."""
         if self._settings.read_only or self._promotion_worker is None:
@@ -546,7 +453,6 @@ class CorpusAdmin:
     async def aclose(self) -> None:
         if self._promotion_worker is not None:
             await self._promotion_worker.aclose()
-        await self._ingest_jobs.close()
 
     async def alist_workspace_records(self) -> list[WorkspaceRecord]:
         """Return the canonical workspace catalog with a default fallback."""
@@ -634,63 +540,6 @@ class CorpusAdmin:
         runtime = await _acquire_workspace(self._pool, workspace)
         await runtime.aregister_workspace(display_name=display_name)
 
-    async def ingest(self, workspace_id: str, spec: IngestSpec) -> dict[str, Any]:
-        job = await self.start_ingest_job(workspace_id, spec)
-        row = await self._ingest_jobs.await_job(
-            str(job["job_id"]),
-            timeout=self._settings.ingest_timeout_seconds,
-        )
-        if row is None:
-            raise CorpusIngestError(f"Ingest job disappeared: {job['job_id']}")
-        status = str(row.get("status") or "")
-        if status in JOB_STATES_WITH_RESULT:
-            result = row.get("result")
-            return result if isinstance(result, dict) else {}
-        if status == "failed":
-            raw_errors = row.get("errors")
-            errors = raw_errors if isinstance(raw_errors, list) else []
-            raise CorpusIngestError(
-                "; ".join(str(error) for error in errors) or "Ingest job failed"
-            )
-        return row
-
-    async def start_ingest_job(
-        self,
-        workspace_id: str,
-        spec: IngestSpec,
-    ) -> dict[str, Any]:
-        self._require_writer("ingestion")
-        workspace = require_canonical_workspace_id(workspace_id)
-        try:
-            return await self._ingest_jobs.start_job(
-                workspace,
-                spec.source_type,
-                cleanup_paths=_cleanup_paths_for_local_ingest(spec),
-                **ingest_kwargs_from_spec(spec),
-            )
-        except IngestJobSchemaError as exc:
-            raise StorageSchemaError(str(exc)) from exc
-
-    async def get_ingest_job(self, job_id: str) -> dict[str, Any] | None:
-        self._require_writer("ingest job access")
-        return await self._ingest_jobs.get_job(job_id)
-
-    async def cancel_ingest_job(self, job_id: str) -> dict[str, Any] | None:
-        self._require_writer("ingest job cancellation")
-        job = await self._ingest_jobs.get_job(job_id)
-        if job is None:
-            return None
-        workspace = require_canonical_workspace_id(str(job.get("workspace") or ""))
-        cancelled = await self._ingest_jobs.cancel_job(job_id, workspace=workspace)
-        current = await self._ingest_jobs.get_job(job_id)
-        if (
-            not cancelled
-            and current is not None
-            and str(current.get("status") or "") in {"queued", "running"}
-        ):
-            raise CorpusIngestError("Ingest job cancellation was not committed")
-        return current
-
     async def file_panel_snapshot(
         self,
         workspace_id: str,
@@ -714,24 +563,8 @@ class CorpusAdmin:
                 updated_at=last.updated_at,
                 doc_id=last.doc_id,
             )
-        loaded_status = await self._pool.get_pipeline_status(workspace)
-        if loaded_status is not None:
-            pipeline_status = loaded_status
-        elif self._ingest_jobs.has_active_workspace_job(workspace):
-            pipeline_status = {
-                "busy": True,
-                "pending_enqueues": 0,
-                "latest_message": "Starting ingest...",
-            }
-        else:
-            pipeline_status = {
-                "busy": False,
-                "pending_enqueues": 0,
-                "latest_message": "",
-            }
         return {
             "files": [item.presentation() for item in result.items],
-            "pipeline_status": pipeline_status,
             "next_cursor": next_cursor,
             "fetched_rows": result.fetched_rows,
         }
@@ -792,101 +625,16 @@ class CorpusAdmin:
             return RedirectDownloadTarget(url=target.url)
         raise SourceDownloadInvalidError("Source download target is invalid")
 
-    async def stage_upload_stream(
-        self,
-        workspace_id: str,
-        *,
-        filename: str,
-        reader: UploadReader,
-        max_bytes: int,
-    ) -> tuple[Path, str]:
-        """Stage one streamed upload under the workspace input root.
-
-        Returns the saved path and the safe basename; raises product errors for
-        unsafe names and oversized payloads.
-        """
-        workspace = require_canonical_workspace_id(workspace_id)
-        try:
-            safe_name = safe_upload_basename(filename)
-        except ValueError:
-            raise UnsafeUploadNameError(f"Unsafe filename: {filename!r}") from None
-        target_dir = Path(self._settings.input_root) / workspace
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target_path = target_dir / safe_name
-        try:
-            await write_upload_stream(reader, target_path, max_bytes=max_bytes)
-        except _EngineUploadTooLargeError as exc:
-            raise UploadTooLargeError(str(exc)) from exc
-        return target_path, safe_name
-
-    async def stage_upload_batch(
-        self,
-        workspace_id: str,
-        files: Sequence[tuple[str, UploadReader]],
-        *,
-        per_file_max_bytes: int,
-        batch_max_bytes: int,
-    ) -> tuple[Path, list[Path]]:
-        """Stage a multi-file upload batch and return its directory and saved paths.
-
-        Ignored OS-junk names are skipped. Oversized payloads raise
-        ``UploadTooLargeError`` after removing the batch directory.
-        """
-        workspace = require_canonical_workspace_id(workspace_id)
-        upload_dir = upload_batch_dir(Path(self._settings.input_root) / workspace)
-        saved_paths: list[Path] = []
-        bytes_written = 0
-        try:
-            for filename, reader in files:
-                if not filename or ignored_upload(filename):
-                    continue
-                try:
-                    dest = safe_upload_destination(upload_dir, filename)
-                except ValueError as exc:
-                    raise UnsafeUploadNameError(f"Unsafe filename: {filename!r}") from exc
-                bytes_written = await write_upload_stream(
-                    reader,
-                    dest,
-                    max_bytes=min(batch_max_bytes, bytes_written + per_file_max_bytes),
-                    bytes_written=bytes_written,
-                )
-                saved_paths.append(dest)
-        except _EngineUploadTooLargeError as exc:
-            shutil.rmtree(upload_dir, ignore_errors=True)
-            raise UploadTooLargeError(str(exc)) from exc
-        except BaseException:
-            shutil.rmtree(upload_dir, ignore_errors=True)
-            raise
-        return upload_dir, saved_paths
-
-    async def get_pipeline_status(self, workspace_id: str) -> dict[str, Any]:
-        runtime = await _acquire_workspace(self._pool, require_canonical_workspace_id(workspace_id))
-        return await runtime.aget_pipeline_status()
-
-    async def delete_files(
+    async def preview_delete_files(
         self,
         workspace_id: str,
         *,
         file_paths: list[str] | None = None,
         filenames: list[str] | None = None,
-        dry_run: bool = False,
     ) -> list[dict[str, Any]]:
-        self._require_writer("file deletion")
-        workspace = require_canonical_workspace_id(workspace_id)
-        if dry_run:
-            runtime = await _acquire_workspace(self._pool, workspace)
-            return await runtime.adelete_files(
-                file_paths=file_paths,
-                filenames=filenames,
-                dry_run=dry_run,
-            )
-        async with _workspace_write_gate(self._maintenance, workspace):
-            runtime = await _acquire_workspace(self._pool, workspace)
-            return await runtime.adelete_files(
-                file_paths=file_paths,
-                filenames=filenames,
-                dry_run=dry_run,
-            )
+        """Resolve exact deletion identities without taking the mutation barrier."""
+        runtime = await _acquire_workspace(self._pool, require_canonical_workspace_id(workspace_id))
+        return await runtime.adelete_files(file_paths=file_paths, filenames=filenames, dry_run=True)
 
     async def get_visual_asset(
         self,
@@ -897,36 +645,6 @@ class CorpusAdmin:
     ) -> Any:
         runtime = await _acquire_workspace(self._pool, require_canonical_workspace_id(workspace_id))
         return await runtime.aget_visual_asset(chunk_id, size=size)
-
-    async def start_retry_failed_docs(self, workspace_id: str) -> dict[str, Any]:
-        """Start or join the durable failed-document retry for one workspace."""
-        self._require_writer("failed document retry")
-        return await self._ingest_jobs.start_retry_failed_job(
-            require_canonical_workspace_id(workspace_id)
-        )
-
-    async def get_active_retry_failed_docs(self, workspace_id: str) -> dict[str, Any] | None:
-        if self._settings.read_only:
-            return None
-        return await self._ingest_jobs.get_active_retry_failed_job(
-            require_canonical_workspace_id(workspace_id)
-        )
-
-    async def retry_failed_docs(self, workspace_id: str) -> dict[str, Any]:
-        """Await the durable single-flight retry for existing REST callers."""
-        job = await self.start_retry_failed_docs(workspace_id)
-        row = await self._ingest_jobs.await_job(str(job["job_id"]))
-        if row is None:
-            raise CorpusIngestError(f"Retry job disappeared: {job['job_id']}")
-        status = str(row.get("status") or "")
-        if status in JOB_STATES_WITH_RESULT:
-            result = row.get("result")
-            return result if isinstance(result, dict) else {}
-        raw_errors = row.get("errors")
-        errors = raw_errors if isinstance(raw_errors, list) else []
-        raise CorpusIngestError(
-            "; ".join(str(error) for error in errors) or "Failed-document retry failed"
-        )
 
     async def get_metadata(self, workspace_id: str, document_id: str) -> dict[str, Any]:
         runtime = await _acquire_workspace(self._pool, require_canonical_workspace_id(workspace_id))
@@ -979,121 +697,6 @@ class CorpusAdmin:
             fetched_rows=result.fetched_rows,
         )
 
-    async def reset(
-        self,
-        *,
-        workspace_ids: Sequence[str],
-        keep_files: bool = False,
-        dry_run: bool = False,
-    ) -> CorpusResetResult:
-        """Reset an explicit non-empty set of authorized canonical workspaces.
-
-        A real (non-dry-run) reset is a write: every workspace goes through the
-        promotion fence gate, which raises ``WorkspaceWriteFencedError`` when a
-        promotion is mid-flight.
-        """
-        workspaces = _require_workspace_scope(workspace_ids)
-        self._require_writer("workspace reset")
-        known = set(await self.list_workspaces())
-        results: dict[str, Any] = {}
-        total_errors = 0
-
-        for workspace in workspaces:
-            if not dry_run:
-                async with _workspace_write_gate(self._maintenance, workspace):
-                    result = await self._reset_one(
-                        workspace, known=known, keep_files=keep_files, dry_run=dry_run
-                    )
-            else:
-                result = await self._reset_one(
-                    workspace, known=known, keep_files=keep_files, dry_run=dry_run
-                )
-            results[workspace] = result
-            total_errors += len(result.get("errors", ()))
-            if "error" in result:
-                total_errors += 1
-
-        return {"workspaces": results, "total_errors": total_errors}
-
-    async def _reset_one(
-        self,
-        workspace: str,
-        *,
-        known: set[str],
-        keep_files: bool,
-        dry_run: bool,
-    ) -> dict[str, Any]:
-        if workspace not in known and not await self._pool.is_loaded(workspace):
-            return await self._reset_orphan(
-                workspace,
-                keep_files=keep_files,
-                dry_run=dry_run,
-            )
-        return await self._reset_loaded(
-            workspace,
-            keep_files=keep_files,
-            dry_run=dry_run,
-        )
-
-    async def _reset_orphan(
-        self,
-        workspace: str,
-        *,
-        keep_files: bool,
-        dry_run: bool,
-    ) -> dict[str, Any]:
-        cancelled = 0 if dry_run else await self._ingest_jobs.cancel_for_workspace(workspace)
-        result = await areset_orphaned_workspace(
-            workspace,
-            maintenance=self._maintenance,
-            keep_files=keep_files,
-            dry_run=dry_run,
-            input_dir=str(Path(self._settings.input_root)),
-        )
-        await self._ingest_jobs.attach_reset_result(
-            workspace=workspace,
-            result=result,
-            dry_run=dry_run,
-        )
-        result["ingest_jobs_cancelled"] = cancelled
-        return result
-
-    async def _reset_loaded(
-        self,
-        workspace: str,
-        *,
-        keep_files: bool,
-        dry_run: bool,
-    ) -> dict[str, Any]:
-        cancelled = 0 if dry_run else await self._ingest_jobs.cancel_for_workspace(workspace)
-        try:
-            runtime = await _acquire_workspace(self._pool, workspace)
-            result = await runtime.areset(keep_files=keep_files, dry_run=dry_run)
-            result["ingest_jobs_cancelled"] = cancelled
-            await self._ingest_jobs.attach_reset_result(
-                workspace=workspace,
-                result=result,
-                dry_run=dry_run,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Failed to reset workspace '%s': %s",
-                safe_log_text(workspace),
-                safe_log_text(exc),
-            )
-            result = {
-                "error": "workspace reset failed",
-                "ingest_jobs_cancelled": cancelled,
-            }
-        if not dry_run:
-            try:
-                await self._pool.evict(workspace)
-            except Exception:
-                logger.warning(
-                    "Failed to close workspace '%s'", safe_log_text(workspace), exc_info=True
-                )
-        return result
-
     async def get_workspace_storage_status(self, workspace_id: str) -> dict[str, Any] | None:
         """Return operator-facing storage/promotion facts for one workspace.
 
@@ -1140,20 +743,6 @@ class CorpusAdmin:
             raise PermissionError(f"{operation} requires a writer service role")
 
 
-def _require_workspace_scope(workspace_ids: Sequence[str]) -> tuple[str, ...]:
-    if isinstance(workspace_ids, (str, bytes)) or not workspace_ids:
-        raise ValueError("at least one canonical workspace id is required")
-    workspaces: list[str] = []
-    for workspace in workspace_ids:
-        try:
-            canonical = require_canonical_workspace_id(workspace)
-        except ValueError as exc:
-            raise ValueError("reset requires canonical workspace ids") from exc
-        if canonical not in workspaces:
-            workspaces.append(canonical)
-    return tuple(workspaces)
-
-
 def _payload_value(payload: Any, name: str) -> Any:
     if isinstance(payload, Mapping):
         return payload.get(name)
@@ -1187,13 +776,6 @@ def _require_document_field(
             )
 
 
-def _cleanup_paths_for_local_ingest(spec: IngestSpec) -> list[str]:
-    if spec.source_type != "local" or not spec.path:
-        return []
-    path = Path(spec.path).expanduser()
-    return [str(path)] if is_explicit_upload_batch_dir(path) else []
-
-
 def _workspace_record(row: dict[str, Any]) -> WorkspaceRecord:
     workspace = require_canonical_workspace_id(str(row.get("workspace") or ""))
     return {
@@ -1215,15 +797,11 @@ def _iso_or_none(value: Any) -> str | None:
 __all__ = [
     "CorpusAdmin",
     "CorpusAdminSettings",
-    "CorpusIngestError",
-    "CorpusResetResult",
     "FilePanelStore",
     "FilePanelSnapshot",
     "IngestSpec",
-    "IngestJobs",
     "SourceDownloadFactory",
     "SourceDownloadPreparer",
-    "UploadReader",
     "ingest_kwargs_from_spec",
     "ingest_spec_from_payload",
     "managed_local_ingest_documents",

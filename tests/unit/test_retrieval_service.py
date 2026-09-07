@@ -1,5 +1,5 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
-"""Behavioral contract for the inline Retrieval application service."""
+"""Behavioral contract for the shared raw Retrieval execution seam."""
 
 import asyncio
 from collections.abc import Iterator, Mapping
@@ -15,21 +15,14 @@ from dlightrag.application.retrieval import (
     ProjectedRetrieval,
     RetrievalService,
     RetrievalSettings,
-    RetrievalTimeoutError,
-    RetrieveProjection,
     RetrieveRequest,
 )
 from dlightrag.engine.ai.capacity import ModelProfile
 from dlightrag.engine.ai.telemetry import NoopTelemetry
-from dlightrag.engine.rag.retrieval import MetadataFilter, RetrievalResult
+from dlightrag.engine.rag.retrieval import MetadataFilter, RetrievalOptions, RetrievalResult
 from dlightrag.engine.rag.retrieval.runtime import RetrievalPlannerRuntime
 from dlightrag.engine.rag.workspace.pool import WorkspacePool
 from dlightrag.engine.rag.workspace.workspace_rag import WorkspaceRag
-
-_PROJECTION = RetrieveProjection(
-    downloadable_workspaces=frozenset(),
-    visual_workspaces=frozenset(),
-)
 
 
 class _Planner:
@@ -56,6 +49,30 @@ class _Planners:
 
     async def aclose(self) -> None:
         return None
+
+
+async def _execute_request(service: RetrievalService, request: RetrieveRequest) -> RetrievalResult:
+    """Exercise the shared raw stage without restoring the removed inline API."""
+    if len(request.query_images) > service._settings.query_image_limit:
+        raise ValueError(
+            f"at most {service._settings.query_image_limit} current images are allowed"
+        )
+    service.warm(request.workspaces)
+    images = tuple(dict(image) for image in request.query_images)
+    descriptions = await service.prepare_query_images(images)
+    return await service.retrieve_result(
+        request.query,
+        workspaces=request.workspaces,
+        retrieval=RetrievalOptions(
+            top_k=request.top_k,
+            chunk_top_k=request.chunk_top_k,
+            federated_rerank=request.federated_rerank,
+        ),
+        bm25_query=request.bm25_query,
+        filters=request.filters,
+        query_images=images,
+        image_descriptions=descriptions,
+    )
 
 
 async def test_planner_history_measure_uses_execution_schema_images_and_mode() -> None:
@@ -96,43 +113,6 @@ async def test_planner_history_measure_uses_execution_schema_images_and_mode() -
     )
 
 
-async def test_timeout_bounds_only_the_inline_retrieval_request() -> None:
-    blocked = asyncio.Event()
-
-    async def block(*_args, **_kwargs):
-        await blocked.wait()
-
-    runtime = AsyncMock()
-    runtime.aretrieve.side_effect = block
-    pool = AsyncMock()
-    pool.acquire.return_value = runtime
-    service = RetrievalService(
-        pool=pool,
-        planners=_Planners(),
-        schema_lookup=AsyncMock(return_value={}),
-        image_preparer=AsyncMock(return_value=[]),
-        projector=Mock(),
-        settings=RetrievalSettings(
-            default_top_k=8,
-            default_chunk_top_k=5,
-            timeout_seconds=0.01,
-            query_image_limit=4,
-        ),
-        telemetry=NoopTelemetry(),
-    )
-
-    with pytest.raises(RetrievalTimeoutError, match="timed out"):
-        await service.retrieve(
-            RetrieveRequest(
-                query="report",
-                workspaces=("finance",),
-                projection=_PROJECTION,
-            )
-        )
-
-    assert service.closed is False
-
-
 async def test_explicit_filters_and_bm25_override_planner_inference() -> None:
     inferred = MetadataFilter(author="Planner")
     explicit = MetadataFilter(author="Caller")
@@ -166,16 +146,16 @@ async def test_explicit_filters_and_bm25_override_planner_inference() -> None:
         telemetry=NoopTelemetry(),
     )
 
-    await service.retrieve(
+    await _execute_request(
+        service,
         RetrieveRequest(
             query="report",
             workspaces=("finance",),
-            projection=_PROJECTION,
             top_k=9,
             chunk_top_k=6,
             bm25_query="caller lexical",
             filters=explicit,
-        )
+        ),
     )
 
     assert runtime.aretrieve.await_args.args == ("standalone",)
@@ -213,8 +193,8 @@ async def test_retrieve_projects_lightrag_mix_trace_vocabulary() -> None:
         telemetry=NoopTelemetry(),
     )
 
-    response = await service.retrieve(
-        RetrieveRequest(query="report", workspaces=("finance",), projection=_PROJECTION)
+    response = await _execute_request(
+        service, RetrieveRequest(query="report", workspaces=("finance",))
     )
 
     assert response.trace == {"lightrag_mix_chunk_count": 2, "query_image_description_count": 0}
@@ -437,12 +417,8 @@ async def test_requested_workspace_schema_is_passed_to_planner() -> None:
         telemetry=NoopTelemetry(),
     )
 
-    await service.retrieve(
-        RetrieveRequest(query="query", workspaces=("reports",), projection=_PROJECTION)
-    )
-    await service.retrieve(
-        RetrieveRequest(query="query", workspaces=("legal",), projection=_PROJECTION)
-    )
+    await _execute_request(service, RetrieveRequest(query="query", workspaces=("reports",)))
+    await _execute_request(service, RetrieveRequest(query="query", workspaces=("legal",)))
 
     assert planner.plan.await_args_list[0].kwargs["schema"] == schemas[("reports",)]
     assert planner.plan.await_args_list[1].kwargs["schema"] == schemas[("legal",)]
@@ -493,9 +469,7 @@ async def test_retrieve_starts_workspace_warmup_before_planning() -> None:
     )
 
     task = asyncio.create_task(
-        service.retrieve(
-            RetrieveRequest(query="query", workspaces=("reports",), projection=_PROJECTION)
-        )
+        _execute_request(service, RetrieveRequest(query="query", workspaces=("reports",)))
     )
     try:
         await plan_started.wait()
@@ -664,9 +638,9 @@ async def test_close_cancels_warmups_and_closed_service_starts_no_new_warmup() -
 
     pool.warm.assert_awaited_once_with(("reports",))
 
-    request = RetrieveRequest(query="closed", workspaces=("reports",), projection=_PROJECTION)
+    request = RetrieveRequest(query="closed", workspaces=("reports",))
     with pytest.raises(CorpusUnavailableError, match="Retrieval service is closed"):
-        await service.retrieve(request)
+        await _execute_request(service, request)
     with pytest.raises(CorpusUnavailableError, match="Retrieval service is closed"):
         await service.retrieve_result("closed", workspaces=("reports",))
     with pytest.raises(CorpusUnavailableError, match="Retrieval service is closed"):
@@ -732,27 +706,27 @@ async def test_visual_disabled_does_not_receive_raw_query_images() -> None:
         telemetry=NoopTelemetry(),
     )
 
-    response = await service.retrieve(
+    response = await _execute_request(
+        service,
         RetrieveRequest(
             query="query",
             workspaces=("reports",),
-            projection=_PROJECTION,
             query_images=images,
-        )
+        ),
     )
 
     image_preparer.assert_awaited_once_with(images)
     assert "query_image_blocks" not in runtime.aretrieve.await_args.kwargs
     assert "prepared_visual_query" not in runtime.aretrieve.await_args.kwargs
-    assert response.image_descriptions == ("Image 1: chart",)
+    assert response.image_descriptions == ["Image 1: chart"]
     with pytest.raises(ValueError, match="at most 1 current images"):
-        await service.retrieve(
+        await _execute_request(
+            service,
             RetrieveRequest(
                 query="query",
                 workspaces=("reports",),
-                projection=_PROJECTION,
                 query_images=images * 2,
-            )
+            ),
         )
 
 
@@ -780,12 +754,12 @@ async def test_multiple_workspaces_use_federated_retrieval() -> None:
         "dlightrag.application.retrieval.service.federated_retrieve",
         new=AsyncMock(return_value=RetrievalResult()),
     ) as federated:
-        await service.retrieve(
+        await _execute_request(
+            service,
             RetrieveRequest(
                 query="query",
                 workspaces=("reports", "legal"),
-                projection=_PROJECTION,
-            )
+            ),
         )
 
     federated.assert_awaited_once()
@@ -846,7 +820,6 @@ def _flagged_request(
     return RetrieveRequest(
         query="query",
         workspaces=("reports", "legal"),
-        projection=_PROJECTION,
         chunk_top_k=chunk_top_k,
         federated_rerank=federated_rerank,
     )
@@ -856,7 +829,7 @@ async def test_federated_policy_reuses_the_requested_chunk_budget() -> None:
     service = _federated_service()
 
     with _patched_federated_retrieve() as federated:
-        await service.retrieve(_flagged_request(chunk_top_k=3, federated_rerank=False))
+        await _execute_request(service, _flagged_request(chunk_top_k=3, federated_rerank=False))
 
     assert federated.await_args is not None
     policy = federated.await_args.kwargs["policy"]
@@ -870,7 +843,7 @@ async def test_federated_rerank_flag_resolves_the_injected_reranker_once() -> No
 
     with _patched_federated_retrieve() as federated:
         for _ in range(2):
-            await service.retrieve(_flagged_request())
+            await _execute_request(service, _flagged_request())
 
     factory.assert_called_once()
     assert all(call.kwargs["reranker"] is reranker for call in federated.await_args_list)
@@ -880,7 +853,7 @@ async def test_federated_rerank_flag_without_a_reranker_marks_unavailable() -> N
     service = _federated_service()
 
     with _patched_federated_retrieve(trace={"federated": True}) as federated:
-        response = await service.retrieve(_flagged_request())
+        response = await _execute_request(service, _flagged_request())
 
     assert federated.await_args is not None
     assert federated.await_args.kwargs["reranker"] is None
@@ -893,7 +866,7 @@ async def test_federated_rerank_factory_failure_is_remembered_not_retried() -> N
 
     with _patched_federated_retrieve(trace={"federated": True}):
         for _ in range(2):
-            await service.retrieve(_flagged_request())
+            await _execute_request(service, _flagged_request())
 
     factory.assert_called_once()
 
@@ -906,7 +879,7 @@ async def test_federated_rerank_factory_returning_none_marks_unavailable_once() 
 
     with _patched_federated_retrieve(trace={"federated": True}) as federated:
         for _ in range(2):
-            await service.retrieve(_flagged_request())
+            await _execute_request(service, _flagged_request())
 
     factory.assert_called_once()
     assert all(call.kwargs["reranker"] is None for call in federated.await_args_list)

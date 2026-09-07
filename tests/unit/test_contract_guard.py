@@ -10,15 +10,16 @@ from dlightrag.adapters.postgres.corpus.lightrag_contract import PGLightRAGContr
 
 
 def _fake_lightrag(*, graph_storage: object | None = None) -> SimpleNamespace:
+    db = SimpleNamespace(pool=object())
     return SimpleNamespace(
         chunks_vdb=SimpleNamespace(
-            db=SimpleNamespace(pool=object()),
+            db=db,
             table_name="LIGHTRAG_DOC_CHUNKS",
             embedding_func=None,
         ),
         chunk_entity_relation_graph=graph_storage,
         full_docs=None,
-        text_chunks=None,
+        text_chunks=SimpleNamespace(db=db, table_name="LIGHTRAG_DOC_CHUNKS"),
         full_entities=None,
         full_relations=None,
         entity_chunks=None,
@@ -52,6 +53,23 @@ async def test_verify_all_excludes_reader_attach_contract(
 
     with patch.object(postgres_impl, "ClientManager", fake_manager):
         await guard.verify_all()
+
+
+async def test_milvus_vector_contract_uses_postgres_text_chunks_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _fake_lightrag()
+    runtime.chunks_vdb = SimpleNamespace(query=AsyncMock(), upsert=AsyncMock())
+    guard = PGLightRAGContractGuard(runtime)
+    vector_check = AsyncMock()
+    bm25_check = AsyncMock()
+    monkeypatch.setattr(guard, "_check_chunks_table_schema", vector_check)
+    monkeypatch.setattr(guard, "_check_bm25_table", bm25_check)
+
+    await guard.verify_all(vector_storage="MilvusVectorDBStorage")
+
+    bm25_check.assert_awaited_once_with([])
+    vector_check.assert_not_awaited()
 
 
 def test_verify_read_only_attach_contract_reports_missing_client_manager_attach_surfaces() -> None:

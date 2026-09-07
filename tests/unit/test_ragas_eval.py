@@ -72,10 +72,12 @@ async def test_generate_rag_response_translates_answer_contract(monkeypatch: pyt
             202,
             json={
                 "run_id": "run-1",
+                "run_kind": "answer",
+                "lane": "query",
                 "status": "queued",
-                "status_url": "/answer/run-1",
-                "events_url": "/answer/run-1/events",
-                "cancel_url": "/answer/run-1",
+                "status_url": "/runs/run-1",
+                "events_url": "/runs/run-1/events",
+                "cancel_url": "/runs/run-1",
             },
         )
 
@@ -88,7 +90,7 @@ async def test_generate_rag_response_translates_answer_contract(monkeypatch: pyt
 
     assert captured["requests"] == [
         "https://rag.example/answer",
-        "https://rag.example/answer/run-1/events",
+        "https://rag.example/runs/run-1/events",
     ]
     assert captured["payload"] == {"query": "What changed?", "top_k": 7}
     assert captured["headers"]["authorization"] == "Bearer secret"

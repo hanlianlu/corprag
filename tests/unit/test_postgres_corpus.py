@@ -5,7 +5,7 @@ import datetime
 import logging
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
@@ -15,8 +15,9 @@ from dlightrag.adapters.postgres.corpus.corpus import (
     PGCorpusMaintenanceStore,
     PGCorpusRuntimeBinder,
     build_pg_corpus_backend,
+    verify_lightrag_storage_configuration,
 )
-from dlightrag.application.config import DlightragConfig
+from dlightrag.application.config import DlightragConfig, LightRAGStorageSettings, StorageSettings
 from dlightrag.engine.rag.retrieval.bm25 import BM25Profile
 from tests.config_helpers import clone_config, mutate_config
 
@@ -87,6 +88,54 @@ def test_backend_factory_applies_lightrag_environment_on_create(
     apply_runtime.assert_called_once_with(force=True)
 
 
+def test_all_four_default_storage_names_use_upstream_public_verification(
+    test_config: DlightragConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import lightrag.kg as kg
+
+    verify = MagicMock()
+    monkeypatch.setattr(kg, "verify_storage_implementation", verify)
+
+    verify_lightrag_storage_configuration(test_config)
+
+    assert verify.call_args_list == [
+        call("KV_STORAGE", "PGKVStorage"),
+        call("VECTOR_STORAGE", "PGVectorStorage"),
+        call("GRAPH_STORAGE", "PGTableGraphStorage"),
+        call("DOC_STATUS_STORAGE", "PGDocStatusStorage"),
+    ]
+
+
+def test_fake_milvus_contract_requires_client_without_connecting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import lightrag.kg as kg
+
+    config = DlightragConfig(
+        storage=StorageSettings(
+            lightrag=LightRAGStorageSettings(
+                vector_storage="MilvusVectorDBStorage",
+                milvus_uri="https://milvus.example",
+                milvus_db_name="default",
+            )
+        )
+    )
+    verify = MagicMock()
+    imports: list[str] = []
+    monkeypatch.setattr(kg, "verify_storage_implementation", verify)
+    monkeypatch.setattr(
+        corpus_module.importlib,
+        "import_module",
+        lambda name: imports.append(name) or object(),
+    )
+
+    verify_lightrag_storage_configuration(config)
+
+    assert call("VECTOR_STORAGE", "MilvusVectorDBStorage") in verify.call_args_list
+    assert imports == ["grpc", "pymilvus"]
+
+
 def test_retrieval_partition_specs_cover_vector_filter_and_ann_contract() -> None:
     lightrag = SimpleNamespace(
         chunks_vdb=SimpleNamespace(
@@ -145,7 +194,7 @@ async def test_runtime_binder_composes_workspace_stores(
     monkeypatch.setattr(corpus_module, "create_postgres_bm25", create_bm25)
     monkeypatch.setattr(corpus_module, "PGLightRAGContractGuard", guard_constructor)
     monkeypatch.setattr(corpus_module, "attach_lightrag_storages_read_only", attach_read_only)
-    chunks_vdb = object()
+    chunks_vdb = type("PGVectorStorage", (), {})()
     lightrag = SimpleNamespace(chunks_vdb=chunks_vdb, initialize_storages=AsyncMock())
 
     stores = await PGCorpusRuntimeBinder(config).attach(lightrag)
@@ -236,9 +285,11 @@ async def test_runtime_binder_rejects_missing_postgres_chunk_backend(
         aquery_data=AsyncMock(),
         apipeline_enqueue_documents=AsyncMock(),
         apipeline_process_enqueue_documents=AsyncMock(),
+        adelete_by_doc_id=AsyncMock(),
+        aget_docs_by_track_id=AsyncMock(),
     )
 
-    with pytest.raises(RuntimeError, match="chunks_vdb missing"):
+    with pytest.raises(RuntimeError, match="text_chunks missing"):
         await PGCorpusRuntimeBinder(test_config).attach(lightrag)
 
     lightrag.initialize_storages.assert_awaited_once_with()

@@ -13,6 +13,7 @@ import logging
 import shutil
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from dlightrag.engine.ai.telemetry import safe_log_text
 from dlightrag.engine.rag.corpus.metadata_index import MetadataIndexProtocol
@@ -35,6 +36,7 @@ async def areset(
     maintenance: CorpusMaintenanceStore,
     keep_files: bool = False,
     dry_run: bool = False,
+    preserve_run_sources_after: str | None = None,
 ) -> dict[str, Any]:
     """Run the module's five-phase cleanup for one workspace.
 
@@ -110,14 +112,8 @@ async def areset(
         errors.append(f"Phase 3 (orphan tables): {exc}")
         logger.warning("areset Phase 3 failed: %s", exc)
 
-    # Also clean workspace metadata
-    try:
-        if not dry_run:
-            await maintenance.delete_workspace_record(workspace)
-    except Exception as exc:
-        errors.append(f"Phase 3 (workspace meta): {exc}")
-        logger.warning("areset Phase 3 workspace meta failed: %s", exc)
-
+    # Workspace identity, access and operational history are deliberately
+    # outside Corpus Reset and remain registered.
     # Phase 4: File system cleanup — workspace-scoped only.
     # Each workspace owns input_dir/<workspace>/; the working_dir root is shared
     # and must never be wiped per-workspace.
@@ -125,10 +121,11 @@ async def areset(
         try:
             input_ws_dir = _workspace_input_dir(input_root, workspace)
             if input_ws_dir is not None and input_ws_dir.is_dir():
-                file_count = sum(1 for _ in input_ws_dir.rglob("*") if _.is_file())
-                if not dry_run:
-                    shutil.rmtree(input_ws_dir, ignore_errors=True)
-                stats["local_files_removed"] = file_count
+                stats["local_files_removed"] = _reset_workspace_files(
+                    input_ws_dir,
+                    dry_run=dry_run,
+                    preserve_run_sources_after=preserve_run_sources_after,
+                )
         except Exception as exc:
             errors.append(f"Phase 4 (filesystem): {exc}")
             logger.warning("areset Phase 4 failed: %s", safe_log_text(exc))
@@ -142,6 +139,46 @@ async def areset(
 
 
 # -- Internal helpers ----------------------------------------------------------
+
+
+def _reset_workspace_files(
+    workspace_root: Path,
+    *,
+    dry_run: bool,
+    preserve_run_sources_after: str | None,
+) -> int:
+    """Remove corpus files while retaining sources accepted after this Reset."""
+    removed = 0
+    preserve_after = UUID(preserve_run_sources_after) if preserve_run_sources_after else None
+    for child in sorted(workspace_root.iterdir()):
+        if child.is_symlink():
+            raise ValueError("workspace path contains a symlink")
+        if child.name == ".runs" and preserve_after is not None:
+            for run_root in sorted(child.iterdir()) if child.is_dir() else ():
+                if run_root.is_symlink():
+                    raise ValueError("run source path contains a symlink")
+                try:
+                    accepted_after_reset = UUID(run_root.name).int > preserve_after.int
+                except ValueError:
+                    accepted_after_reset = False
+                if accepted_after_reset:
+                    continue
+                removed += sum(1 for item in run_root.rglob("*") if item.is_file())
+                if not dry_run:
+                    shutil.rmtree(run_root)
+            continue
+        removed += sum(1 for item in child.rglob("*") if item.is_file()) if child.is_dir() else 1
+        if not dry_run:
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+    if not dry_run:
+        try:
+            workspace_root.rmdir()
+        except OSError:
+            pass
+    return removed
 
 
 def _workspace_input_dir(input_root: Path, workspace: str) -> Path | None:
@@ -195,13 +232,7 @@ async def areset_orphaned_workspace(
     except Exception as exc:
         errors.append(f"Orphan tables: {exc}")
 
-    # Clean workspace metadata row (if any)
-    try:
-        if not dry_run:
-            await maintenance.delete_workspace_record(workspace)
-    except Exception as exc:
-        errors.append(f"Workspace meta: {exc}")
-
+    # Orphan cleanup is corpus-only. Registry identity is a separate resource.
     # File system cleanup — workspace-scoped only (see areset Phase 4).
     if not keep_files:
         if input_dir:

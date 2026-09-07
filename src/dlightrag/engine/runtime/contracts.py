@@ -1,20 +1,17 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
-"""Provider- and storage-neutral durable runtime contracts."""
+"""Operation-neutral public contracts for durable runs."""
 
 from typing import Literal, TypeAlias
 
-AnswerRunStatus: TypeAlias = Literal[  # noqa: UP040 - preserve the inline OpenAPI enum
+RunStatus: TypeAlias = Literal[  # noqa: UP040 - preserve the inline OpenAPI enum
     "queued", "running", "succeeded", "failed", "cancelled"
 ]
-ANSWER_RUN_PHASES: tuple[str, ...] = (
-    "routing",
-    "planning",
-    "searching",
-    "researching",
-    "generating",
-)
-AnswerRunPhase: TypeAlias = Literal[  # noqa: UP040 - preserve the inline OpenAPI enum
-    "routing", "planning", "searching", "researching", "generating"
+RunKind: TypeAlias = Literal[  # noqa: UP040 - preserve runtime introspection
+    "retrieval", "answer", "corpus_mutation"
 ]
+RunLane: TypeAlias = Literal["query", "corpus_mutation"]  # noqa: UP040
+# Phases are executor-owned durable labels. The runtime persists them without
+# importing an operation-specific phase vocabulary.
+RunPhase: TypeAlias = str  # noqa: UP040 - keep OpenAPI schema inline
 
-__all__ = ["ANSWER_RUN_PHASES", "AnswerRunPhase", "AnswerRunStatus"]
+__all__ = ["RunKind", "RunLane", "RunPhase", "RunStatus"]

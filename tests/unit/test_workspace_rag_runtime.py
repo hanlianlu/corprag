@@ -104,7 +104,6 @@ def _backend(workspace_id: str, *, read_only: bool) -> SimpleNamespace:
         ),
         maintenance=AsyncMock(),
         runtime=_runtime_binder(),
-        ingest_jobs=AsyncMock(),
     )
 
 
@@ -693,7 +692,7 @@ class TestWorkspaceRagFileManagement:
         service = _service(test_config)
         service._initialized = True
         service._lightrag = MagicMock()
-        service._lightrag.adelete_by_doc_id = AsyncMock()
+        service._lightrag.adelete_by_doc_id = AsyncMock(return_value={"status": "success"})
         service._lightrag.doc_status = MagicMock()
         service._lightrag.doc_status.get_doc_by_file_path = AsyncMock(return_value=None)
         service._lightrag.doc_status.get_docs_by_status = AsyncMock(
@@ -2467,6 +2466,33 @@ class TestWorkspaceRagLightRAGMainPath:
             "source_uri": "bynder://asset/1",
         }
 
+    async def test_get_metadata_hides_unpublished_rows(self, test_config: DlightragConfig) -> None:
+        service = _service(test_config)
+        service._metadata_index = AsyncMock()
+        for metadata in (
+            {"filename": "pending.pdf", "_dlightrag_finalization_complete": False},
+            {"filename": "legacy.pdf"},
+            None,
+        ):
+            service._metadata_index.get.return_value = metadata
+            assert await service.aget_metadata("doc-hidden") == {}
+
+    async def test_metadata_updates_reject_unpublished_and_concurrently_hidden_rows(
+        self, test_config: DlightragConfig
+    ) -> None:
+        service = _service(test_config)
+        service._metadata_index = AsyncMock()
+        service._metadata_index.is_visible.return_value = False
+
+        with pytest.raises(KeyError):
+            await service.aupdate_metadata("doc-hidden", {"team": "core"})
+        service._metadata_index.merge_custom_metadata.assert_not_awaited()
+
+        service._metadata_index.is_visible.return_value = True
+        service._metadata_index.merge_custom_metadata.return_value = False
+        with pytest.raises(KeyError):
+            await service.aupdate_metadata("doc-raced", {"team": "core"})
+
     async def test_failed_doc_pages_hydrate_full_error_rows(
         self, test_config: DlightragConfig
     ) -> None:
@@ -2511,7 +2537,7 @@ class TestWorkspaceRagLightRAGMainPath:
         with pytest.raises(RuntimeError, match="not initialized"):
             await service.aretry_failed_docs()
 
-    async def test_retry_streams_all_failed_docs_but_caps_response_details(
+    async def test_retry_returns_exact_outcomes_within_mutation_bound(
         self, test_config: DlightragConfig
     ) -> None:
         service = _service(test_config)
@@ -2526,8 +2552,8 @@ class TestWorkspaceRagLightRAGMainPath:
 
         assert result["retried"] == 101
         assert result["failed"] == 101
-        assert len(result["failed_docs"]) == 100
-        assert result["details_truncated"] is True
+        assert len(result["failed_docs"]) == 101
+        assert result["details_truncated"] is False
 
     async def test_recovered_processed_item_reenters_same_id_finalization_seam(
         self, test_config: DlightragConfig
@@ -2798,7 +2824,7 @@ class TestWorkspaceRagLightRAGMainPath:
     async def test_recovered_processed_incomplete_metadata_failure_stays_uncertain(
         self, test_config: DlightragConfig
     ) -> None:
-        from dlightrag.engine.rag.corpus.ingest_jobs import RetryOutcomeUncertainError
+        from dlightrag.engine.rag.corpus.ingestion.errors import RetryOutcomeUncertainError
 
         service = _service(test_config)
         service._initialized = True
@@ -2823,7 +2849,7 @@ class TestWorkspaceRagLightRAGMainPath:
     async def test_recovered_processed_invalid_source_preflight_stays_uncertain(
         self, test_config: DlightragConfig
     ) -> None:
-        from dlightrag.engine.rag.corpus.ingest_jobs import RetryOutcomeUncertainError
+        from dlightrag.engine.rag.corpus.ingestion.errors import RetryOutcomeUncertainError
 
         service = _service(test_config)
         service._initialized = True
@@ -2854,7 +2880,7 @@ class TestWorkspaceRagLightRAGMainPath:
     async def test_recovered_cohort_status_read_failure_is_typed_uncertainty(
         self, test_config: DlightragConfig
     ) -> None:
-        from dlightrag.engine.rag.corpus.ingest_jobs import RetryOutcomeUncertainError
+        from dlightrag.engine.rag.corpus.ingestion.errors import RetryOutcomeUncertainError
 
         service = _service(test_config)
         service._initialized = True
@@ -2869,7 +2895,7 @@ class TestWorkspaceRagLightRAGMainPath:
     async def test_recovered_cohort_partial_status_read_is_typed_uncertainty(
         self, test_config: DlightragConfig
     ) -> None:
-        from dlightrag.engine.rag.corpus.ingest_jobs import RetryOutcomeUncertainError
+        from dlightrag.engine.rag.corpus.ingestion.errors import RetryOutcomeUncertainError
 
         service = _service(test_config)
         service._initialized = True
@@ -2914,7 +2940,7 @@ class TestWorkspaceRagLightRAGMainPath:
                 "download_locator": f"https://cdn.example.com/{doc_id}.pdf",
             }
 
-        async def retry(*_args: object) -> dict[str, object]:
+        async def retry(*_args: object, **_kwargs: object) -> dict[str, object]:
             scheduled.append(
                 {"doc_id": current_doc_id, "file_path": "recreated.pdf", "error": "again"}
             )
@@ -2966,7 +2992,10 @@ class TestWorkspaceRagLightRAGMainPath:
             download_locator: str,
             filename: str,
             retry_metadata: dict[str, object],
+            *,
+            track_id: str | None = None,
         ) -> dict[str, str]:
+            assert track_id is None
             assert events == ["metadata"]
             assert source_uri == "bynder://asset/1"
             assert download_locator == "https://cdn.example.com/assets/1.pdf"
@@ -3012,7 +3041,10 @@ class TestWorkspaceRagLightRAGMainPath:
             download_locator: str,
             filename: str,
             metadata: dict[str, object],
+            *,
+            track_id: str | None = None,
         ) -> dict[str, object]:
+            assert track_id is None
             assert metadata == {
                 "title": "Annual report",
                 "author": "Finance team",
@@ -3031,11 +3063,13 @@ class TestWorkspaceRagLightRAGMainPath:
             {"doc_id": "doc-same", "file_path": "report.pdf", "replacement_count": 1}
         ]
 
-    async def test_retry_enqueue_failure_preserves_original_failed_document(
+    async def test_retry_enqueue_failure_leaves_hidden_finalization_tombstone(
         self, test_config: DlightragConfig, tmp_path: Path
     ) -> None:
         from lightrag.utils import compute_mdhash_id
         from lightrag.utils_pipeline import normalize_document_file_path
+
+        from dlightrag.engine.rag.corpus.ingestion.errors import RetryOutcomeUncertainError
 
         service = _service(test_config)
         source = service._workspace_input_root() / "report.pdf"
@@ -3119,15 +3153,14 @@ class TestWorkspaceRagLightRAGMainPath:
             ],
         )
 
-        result = await service.aretry_failed_docs()
+        with pytest.raises(RetryOutcomeUncertainError):
+            await service.aretry_failed_docs()
 
-        assert result["failed"] == 1
-        assert statuses[original_doc_id]["status"] == "failed"
-        assert statuses[original_doc_id]["chunks_list"] == []
-        assert statuses[original_doc_id]["error_msg"] == "document replacement was interrupted"
+        assert original_doc_id not in statuses
         assert {
             key: metadata_records[original_doc_id][key] for key in original_metadata
         } == original_metadata
+        assert metadata_records[original_doc_id]["_dlightrag_finalization_complete"] is False
         lightrag.adelete_by_doc_id.assert_awaited_once_with(original_doc_id, delete_llm_cache=True)
 
     async def test_remote_retry_reuses_original_parser_identity_and_metadata(
@@ -3468,15 +3501,7 @@ class TestWorkspaceRagLightRAGMainPath:
         assert result["succeeded"] == 0
         assert result["failed"] == 1
         assert outcomes == [("doc-expected", "failed")]
-        service._lightrag_stores.doc_status.upsert.assert_awaited_once_with(
-            {
-                "doc-expected": {
-                    **processed_row,
-                    "status": "failed",
-                    "error_msg": "retry ingestion returned mismatched document identity",
-                }
-            }
-        )
+        service._lightrag_stores.doc_status.upsert.assert_not_awaited()
         service._lightrag.adelete_by_doc_id.assert_not_awaited()
         service._metadata_index.delete.assert_not_awaited()
         service._metadata_index.upsert.assert_not_awaited()
@@ -3789,7 +3814,7 @@ class TestWorkspaceRagLightRAGMainPath:
     async def test_download_locator_dispatch_fails_closed_on_owner_lookup_error(
         self, test_config: DlightragConfig
     ) -> None:
-        from dlightrag.engine.rag.corpus.ingest_jobs import RetryOutcomeUncertainError
+        from dlightrag.engine.rag.corpus.ingestion.errors import RetryOutcomeUncertainError
 
         service = _service(test_config)
         service._metadata_index = AsyncMock()
@@ -3872,7 +3897,7 @@ class TestWorkspaceRagLightRAGMainPath:
 async def test_retry_status_read_error_stays_uncertain_then_recovers_processed(
     test_config: DlightragConfig,
 ) -> None:
-    from dlightrag.engine.rag.corpus.ingest_jobs import RetryOutcomeUncertainError
+    from dlightrag.engine.rag.corpus.ingestion.errors import RetryOutcomeUncertainError
 
     service = _service(test_config)
     _set_failed_docs(service, [{"doc_id": "doc-a", "file_path": "a.pdf"}])
@@ -3909,11 +3934,9 @@ async def test_retry_status_read_error_stays_uncertain_then_recovers_processed(
     assert outcomes == [("doc-a", "succeeded")]
 
 
-async def test_retry_identity_mismatch_status_write_uncertainty_records_no_outcome(
+async def test_retry_identity_mismatch_records_failed_without_status_write(
     test_config: DlightragConfig,
 ) -> None:
-    from dlightrag.engine.rag.corpus.ingest_jobs import RetryOutcomeUncertainError
-
     service = _service(test_config)
     _set_failed_docs(service, [{"doc_id": "doc-a", "file_path": "a.pdf"}])
     service._metadata_index = AsyncMock()
@@ -3936,7 +3959,8 @@ async def test_retry_identity_mismatch_status_write_uncertainty_records_no_outco
     async def outcome(doc_id: str, state: str, _summary: dict[str, Any]) -> None:
         outcomes.append((doc_id, state))
 
-    with pytest.raises(RetryOutcomeUncertainError):
-        await service.aretry_failed_docs(outcome_callback=outcome)
+    result = await service.aretry_failed_docs(outcome_callback=outcome)
 
-    assert outcomes == []
+    assert result["failed"] == 1
+    assert outcomes == [("doc-a", "failed")]
+    service._lightrag_stores.doc_status.upsert.assert_not_awaited()

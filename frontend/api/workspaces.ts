@@ -1,6 +1,7 @@
 // Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
 
 import * as v from 'valibot';
+import {corpusRunReceipt, type WebCorpusRunReceipt} from './corpus-runs.ts';
 import {csrfHeaders} from './csrf.ts';
 import {parseWire} from './wire.ts';
 
@@ -9,12 +10,6 @@ const createdWorkspace = v.pipe(
   v.transform((w) => ({workspace: w.workspace, displayName: w.display_name})),
 );
 export type CreatedWorkspace = v.InferOutput<typeof createdWorkspace>;
-
-const deletedWorkspace = v.pipe(
-  v.object({workspace: v.string(), next_workspace: v.string()}),
-  v.transform((w) => ({workspace: w.workspace, nextWorkspace: w.next_workspace})),
-);
-export type DeletedWorkspace = v.InferOutput<typeof deletedWorkspace>;
 
 export const workspacePageItem = v.pipe(
   v.object({workspace: v.string(), display_name: v.string(), embedding_model: v.string()}),
@@ -93,15 +88,15 @@ export function createWorkspaceRequest(
   );
 }
 
-export function deleteWorkspaceRequest(
+export function resetWorkspaceRequest(
   name: string,
   signal?: AbortSignal,
-): Promise<DeletedWorkspace> {
+): Promise<WebCorpusRunReceipt> {
   return post(
-    '/web/api/workspaces/delete',
+    '/web/api/workspaces/reset',
     {workspace_name: name, confirm_name: name},
-    deletedWorkspace,
-    'Could not delete workspace.',
+    corpusRunReceipt,
+    'Could not accept Corpus reset.',
     signal,
   );
 }

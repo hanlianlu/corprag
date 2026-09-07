@@ -195,6 +195,9 @@ class UnifiedRetriever:
         trace["bm25_enabled"] = self._bm25 is not None
         trace["bm25_query"] = lexical_query if self._bm25 is not None else None
         trace["metadata_kg_chunks_dropped"] = filter_stats.kg_chunks_dropped
+        trace["visibility_strategy"] = filter_stats.visibility_strategy
+        trace["visibility_dropped"] = filter_stats.visibility_dropped
+        trace["visibility_shortfall"] = filter_stats.visibility_shortfall
         strategies = [
             strategy
             for strategy in (

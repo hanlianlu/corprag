@@ -127,9 +127,10 @@ class ProfiledBM25Search:
         ]
         result = rankings[0] if len(rankings) == 1 else rrf_fuse(rankings)[: int(limit)]
         stats = current_filter_stats()
-        if stats is not None and scope is not None:
+        if stats is not None:
             stats.bm25_strategy = True
-            if scope.candidate_count_exact:
+            stats.visibility_strategy = "pushdown" if scope is not None else "bounded_pushdown"
+            if scope is not None and scope.candidate_count_exact:
                 shortfall = max(0, min(int(limit), scope.candidate_count) - len(result))
                 if shortfall:
                     stats.bm25_candidate_shortfall = shortfall

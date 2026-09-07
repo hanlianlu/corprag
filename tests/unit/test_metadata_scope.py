@@ -61,6 +61,7 @@ def test_conditions_start_at_the_requested_placeholder_index() -> None:
 
     assert conditions == [
         "m.workspace = $5",
+        "m._dlightrag_finalization_complete IS TRUE",
         "LOWER(TRIM(m.author)) = LOWER(TRIM($6))",
     ]
     assert params == ["finance", "Ada"]
@@ -75,6 +76,7 @@ def test_conditions_are_unaliased_by_default_for_direct_table_queries() -> None:
 
     assert conditions == [
         "workspace = $1",
+        "_dlightrag_finalization_complete IS TRUE",
         "LOWER(TRIM(file_extension)) = LOWER(TRIM($2))",
     ]
     assert params == ["finance", "pdf"]
@@ -91,6 +93,7 @@ def test_all_filter_fields_render_with_consecutive_placeholders() -> None:
 
     assert conditions == [
         "m.workspace = $3",
+        "m._dlightrag_finalization_complete IS TRUE",
         "LOWER(TRIM(m.file_extension)) = LOWER(TRIM($4))",
         "LOWER(TRIM(m.author)) = LOWER(TRIM($5))",
         "MD5(LOWER(TRIM(m.title))) = MD5(LOWER(TRIM($6))) "
@@ -122,12 +125,12 @@ def test_custom_containment_uses_the_shared_canonical_sql_function() -> None:
         filename_mode="exact",
     )
 
-    assert conditions[1] == (
+    assert conditions[2] == (
         "custom_metadata_search @> dlightrag_canonical_custom_metadata($2::jsonb)"
     )
     assert json.loads(params[1]) == {"a": "b"}
     # No raw per-key custom scan predicate remains on this path.
-    assert "->>" not in conditions[1]
+    assert "->>" not in conditions[2]
 
 
 def test_empty_custom_dict_emits_no_predicate() -> None:
@@ -137,7 +140,10 @@ def test_empty_custom_dict_emits_no_predicate() -> None:
         filename_mode="exact",
     )
 
-    assert conditions == ["workspace = $1"]
+    assert conditions == [
+        "workspace = $1",
+        "_dlightrag_finalization_complete IS TRUE",
+    ]
     assert params == ["ws"]
 
 
@@ -149,11 +155,11 @@ def test_filename_modes_render_exact_then_contains_clauses() -> None:
         "ws", filters, filename_mode="contains"
     )
 
-    assert exact_conditions[1] == (
+    assert exact_conditions[2] == (
         "(LOWER(TRIM(filename)) = LOWER(TRIM($2)) OR LOWER(TRIM(filename_stem)) = LOWER(TRIM($2))) "
     )
     assert exact_params[1] == "100%_off\\sale.pdf"
-    assert contains_conditions[1] == "LOWER(TRIM(filename)) LIKE LOWER($2) ESCAPE '\\'"
+    assert contains_conditions[2] == "LOWER(TRIM(filename)) LIKE LOWER($2) ESCAPE '\\'"
     # Caller wildcards stay literal characters in the widened clause; the
     # database folds the bound pattern under the same collation as the column.
     assert contains_params[1] == "%100\\%\\_off\\\\sale.pdf%"
@@ -339,6 +345,11 @@ def _vector_storage() -> Any:
     return storage
 
 
+def test_filtered_vector_search_requires_postgres_capabilities() -> None:
+    with pytest.raises(RuntimeError, match="cosine_better_than_threshold"):
+        PGFilteredVectorSearch(type("IncompleteVectorStorage", (), {})())
+
+
 async def test_exact_vector_leg_uses_the_metadata_semi_join_without_python_doc_ids() -> None:
     storage = _vector_storage()
     search = PGFilteredVectorSearch(storage, exact_threshold=8192)
@@ -413,6 +424,65 @@ def test_bm25_leg_uses_one_metadata_semi_join_and_keeps_the_index_as_source() ->
     assert "LIMIT $5" in sql
     assert "ANY(" not in sql
     assert params == ["research", json.dumps({"team": "core"})]
+
+
+async def test_unscoped_vector_leg_ranks_bounded_window_then_checks_visibility() -> None:
+    storage = _vector_storage()
+    search = PGFilteredVectorSearch(storage)
+
+    await search.search([0.1, 0.2, 0.3], scope=None, top_k=5)
+
+    sql = storage.db.sql or ""
+    assert "WITH nearest AS MATERIALIZED" in sql
+    assert "LIMIT $3" in sql
+    assert "EXISTS (SELECT 1 FROM dlightrag_doc_metadata m" in sql
+    assert "m._dlightrag_finalization_complete IS TRUE" in sql
+    assert "IN (SELECT" not in sql
+    assert storage.db.params[-3:] == (20, 0.3, 5)
+
+
+def test_unscoped_bm25_ranks_bounded_window_then_checks_visibility() -> None:
+    sql = build_bm25_sql(
+        index_name="idx_lightrag_doc_chunks_bm25_en",
+        scoped=False,
+        limit=5,
+        language="en",
+    )
+
+    assert "WITH ranked AS MATERIALIZED" in sql
+    assert "LIMIT $3" in sql
+    assert "EXISTS (SELECT 1 FROM dlightrag_doc_metadata m" in sql
+    assert "m._dlightrag_finalization_complete IS TRUE" in sql
+    assert "IN (SELECT" not in sql
+    assert "LIMIT $4" in sql
+
+
+async def test_graph_chunk_read_without_user_filter_is_visibility_only() -> None:
+    from dlightrag.adapters.postgres.corpus.corpus_chunks import PGCorpusChunkStore
+
+    class FakeTextChunksDB:
+        def __init__(self) -> None:
+            self.fetch_call: tuple[str, tuple[Any, ...]] | None = None
+
+        async def _run_with_retry(self, operation, timing_label=None):  # noqa: ANN001, ANN202
+            return await operation(self)
+
+        async def fetch(self, sql: str, *args: Any) -> list[dict[str, Any]]:
+            self.fetch_call = (sql, args)
+            return []
+
+    lightrag: Any = type("L", (), {"chunks_vdb": object(), "text_chunks": object()})()
+    db = FakeTextChunksDB()
+    lightrag.text_chunks = type("T", (), {"db": db, "workspace": "ws"})()
+    stores = PGCorpusChunkStore(lightrag)
+
+    assert await stores.read_scoped(None, ["chunk-a", "chunk-b"]) == [None, None]
+
+    assert db.fetch_call is not None
+    sql, args = db.fetch_call
+    assert "c.id = ANY($2::text[])" in sql
+    assert "m._dlightrag_finalization_complete IS TRUE" in sql
+    assert args == ("ws", ["chunk-a", "chunk-b"])
 
 
 async def test_scoped_vector_search_skips_an_empty_scope_entirely() -> None:

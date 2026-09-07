@@ -178,7 +178,9 @@ async def test_file_panel_store_fetches_limit_plus_one_and_trims_first_page() ->
     query, args = conn.fetches[0]
     assert query == pg_file_panel._LIST_FIRST_PAGE
     assert args == ("finance", 3)
-    assert "ORDER BY updated_at DESC NULLS FIRST, id ASC" in query
+    assert "ORDER BY s.updated_at DESC NULLS FIRST, s.id ASC" in query
+    assert "INNER JOIN dlightrag_doc_metadata m" in query
+    assert "m._dlightrag_finalization_complete IS TRUE" in query
     assert "OFFSET" not in query.upper()
 
 
@@ -215,11 +217,11 @@ async def test_file_panel_store_traverses_null_then_timestamp_groups() -> None:
     assert [item.doc_id for item in timestamp_page.items] == ["same-b", "older"]
     null_query, null_args = conn.fetches[0]
     timestamp_query, timestamp_args = conn.fetches[1]
-    assert "(updated_at IS NULL AND id > $2)" in null_query
-    assert "OR updated_at IS NOT NULL" in null_query
+    assert "(s.updated_at IS NULL AND s.id > $2)" in null_query
+    assert "OR s.updated_at IS NOT NULL" in null_query
     assert null_args == ("finance", "null-z", 3)
-    assert "updated_at < $2::timestamp" in timestamp_query
-    assert "updated_at = $2::timestamp AND id > $3" in timestamp_query
+    assert "s.updated_at < $2::timestamp" in timestamp_query
+    assert "s.updated_at = $2::timestamp AND s.id > $3" in timestamp_query
     assert timestamp_args == ("finance", timestamp, "same-a", 3)
 
 
@@ -240,6 +242,7 @@ async def test_failed_file_store_returns_error_text_in_a_bounded_page() -> None:
     assert query == pg_file_panel._LIST_FAILED_FIRST_PAGE
     assert args == ("finance", 2)
     assert "status = 'failed'" in query
+    assert "_dlightrag_finalization_complete" not in query
 
 
 async def test_file_panel_store_rejects_cross_view_cursor_before_fetch() -> None:

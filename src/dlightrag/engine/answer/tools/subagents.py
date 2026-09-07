@@ -20,7 +20,7 @@ from dlightrag.engine.agent.session.effects import canonical_json
 from dlightrag.engine.agent.session.ids import EntryId, IntentId, SessionId
 from dlightrag.engine.agent.tools import AgentTool, ToolResult, ToolRuntime
 from dlightrag.engine.answer.evidence import EvidenceDelta
-from dlightrag.engine.runtime import AnswerRunCancelledError, RunCancelledError
+from dlightrag.engine.runtime import RunCancellationObserved, RunCancelledError
 
 type ChildStatus = Literal["running", "succeeded", "failed", "cancelled"]
 type ChildContextMode = Literal["isolated", "parent"]
@@ -336,7 +336,7 @@ async def _spawn(
             async with semaphore:
                 await _check_cancelled(host)
                 outcome = await run_child(child_id, request, call_id, context_snapshot)
-        except (RunCancelledError, AnswerRunCancelledError) as exc:
+        except (RunCancellationObserved, RunCancelledError) as exc:
             await _finish_cancelled_child(host, child_id.value)
             raise _ParentRunCancelled from exc
         except _ParentRunCancelled:
@@ -390,7 +390,7 @@ async def _check_cancelled(host: SubagentHost) -> None:
         return
     try:
         await host.check_cancelled()
-    except (RunCancelledError, AnswerRunCancelledError) as exc:
+    except (RunCancellationObserved, RunCancelledError) as exc:
         raise _ParentRunCancelled from exc
 
 

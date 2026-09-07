@@ -4,7 +4,8 @@
 Wraps the two LightRAG collaborators a document scope has to reach: ``chunks_vdb``
 for the vector leg, and the ``text_chunks`` KV store for the knowledge-graph legs.
 Uses contextvars for async-safe per-request state — concurrent requests don't
-interfere, and ingest/delete paths run outside the scope so they always pass through.
+interfere, and ingest/delete paths run outside the retrieval scope so LightRAG's
+mutation reads pass through unchanged.
 
 Metadata filtering is a hard adapter-level in-filter constraint, not a
 post-filter hint.
@@ -19,6 +20,11 @@ from typing import Any
 
 from dlightrag.engine.rag.retrieval import MetadataScope
 from dlightrag.engine.rag.retrieval.ports import FilteredVectorSearch, ScopedChunkReader
+from dlightrag.engine.rag.retrieval.visibility import (
+    VisibleDocumentLookup,
+    bounded_visibility_candidate_limit,
+    retain_visible_chunks,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +39,9 @@ class MetadataFilterStats:
     graph_strategy: bool = False
     vector_candidate_shortfall: int | None = None
     bm25_candidate_shortfall: int | None = None
+    visibility_strategy: str | None = None
+    visibility_dropped: int = 0
+    visibility_shortfall: int | None = None
 
 
 # Per-request filter state (async-safe: each coroutine gets its own value)
@@ -53,16 +62,13 @@ def current_filter_stats() -> MetadataFilterStats | None:
 async def metadata_filter_scope(
     scope: MetadataScope | None,
 ) -> AsyncIterator[MetadataFilterStats]:
-    """Set metadata filter for the duration of a retrieval request.
+    """Activate visibility and an optional metadata filter for one retrieval.
 
-    Within this scope chunks_vdb.query() and text_chunks.get_by_ids() only yield
-    chunks belonging to the scope's documents. The yielded stats stay all-zero
-    when no filter is active.
+    Within this context, chunk queries enforce the publication barrier and, when
+    ``scope`` is present, restrict results to that document scope. The yielded
+    stats record the strategies used by retrieval legs that actually run.
     """
     stats = MetadataFilterStats()
-    if scope is None:
-        yield stats
-        return
     filter_token = _active_filter.set(scope)
     stats_token = _active_stats.set(stats)
     try:
@@ -73,11 +79,11 @@ async def metadata_filter_scope(
 
 
 class FilteredVectorStorage:
-    """Wraps LightRAG's chunks_vdb to inject metadata filtering.
+    """Wrap LightRAG chunk queries with the always-on visibility barrier.
 
-    When _active_filter contextvar is set (via metadata_filter_scope),
-    query() runs native filtered search for the detected backend.
-    When unset, delegates to original query() — zero overhead.
+    Native adapters push visibility (and an optional user metadata scope) into
+    storage. Other adapters over-fetch one bounded neighbor window and ask the
+    visibility lookup only about document ids present in that window.
     """
 
     def __init__(
@@ -85,35 +91,68 @@ class FilteredVectorStorage:
         original: Any,
         embedding_func: Callable[..., Any],
         *,
-        filtered_search: FilteredVectorSearch,
+        visibility_lookup: VisibleDocumentLookup,
+        filtered_search: FilteredVectorSearch | None,
     ) -> None:
         self._original = original
         self._embedding_func = embedding_func
+        self._visibility_lookup = visibility_lookup
         self._filtered_search = filtered_search
 
     async def query(
         self, query: str | Any, top_k: int, query_embedding: list[float] | None = None
     ) -> list[dict[str, Any]]:
-        """Query with optional in-filtering via contextvar."""
+        """Query under visibility plus the optional request metadata scope."""
         scope = _active_filter.get()
-        if scope is None:
-            return await self._original.query(query, top_k, query_embedding)
+        if scope is not None and not scope:
+            return []
 
-        # Compute embedding if not provided
-        if query_embedding is None:
-            if isinstance(query, str):
-                embeddings = await self._embedding_func([query], context="query")
-                emb = embeddings[0]
-                query_embedding = emb.tolist() if hasattr(emb, "tolist") else list(emb)
-            else:
-                query_embedding = query
+        if self._filtered_search is not None:
+            if query_embedding is None:
+                if isinstance(query, str):
+                    embeddings = await self._embedding_func([query], context="query")
+                    emb = embeddings[0]
+                    query_embedding = emb.tolist() if hasattr(emb, "tolist") else list(emb)
+                else:
+                    query_embedding = query
+            if query_embedding is None:
+                raise RuntimeError("Filtered vector search requires a query embedding")
+            rows = await self._filtered_search.search(
+                query_embedding,
+                scope=scope,
+                top_k=top_k,
+            )
+            stats = _active_stats.get()
+            if stats is not None:
+                stats.visibility_strategy = "pushdown" if scope is not None else "bounded_pushdown"
+                shortfall = max(0, int(top_k) - len(rows))
+                if shortfall:
+                    stats.visibility_shortfall = shortfall
+            return rows
 
-        if query_embedding is None:
-            raise RuntimeError("Filtered vector search requires a query embedding")
-        return await self._filtered_search.search(query_embedding, scope=scope, top_k=top_k)
+        overfetch = bounded_visibility_candidate_limit(top_k)
+        candidates = await self._original.query(query, overfetch, query_embedding)
+        rows = await retain_visible_chunks(
+            candidates or [],
+            lookup=self._visibility_lookup,
+            requested_k=top_k,
+            scope=scope,
+        )
+        stats = _active_stats.get()
+        if stats is not None:
+            stats.visibility_strategy = "postfilter"
+            if len(rows) < int(top_k):
+                # Only a short result proves every non-retained bounded
+                # candidate was dropped rather than merely truncated.
+                stats.visibility_dropped += max(0, len(candidates or []) - len(rows))
+            shortfall = max(0, int(top_k) - len(rows))
+            if shortfall:
+                stats.visibility_shortfall = shortfall
+        return rows
 
     async def ensure_doc_scope_index(self) -> None:
-        await self._filtered_search.ensure_document_scope_index()
+        if self._filtered_search is not None:
+            await self._filtered_search.ensure_document_scope_index()
 
     def __getattr__(self, name: str) -> Any:
         """Proxy all other attributes to original (table_name, workspace, etc.)."""
@@ -140,33 +179,60 @@ class FilteredChunkStore:
         self,
         original: Any,
         *,
+        visibility_lookup: VisibleDocumentLookup,
         scoped_reader: ScopedChunkReader | None = None,
     ) -> None:
         self._original = original
+        self._visibility_lookup = visibility_lookup
         self._scoped_reader = scoped_reader
 
     async def get_by_ids(self, ids: list[str]) -> list[dict[str, Any] | None]:
-        scope = _active_filter.get()
-        if scope is None:
+        stats = _active_stats.get()
+        if stats is None:
+            # This wrapper is installed on LightRAG's own KV collaborator. Its
+            # ingest, rollback, and delete paths are outside product retrieval
+            # and must retain the upstream storage contract unchanged.
             return await self._original.get_by_ids(ids)
-        if self._scoped_reader is None:
-            raise RuntimeError(
-                "a metadata filter is active but no scoped chunk reader is configured"
+
+        scope = _active_filter.get()
+        rows: list[dict[str, Any] | None]
+        if scope is not None and not scope:
+            rows = [None] * len(ids)
+        elif self._scoped_reader is not None:
+            rows = await self._scoped_reader.read_scoped(scope, list(ids))
+        else:
+            candidates = await self._original.get_by_ids(ids)
+            doc_ids = list(
+                dict.fromkeys(
+                    doc_id
+                    for row in candidates
+                    if isinstance(row, dict)
+                    and isinstance((doc_id := row.get("full_doc_id")), str)
+                    and doc_id
+                )
             )
-        rows = await self._scoped_reader.read_scoped(scope, list(ids))
+            visible = (
+                await self._visibility_lookup.visible_subset(doc_ids, scope=scope)
+                if doc_ids
+                else frozenset()
+            )
+            rows = [
+                row
+                if isinstance(row, dict)
+                and isinstance((doc_id := row.get("full_doc_id")), str)
+                and doc_id in visible
+                else None
+                for row in candidates
+            ]
         dropped = sum(1 for row in rows if row is None)
         if dropped:
-            stats = _active_stats.get()
-            if stats is not None:
-                stats.kg_chunks_dropped += dropped
+            stats.kg_chunks_dropped += dropped
             logger.info(
-                "Metadata scope returned no chunk for %d of %d graph-referenced id(s)",
+                "Visibility/metadata scope returned no chunk for %d of %d graph-referenced id(s)",
                 dropped,
                 len(ids),
             )
-        stats = _active_stats.get()
-        if stats is not None:
-            stats.graph_strategy = True
+        stats.graph_strategy = True
         return rows
 
     def __getattr__(self, name: str) -> Any:

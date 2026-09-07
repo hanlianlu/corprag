@@ -96,6 +96,7 @@ async def test_metadata_update_stores_without_reindexing() -> None:
     service = object.__new__(WorkspaceRag)
     service.settings = _writer_settings()
     service._metadata_index = AsyncMock()
+    service._metadata_index.is_visible.return_value = True
     service._lightrag = AsyncMock()
 
     await service.aupdate_metadata("doc-1", {"reviewer": " Ada Lovelace "})
@@ -113,11 +114,28 @@ async def test_metadata_update_reports_an_unknown_document() -> None:
     service = object.__new__(WorkspaceRag)
     service.settings = _writer_settings()
     service._metadata_index = AsyncMock()
+    service._metadata_index.is_visible.return_value = True
     service._metadata_index.merge_custom_metadata.return_value = False
 
     # Updating a document that was never ingested must not conjure one.
     with pytest.raises(KeyError):
         await service.aupdate_metadata("ghost", {"reviewer": "Ada"})
+
+
+async def test_metadata_update_rejects_an_unpublished_document() -> None:
+    from unittest.mock import AsyncMock
+
+    from dlightrag.engine.rag.workspace.workspace_rag import WorkspaceRag
+
+    service = object.__new__(WorkspaceRag)
+    service.settings = _writer_settings()
+    service._metadata_index = AsyncMock()
+    service._metadata_index.is_visible.return_value = False
+
+    with pytest.raises(KeyError):
+        await service.aupdate_metadata("hidden", {"reviewer": "Ada"})
+
+    service._metadata_index.merge_custom_metadata.assert_not_awaited()
 
 
 class TestCallerSettableColumns:

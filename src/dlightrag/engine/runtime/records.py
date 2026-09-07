@@ -11,23 +11,15 @@ from typing import Any, Literal
 
 from dlightrag.engine.agent.session.ids import SessionId
 from dlightrag.engine.agent.session.repository import AgentSessionRepository
-from dlightrag.engine.runtime.contracts import AnswerRunPhase, AnswerRunStatus
+from dlightrag.engine.runtime.contracts import RunKind, RunLane, RunPhase, RunStatus
 from dlightrag.engine.runtime.policy import MAX_RECLAIMS_WITHOUT_PROGRESS
 from dlightrag.engine.runtime.progress import RunProgressStore
 from dlightrag.engine.runtime.settlements import EffectHostUpdate
 from dlightrag.engine.runtime.workspace import WorkspaceStore
 
-type AnswerRunEventType = Literal[
-    "progress",
-    "token",
-    "reset",
-    "tool_start",
-    "tool_progress",
-    "tool_end",
-    "memory_operation_settled",
-    "done",
-    "error",
-]
+# Event labels are executor-owned. RunRuntime orders and persists them without
+# importing an operation-specific vocabulary.
+type RunEventType = str
 type ArtifactReferenceKind = Literal[
     "current_attachment",
     "history_attachment",
@@ -38,6 +30,18 @@ type ArtifactReferenceKind = Literal[
 type ShutdownOutcome = Literal["requeued", "cancelled", "lease_lost"]
 
 _TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
+MAX_PREPARED_INPUT_BYTES = 8 * 1024 * 1024
+
+
+class PreparedInputTooLargeError(ValueError):
+    """A generic prepared Run envelope exceeds its durable size bound."""
+
+    def __init__(self, *, encoded_bytes: int) -> None:
+        self.encoded_bytes = encoded_bytes
+        super().__init__(
+            "prepared_input_too_large: "
+            f"{encoded_bytes} bytes exceed the {MAX_PREPARED_INPUT_BYTES} byte bound"
+        )
 
 
 def canonical_run_request_json(request: Mapping[str, Any]) -> str:
@@ -51,10 +55,17 @@ def canonical_run_request_json(request: Mapping[str, Any]) -> str:
     )
 
 
-def answer_run_request_fingerprint(request: Mapping[str, Any]) -> str:
-    """Digest one canonical public request for idempotency comparison."""
+def run_request_fingerprint(request: Mapping[str, Any]) -> str:
+    """Digest one canonical public request for submission replay comparison."""
     encoded = canonical_run_request_json(request).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def require_prepared_input_bounds(prepared_input: Mapping[str, Any]) -> None:
+    """Enforce the one generic canonical bound for durable execution input."""
+    encoded = canonical_run_request_json(prepared_input).encode("utf-8")
+    if len(encoded) > MAX_PREPARED_INPUT_BYTES:
+        raise PreparedInputTooLargeError(encoded_bytes=len(encoded))
 
 
 def artifact_digest(content: bytes) -> str:
@@ -71,11 +82,46 @@ def parse_run_id(run_id: str) -> uuid.UUID | None:
 
 
 class IdempotencyKeyConflict(RuntimeError):
-    """One owner reused an idempotency key with different normalized input."""
+    """One submitter reused a submission key with different normalized input."""
+
+
+class RunCapacityExceededError(RuntimeError):
+    """A lane's deployment-wide nonterminal admission fuse is full."""
 
 
 @dataclass(frozen=True, slots=True)
-class AnswerRunRecord:
+class RunAccessScope:
+    """The authorization scope required to observe or cancel one run."""
+
+    kind: Literal["owner", "workspace"]
+    scope_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedRunEnvelope:
+    """Generic durable input submitted by an Application use case.
+
+    ``payload`` is opaque to RunRuntime. ``accepted_input`` is the bounded
+    terminal-surviving projection. ``supersedes_run_id`` is an explicit generic
+    acceptance relationship, never parsed from an operation payload. A
+    submission key is mandatory even when the external caller did not provide
+    one; the Application then uses the run id.
+    """
+
+    run_kind: RunKind
+    lane: RunLane
+    submitted_by: str
+    access_scope: RunAccessScope
+    submission_key: str
+    request_fingerprint: str
+    payload: Mapping[str, Any]
+    accepted_input: Mapping[str, Any]
+    retention_seconds: int
+    supersedes_run_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RunRecord:
     """Authoritative lifecycle state of one durable run.
 
     Durable progress replaces the checkpoint-era turn and recovery counters:
@@ -85,12 +131,16 @@ class AnswerRunRecord:
     changes, workspace-epoch handoff) does not advance it.
     """
 
-    owner_id: str
     run_id: str
-    idempotency_key: str | None
+    run_kind: RunKind
+    lane: RunLane
+    submitted_by: str
+    access_scope: RunAccessScope
+    submission_key: str
+    request_fingerprint: str
     prepared_input: Mapping[str, Any] | None
-    status: AnswerRunStatus
-    phase: AnswerRunPhase | None
+    status: RunStatus
+    phase: RunPhase | None
     stop_reason: str | None
     cancel_requested_at: datetime.datetime | None
     lease_owner: str | None
@@ -108,11 +158,22 @@ class AnswerRunRecord:
     updated_at: datetime.datetime
     started_at: datetime.datetime | None
     finished_at: datetime.datetime | None
-    workspace_epoch: int | None = None
+    purge_after: datetime.datetime | None = None
+    next_attempt_at: datetime.datetime | None = None
+    active_permit: bool = False
+    checkpoint: Mapping[str, Any] | None = None
+    handoff_started_at: datetime.datetime | None = None
+    superseded_by_run_id: str | None = None
+    agent_workspace_epoch: int | None = None
     #: The bounded public envelope (query, workspaces, mode, attachment
     #: identities) that survives the terminal transition: prepared_input_json
     #: is cleared at finish, so post-terminal readers project from this.
     accepted_input: Mapping[str, Any] | None = None
+
+    @property
+    def owner_id(self) -> str:
+        """Answer's owner scope during Slice 1; callers should use access_scope."""
+        return self.access_scope.scope_id
 
     def request_input(self) -> Mapping[str, Any]:
         """The run's public request for projection: envelope first, then input.
@@ -130,43 +191,6 @@ class AnswerRunRecord:
     @property
     def terminal(self) -> bool:
         return self.status in _TERMINAL_STATUSES
-
-
-def accepted_input_envelope(prepared: Mapping[str, Any]) -> dict[str, Any]:
-    """Derive the terminal-surviving public envelope from a prepared input.
-
-    Continuations are ordinary newly authorized runs, but they must be able to
-    reconstruct the selected run's accepted context after execution-private
-    prepared input is cleared. Pinned model facts and resource manifests remain
-    execution-only; normalized history, retrieval controls, and input-resource
-    identities remain in this bounded public envelope.
-    """
-    envelope = {
-        "query": str(prepared.get("query") or ""),
-        "workspaces": [str(value) for value in prepared.get("workspaces") or ()],
-        "history": [dict(item) for item in prepared.get("history") or ()],
-        "episodic_summary": str(prepared.get("episodic_summary") or ""),
-        "top_k": prepared.get("top_k"),
-        "chunk_top_k": prepared.get("chunk_top_k"),
-        "federated_rerank": bool(prepared.get("federated_rerank")),
-        "filters": (
-            dict(prepared["filters"]) if isinstance(prepared.get("filters"), Mapping) else None
-        ),
-        "semantic_highlights": bool(prepared.get("semantic_highlights")),
-        "mode": str(prepared["mode"]) if prepared.get("mode") else None,
-        "links": [dict(item) for item in prepared.get("links") or ()],
-        "attachments": [dict(item) for item in prepared.get("attachments") or ()],
-        "history_attachments": [dict(item) for item in prepared.get("history_attachments") or ()],
-        "agent_session_id": str(prepared.get("agent_session_id") or ""),
-        "agent_lane_id": str(prepared.get("agent_lane_id") or "main"),
-        "source_lane_id": (
-            str(prepared["source_lane_id"]) if prepared.get("source_lane_id") else None
-        ),
-    }
-    if prepared.get("parent_run_id"):
-        envelope["parent_run_id"] = str(prepared["parent_run_id"])
-        envelope["continuation_kind"] = str(prepared.get("continuation_kind") or "")
-    return envelope
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,11 +240,11 @@ def advance_reclaim(
 
 
 @dataclass(frozen=True, slots=True)
-class AnswerRunEvent:
+class RunEvent:
     """One durable event in a run's gap-free sequence."""
 
     sequence: int
-    event_type: AnswerRunEventType
+    event_type: RunEventType
     payload: Mapping[str, Any]
     created_at: datetime.datetime
 
@@ -229,18 +253,18 @@ class AnswerRunEvent:
 class RunCreation:
     """Result of an owner-scoped create, including idempotent replays."""
 
-    run: AnswerRunRecord
+    run: RunRecord
     replayed: bool
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class RunExecutionContext:
     """The immutable claim-bound execution surface one worker receives.
 
     The PostgreSQL adapter creates this binding at claim/reclaim: owner id,
-    run id, worker id, lease owner, and fencing epoch are embedded, and the
-    bound Session repository and progress store carry no fencing parameters, so
-    callers can neither pass nor mutate them.
+    run id, worker id, lease owner, and fencing epoch are embedded. Answer-owned
+    facilities fail explicitly when an executor for another run kind asks for
+    them, while Answer consumers retain their non-optional bound interfaces.
     """
 
     owner_id: str
@@ -248,16 +272,51 @@ class RunExecutionContext:
     worker_id: str
     lease_owner: str
     fencing_epoch: int
-    session_repository: AgentSessionRepository[EffectHostUpdate]
-    progress_store: RunProgressStore
-    workspace_store: WorkspaceStore | None = None
+    _session_repository: AgentSessionRepository[EffectHostUpdate] | None
+    _progress_store: RunProgressStore | None
+    workspace_store: WorkspaceStore | None
+
+    def __init__(
+        self,
+        *,
+        owner_id: str,
+        run_id: str,
+        worker_id: str,
+        lease_owner: str,
+        fencing_epoch: int,
+        session_repository: AgentSessionRepository[EffectHostUpdate] | None = None,
+        progress_store: RunProgressStore | None = None,
+        workspace_store: WorkspaceStore | None = None,
+    ) -> None:
+        object.__setattr__(self, "owner_id", owner_id)
+        object.__setattr__(self, "run_id", run_id)
+        object.__setattr__(self, "worker_id", worker_id)
+        object.__setattr__(self, "lease_owner", lease_owner)
+        object.__setattr__(self, "fencing_epoch", fencing_epoch)
+        object.__setattr__(self, "_session_repository", session_repository)
+        object.__setattr__(self, "_progress_store", progress_store)
+        object.__setattr__(self, "workspace_store", workspace_store)
+
+    @property
+    def session_repository(self) -> AgentSessionRepository[EffectHostUpdate]:
+        """Return the Answer-owned Session binding for this claimed run."""
+        if self._session_repository is None:
+            raise RuntimeError("claimed run has no Agent Session repository")
+        return self._session_repository
+
+    @property
+    def progress_store(self) -> RunProgressStore:
+        """Return the Answer-owned progress binding for this claimed run."""
+        if self._progress_store is None:
+            raise RuntimeError("claimed run has no Answer progress store")
+        return self._progress_store
 
 
 @dataclass(frozen=True, slots=True)
 class ClaimedRun:
     """A run this worker now owns, with its claim-bound execution surface."""
 
-    run: AnswerRunRecord
+    run: RunRecord
     execution: RunExecutionContext
     pinned_session_id: SessionId | None = None
 
@@ -275,15 +334,39 @@ class TerminalOutcome:
     """Result of a fenced terminal transition and its single terminal event."""
 
     committed: bool
-    status: AnswerRunStatus | None
+    status: RunStatus | None
     event_sequence: int | None
 
 
 @dataclass(frozen=True, slots=True)
-class CoordinatorOwnedSuccess:
+class Succeeded:
     """Execution succeeded; the coordinator still owns the terminal write."""
 
     result: Mapping[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class Failed:
+    """Execution failed with an optional durable partial result."""
+
+    error_kind: str
+    error_message: str
+    result: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Deferred:
+    """Execution yielded its permit until a durable retry time."""
+
+    checkpoint: Mapping[str, Any]
+    next_attempt_at: datetime.datetime
+
+
+@dataclass(frozen=True, slots=True)
+class WaitingForRepair:
+    """Execution needs operator repair while retaining its mutation barrier."""
+
+    checkpoint: Mapping[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,15 +386,21 @@ class AlreadyCommittedTerminal:
             raise ValueError("already-committed execution outcome requires a known terminal")
 
 
-type RunExecutionOutcome = CoordinatorOwnedSuccess | AlreadyCommittedTerminal
+type RunExecutionOutcome = (
+    Succeeded | Failed | Deferred | WaitingForRepair | AlreadyCommittedTerminal
+)
 
 
 @dataclass(frozen=True, slots=True)
 class CancellationOutcome:
-    """Result of an owner-scoped cancellation request."""
+    """Result of a scoped cancellation request.
 
-    outcome: Literal["unknown", "cancelled", "pending", "already_terminal"]
-    run: AnswerRunRecord | None
+    ``rejected`` means execution crossed its durable external handoff and the
+    runtime deliberately did not set ``cancel_requested_at``.
+    """
+
+    outcome: Literal["unknown", "cancelled", "pending", "already_terminal", "rejected"]
+    run: RunRecord | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -393,20 +482,27 @@ class RunArtifactReference:
 
 
 __all__ = [
-    "AnswerRunEvent",
-    "AnswerRunEventType",
-    "AnswerRunRecord",
+    "RunEvent",
+    "RunEventType",
+    "RunRecord",
     "ArtifactReferenceKind",
     "CancellationOutcome",
     "ClaimedRun",
+    "Deferred",
+    "Failed",
     "IdempotencyKeyConflict",
     "LeaseRenewal",
+    "MAX_PREPARED_INPUT_BYTES",
     "PendingArtifact",
     "PendingPublication",
     "PendingArtifactReference",
+    "PreparedInputTooLargeError",
+    "PreparedRunEnvelope",
     "ReclaimDecision",
     "ReclaimState",
+    "RunAccessScope",
     "RunArtifactReference",
+    "RunCapacityExceededError",
     "RunFetchedResource",
     "RunCreation",
     "RunDeletion",
@@ -414,9 +510,12 @@ __all__ = [
     "ShutdownOutcome",
     "SweepOutcome",
     "TerminalOutcome",
+    "WaitingForRepair",
+    "Succeeded",
     "advance_reclaim",
-    "answer_run_request_fingerprint",
+    "run_request_fingerprint",
     "artifact_digest",
     "canonical_run_request_json",
     "parse_run_id",
+    "require_prepared_input_bounds",
 ]

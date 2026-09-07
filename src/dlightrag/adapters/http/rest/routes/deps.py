@@ -5,7 +5,7 @@ from collections.abc import Sequence
 
 from fastapi import HTTPException, Request
 
-from dlightrag.application import Application
+from dlightrag.adapters.http.application import get_application
 from dlightrag.application.access import (
     AccessControl,
     AccessDeniedError,
@@ -16,7 +16,6 @@ from dlightrag.application.access import (
     WorkspaceSelectionConflictError,
     access_control_from_settings,
 )
-from dlightrag.application.config import get_config
 from dlightrag.application.corpus_admin import normalize_workspace, normalize_workspace_ids
 from dlightrag.application.errors import WorkspaceWriteFencedError
 from dlightrag.application.settings import access_settings
@@ -37,16 +36,14 @@ def raise_fenced_http(exc: WorkspaceWriteFencedError) -> HTTPException:
     )
 
 
-def get_application(request: Request) -> Application:
-    return request.app.state.application
+def idempotency_key(request: Request) -> str | None:
+    """Return a meaningful caller replay key, preserving its exact value."""
+    value = request.headers.get("Idempotency-Key")
+    return value if value and value.strip() else None
 
 
-def resolve_workspace(ws: str | None, request: Request | None = None) -> str:
-    workspace = (
-        get_application(request).config.deployment.workspace
-        if request is not None
-        else get_config().deployment.workspace
-    )
+def resolve_workspace(ws: str | None, request: Request) -> str:
+    workspace = get_application(request).config.deployment.workspace
     return normalize_workspace(ws or workspace)
 
 

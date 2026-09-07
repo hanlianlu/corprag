@@ -26,7 +26,6 @@ def app(test_config):
                 {"file_path": "/data/report.pdf", "file_name": "report.pdf"},
                 {"file_path": "/data/analysis.xlsx", "file_name": "analysis.xlsx"},
             ],
-            "pipeline_status": {"busy": False, "pending_enqueues": 0},
             "next_cursor": None,
             "fetched_rows": 2,
         }

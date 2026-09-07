@@ -14,11 +14,12 @@ import asyncpg
 import pytest
 from pydantic import BaseModel
 
-from dlightrag.adapters.postgres.answer.answer_runs import PGAnswerRunStore
 from dlightrag.adapters.postgres.answer.session_repository import (
     PGAgentSessionRepository,
     PGProgressStore,
 )
+from dlightrag.adapters.postgres.runtime import PGRunBlobStore
+from dlightrag.adapters.postgres.runtime.run_store import PGRunStore
 from dlightrag.application.answer_runs import AnswerService
 from dlightrag.engine.agent.session.effects import ToolResultEntry
 from dlightrag.engine.agent.session.entries import (
@@ -74,7 +75,13 @@ from dlightrag.engine.ai.messages import AssistantTurn, ToolCall
 from dlightrag.engine.answer.fast import FastSessionHost, ensure_session_lane
 from dlightrag.engine.runtime.blob_chunks import BLOB_CHUNK_BYTES, plan_blob
 from dlightrag.engine.runtime.progress import StageCommit, StageEvidenceConflict
-from dlightrag.engine.runtime.records import ClaimedRun, PendingArtifact, PendingArtifactReference
+from dlightrag.engine.runtime.records import (
+    ClaimedRun,
+    PendingArtifact,
+    PendingArtifactReference,
+    PreparedRunEnvelope,
+    RunAccessScope,
+)
 from dlightrag.engine.runtime.settlements import (
     ArtifactAttachmentUpdate,
     CommittedSpillUpdate,
@@ -100,6 +107,20 @@ _ADMIN: dict[str, Any] = PG_CONN_KWARGS
 _TEST_DATABASE = "dlightrag_agent_session_test"
 _OWNER = "owner-alpha"
 _WORKER = "worker-1"
+
+
+def _run_envelope(prepared_input: Mapping[str, Any], *, submission_key: str) -> PreparedRunEnvelope:
+    return PreparedRunEnvelope(
+        run_kind="answer",
+        lane="query",
+        submitted_by=_OWNER,
+        access_scope=RunAccessScope(kind="owner", scope_id=_OWNER),
+        submission_key=submission_key,
+        request_fingerprint="f" * 64,
+        payload=prepared_input,
+        accepted_input=prepared_input,
+        retention_seconds=365 * 24 * 60 * 60,
+    )
 
 
 class _CountingConnection:
@@ -176,8 +197,8 @@ async def pool():
             await admin.close()
 
 
-async def _store(pool) -> PGAnswerRunStore:
-    store = PGAnswerRunStore(pool=pool)
+async def _store(pool) -> PGRunStore:
+    store = PGRunStore(pool=pool)
     await store.initialize()
     return store
 
@@ -190,20 +211,19 @@ async def _claim(
     source_lane_id: LaneId | None = None,
 ) -> ClaimedRun:
     store = await _store(pool)
+    run_id = str(uuid.uuid7())
+    prepared_input = {
+        "agent_session_id": (session_id or SessionId.new()).value,
+        "agent_lane_id": lane_id.value,
+        "source_lane_id": source_lane_id.value if source_lane_id else None,
+        "fingerprint": "f" * 64,
+        "query": "question?",
+        "workspaces": ["default"],
+        "schema_version": 1,
+    }
     await store.accept_run(
-        owner_id=_OWNER,
-        run_id=str(uuid.uuid7()),
-        idempotency_key=None,
-        fingerprint="f" * 64,
-        prepared_input={
-            "agent_session_id": (session_id or SessionId.new()).value,
-            "agent_lane_id": lane_id.value,
-            "source_lane_id": source_lane_id.value if source_lane_id else None,
-            "fingerprint": "f" * 64,
-            "query": "question?",
-            "workspaces": ["default"],
-            "schema_version": 1,
-        },
+        envelope=_run_envelope(prepared_input, submission_key=run_id),
+        run_id=run_id,
     )
     claimed = await store.claim_next(worker_id=_WORKER)
     assert claimed is not None
@@ -432,7 +452,7 @@ def _claimed_session(claimed: ClaimedRun) -> SessionId:
 async def _progress(pool, run_id: str) -> int:
     async with pool.acquire() as conn:
         value = await conn.fetchval(
-            "SELECT durable_progress_version FROM dlightrag_answer_runs"
+            "SELECT durable_progress_version FROM dlightrag_runs"
             " WHERE owner_id = $1 AND run_id = $2",
             _OWNER,
             uuid.UUID(run_id),
@@ -1211,19 +1231,18 @@ async def test_acceptance_registers_attachment_blob_atomically(pool) -> None:
     store = await _store(pool)
     content = b"%PDF-accepted"
     digest = hashlib.sha256(content).hexdigest()
+    run_id = str(uuid.uuid7())
+    prepared_input = {
+        "agent_session_id": SessionId.new().value,
+        "agent_lane_id": "main",
+        "fingerprint": "f" * 64,
+        "query": "question?",
+        "workspaces": ["default"],
+        "schema_version": 1,
+    }
     creation = await store.accept_run(
-        owner_id=_OWNER,
-        run_id=str(uuid.uuid7()),
-        idempotency_key="attachment-acceptance",
-        fingerprint="f" * 64,
-        prepared_input={
-            "agent_session_id": SessionId.new().value,
-            "agent_lane_id": "main",
-            "fingerprint": "f" * 64,
-            "query": "question?",
-            "workspaces": ["default"],
-            "schema_version": 1,
-        },
+        envelope=_run_envelope(prepared_input, submission_key="attachment-acceptance"),
+        run_id=run_id,
         resources=(
             {
                 "resource_id": "accepted-1",
@@ -1468,7 +1487,7 @@ async def test_memory_operation_event_is_exactly_once_with_transaction(pool) -> 
     assert isinstance(replay, RegisterConflict)
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT payload FROM dlightrag_answer_run_events"
+            "SELECT payload FROM dlightrag_run_events"
             " WHERE owner_id = $1 AND run_id = $2"
             " AND event_type = 'memory_operation_settled'",
             _OWNER,
@@ -1484,12 +1503,14 @@ async def test_live_session_progress_and_passive_events_are_distinct(pool) -> No
     claimed = await _claim(pool)
     run_store = await _store(pool)
     assert await _progress(pool, claimed.run.run_id) == 0
-    await run_store.append_token_batch(
+    await run_store.append_event(
         owner_id=_OWNER,
         run_id=claimed.run.run_id,
         worker_id=_WORKER,
         fencing_epoch=claimed.execution.fencing_epoch,
-        text="ephemeral progress",
+        phase=None,
+        event_type="token",
+        payload={"text": "ephemeral progress"},
     )
     assert await _progress(pool, claimed.run.run_id) == 0
     register_only_session = _claimed_session(claimed)
@@ -1843,6 +1864,7 @@ async def test_postgres_and_service_transcript_project_typed_tool_result_parts(p
     }
     service = AnswerService(
         store=run_store,
+        blob_store=PGRunBlobStore(pool=pool),
         coordinator=cast(Any, None),
         retrieval=cast(Any, None),
         capabilities=cast(Any, None),

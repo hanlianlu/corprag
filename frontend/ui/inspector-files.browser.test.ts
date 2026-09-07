@@ -19,8 +19,7 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 
 function confirmDeleteDialog(panel: DlInspectorFiles, value: string): void {
   const dialog = panel.querySelector<HTMLDialogElement>('#delete-file-dialog')!;
-  dialog.returnValue = value;
-  dialog.close();
+  dialog.close(value);
 }
 
 beforeEach(() => {
@@ -50,15 +49,6 @@ it('renders typed file data as escaped Lit text without an HTML fragment sink', 
   window.fetch = async () => new Response(JSON.stringify({
     workspace: 'default',
     files: [{file_name: '<img src=x>', file_path: '/docs/report.pdf'}],
-    ingest: {
-      busy: false,
-      message: '',
-      progress_percent: null,
-      current_batch: null,
-      total_batches: null,
-      documents: null,
-      pending_enqueues: 0,
-    },
   }), {status: 200, headers: {'Content-Type': 'application/json'}});
   const panel = document.createElement('dl-inspector-files') as DlInspectorFiles;
   panel.active = true;
@@ -80,16 +70,22 @@ function snapshot(
   return {
     workspace,
     files,
-    ingest: {
-      busy: false,
-      message: '',
-      progress_percent: null,
-      current_batch: null,
-      total_batches: null,
-      documents: null,
-      pending_enqueues: 0,
-    },
     next_cursor: nextCursor,
+  };
+}
+
+function corpusReceipt(runId: string, status = 'queued') {
+  return {
+    run_id: runId,
+    run_kind: 'corpus_mutation',
+    lane: 'corpus_mutation',
+    status,
+    status_url: `/web/api/corpus-runs/${runId}`,
+    events_url: `/web/api/corpus-runs/${runId}/events`,
+    cancel_url: `/web/api/corpus-runs/${runId}`,
+    resume_url: `/web/api/corpus-runs/${runId}/resume`,
+    workspace: 'default',
+    file_count: 1,
   };
 }
 
@@ -214,16 +210,14 @@ it('rejects a late older page after pause invalidates its generation', async () 
   expect(panel.filesLoadMoreState).to.equal('idle');
 });
 
-it('preserves loaded files and cursor when an upload only changes ingest status', async () => {
+it('preserves loaded files and cursor when an upload accepts a durable Run', async () => {
   window.fetch = async (input, init) => {
     const url = new URL(String(input), window.location.origin);
     if (url.pathname.endsWith('/files/upload')) {
-      return new Response(JSON.stringify({
-        workspace: 'default',
-        file_count: 1,
-        queued: false,
-        ingest: {...snapshot([], null).ingest, busy: true, message: 'Starting ingest...'},
-      }), {status: 200, headers: {'Content-Type': 'application/json'}});
+      return new Response(JSON.stringify(corpusReceipt('run-upload')), {
+        status: 202,
+        headers: {'Content-Type': 'application/json'},
+      });
     }
     expect(init?.method).to.equal(undefined);
     return new Response(JSON.stringify(snapshot([
@@ -243,17 +237,37 @@ it('preserves loaded files and cursor when an upload only changes ingest status'
   panel.pause();
 });
 
-it('deletion replaces loaded traversal with the returned fresh first page', async () => {
-  window.fetch = async (_input, init) => {
+it('deletion reloads the first page after its durable Run succeeds', async () => {
+  let fileLists = 0;
+  window.fetch = async (input, init) => {
+    const url = new URL(String(input), window.location.origin);
     if (init?.method === 'DELETE') {
-      return new Response(JSON.stringify(snapshot([
-        {file_name: 'Replacement', file_path: '/replacement'},
-      ], 'replacement-older')), {status: 200, headers: {'Content-Type': 'application/json'}});
+      return new Response(JSON.stringify(corpusReceipt('run-delete')), {
+        status: 202,
+        headers: {'Content-Type': 'application/json'},
+      });
     }
-    return new Response(JSON.stringify(snapshot([
-      {file_name: 'Delete me', file_path: '/delete'},
-      {file_name: 'Loaded older', file_path: '/loaded-older'},
-    ], 'old-cursor')), {status: 200, headers: {'Content-Type': 'application/json'}});
+    if (url.pathname === '/web/api/corpus-runs/run-delete') {
+      return new Response(JSON.stringify(corpusReceipt('run-delete', 'succeeded')), {
+        headers: {'Content-Type': 'application/json'},
+      });
+    }
+    if (url.pathname.endsWith('/files')) {
+      fileLists += 1;
+      const page = fileLists === 1
+        ? snapshot([
+          {file_name: 'Delete me', file_path: '/delete'},
+          {file_name: 'Loaded older', file_path: '/loaded-older'},
+        ], 'old-cursor')
+        : snapshot([{file_name: 'Replacement', file_path: '/replacement'}], 'replacement-older');
+      return new Response(JSON.stringify(page), {
+        status: 200,
+        headers: {'Content-Type': 'application/json'},
+      });
+    }
+    return new Response(JSON.stringify({workspace: 'default', failed: [], next_cursor: null}), {
+      headers: {'Content-Type': 'application/json'},
+    });
   };
   const panel = document.createElement('dl-inspector-files') as DlInspectorFiles;
   panel.active = true;
@@ -272,11 +286,12 @@ it('deletion replaces loaded traversal with the returned fresh first page', asyn
 });
 
 it('cancelling the delete dialog keeps the file and restores trigger focus', async () => {
-  let deleteRequests = 0;
   window.fetch = async (_input, init) => {
     if (init?.method === 'DELETE') {
-      deleteRequests += 1;
-      return new Response(null, {status: 204});
+      return new Response(JSON.stringify(corpusReceipt('unexpected-delete')), {
+        status: 202,
+        headers: {'Content-Type': 'application/json'},
+      });
     }
     return new Response(JSON.stringify(snapshot([
       {file_name: 'Keep me', file_path: '/keep'},
@@ -298,25 +313,31 @@ it('cancelling the delete dialog keeps the file and restores trigger focus', asy
   );
 
   confirmDeleteDialog(panel, 'cancel');
-  await panel.updateComplete;
+  await waitFor(() => !dialog.open && document.activeElement === deleteButton);
+  // Let the async click handler consume the modal result before this test
+  // replaces the global fetch stub in afterEach.
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
   expect(dialog.open).to.equal(false);
-  expect(deleteRequests).to.equal(0);
+  expect(panel.mutationRun).to.equal(null);
   expect(panel.querySelector('.file-name')?.textContent).to.equal('Keep me');
   expect(document.activeElement).to.equal(deleteButton);
 });
 
 it('clears prior-workspace rows when the selected workspace reload fails', async () => {
-  let deleteRequests = 0;
-  window.fetch = async (input, init) => {
-    if (init?.method === 'DELETE') {
-      deleteRequests += 1;
-      return new Response(null, {status: 204});
-    }
+  const staleDefault = deferredResponse();
+  const secondaryFailure = deferredResponse();
+  let deferDefault = false;
+  window.fetch = async (input) => {
     const url = new URL(String(input), window.location.origin);
+    if (
+      url.searchParams.get('workspace') === 'secondary'
+      && url.pathname.endsWith('/files')
+    ) return secondaryFailure.promise;
     if (url.searchParams.get('workspace') === 'secondary') {
       return new Response('unavailable', {status: 503});
     }
+    if (deferDefault && url.pathname.endsWith('/files')) return staleDefault.promise;
     return new Response(JSON.stringify(snapshot([
       {file_name: 'Default report', file_path: '/default-report'},
     ], 'default-older')), {status: 200, headers: {'Content-Type': 'application/json'}});
@@ -327,12 +348,24 @@ it('clears prior-workspace rows when the selected workspace reload fails', async
   await waitFor(() => panel.loading === false);
   expect(panel.querySelector('[data-file-delete]')).not.to.equal(null);
 
+  // Leave a prior-Workspace request unresolved. The transport deliberately
+  // ignores AbortSignal so request generation, rather than fetch cooperation,
+  // owns the stale-result exclusion.
+  deferDefault = true;
+  const priorWorkspaceFlight = panel.reload();
   ingestStore.set('secondary');
   await panel.updateComplete;
+  expect(panel.snapshot).to.equal(null);
   expect(
     panel.querySelector<DlFailedFileRecovery>('dl-failed-file-recovery')?.workspace,
   ).to.equal('secondary');
+
+  secondaryFailure.resolve(new Response('unavailable', {status: 503}));
   await waitFor(() => panel.loading === false && panel.error !== null);
+  staleDefault.resolve(new Response(JSON.stringify(snapshot([
+    {file_name: 'Stale default report', file_path: '/stale-default-report'},
+  ], null)), {status: 200, headers: {'Content-Type': 'application/json'}}));
+  await priorWorkspaceFlight;
   await panel.updateComplete;
 
   expect(panel.snapshot).to.equal(null);
@@ -340,23 +373,38 @@ it('clears prior-workspace rows when the selected workspace reload fails', async
   expect(panel.querySelector('.file-name')).to.equal(null);
   expect(panel.querySelector('[data-file-delete]')).to.equal(null);
   expect(panel.querySelector('[data-load-older-files]')).to.equal(null);
-  expect(deleteRequests).to.equal(0);
 });
 
-it('delete during an older-page flight cannot apply stale rows or latch loading state', async () => {
+it('delete Run settlement invalidates an older-page flight without latching loading state', async () => {
   const older = deferredResponse();
   const deletion = deferredResponse();
   let olderRequests = 0;
+  let fileLists = 0;
   window.fetch = async (input, init) => {
     const url = new URL(String(input), window.location.origin);
     if (init?.method === 'DELETE') return deletion.promise;
+    if (url.pathname === '/web/api/corpus-runs/run-delete-race') {
+      return new Response(JSON.stringify(corpusReceipt('run-delete-race', 'succeeded')), {
+        headers: {'Content-Type': 'application/json'},
+      });
+    }
     if (url.searchParams.has('cursor')) {
       olderRequests += 1;
       return older.promise;
     }
-    return new Response(JSON.stringify(snapshot([
-      {file_name: 'Delete me', file_path: '/delete'},
-    ], 'old-cursor')), {status: 200, headers: {'Content-Type': 'application/json'}});
+    if (url.pathname.endsWith('/files')) {
+      fileLists += 1;
+      const page = fileLists === 1
+        ? snapshot([{file_name: 'Delete me', file_path: '/delete'}], 'old-cursor')
+        : snapshot([{file_name: 'Replacement', file_path: '/replacement'}], 'replacement-older');
+      return new Response(JSON.stringify(page), {
+        status: 200,
+        headers: {'Content-Type': 'application/json'},
+      });
+    }
+    return new Response(JSON.stringify({workspace: 'default', failed: [], next_cursor: null}), {
+      headers: {'Content-Type': 'application/json'},
+    });
   };
   const panel = document.createElement('dl-inspector-files') as DlInspectorFiles;
   panel.active = true;
@@ -375,9 +423,10 @@ it('delete during an older-page flight cannot apply stale rows or latch loading 
   await panel.loadOlderFiles();
   expect(olderRequests).to.equal(1);
 
-  deletion.resolve(new Response(JSON.stringify(snapshot([
-    {file_name: 'Replacement', file_path: '/replacement'},
-  ], 'replacement-older')), {status: 200, headers: {'Content-Type': 'application/json'}}));
+  deletion.resolve(new Response(JSON.stringify(corpusReceipt('run-delete-race')), {
+    status: 202,
+    headers: {'Content-Type': 'application/json'},
+  }));
   await waitFor(() => panel.snapshot?.files[0]?.filePath === '/replacement');
   older.resolve(new Response(JSON.stringify(snapshot([
     {file_name: 'Stale older', file_path: '/stale'},
@@ -403,7 +452,6 @@ it('load older is a no-op while a same-workspace first-page reload is active', a
         workspace: 'default',
         failed: [],
         next_cursor: null,
-        active_recovery: null,
       }), {status: 200, headers: {'Content-Type': 'application/json'}});
     }
     if (url.searchParams.has('cursor')) {

@@ -3,6 +3,7 @@
 
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -20,7 +21,7 @@ from dlightrag.adapters.postgres.corpus.partition_foundation import (
     ensure_partitioned_tables,
     verify_partitioned_tables,
 )
-from dlightrag.engine.rag.retrieval import MetadataFilter
+from dlightrag.engine.rag.retrieval import MetadataFilter, MetadataScope
 from dlightrag.engine.rag.retrieval.metadata_fields import (
     FILTER_FIELD_COLUMNS,
     INGEST_FINALIZATION_COMPLETE_FIELD,
@@ -79,7 +80,7 @@ def _build_create_table() -> str:
     ]
     for f in _PG_METADATA_COLUMNS:
         cols.append(f"    {f.field_id}    {f.pg_type}")
-    cols.append(f"    {_FINALIZATION_COMPLETE_COLUMN}    BOOLEAN DEFAULT FALSE")
+    cols.append(f"    {_FINALIZATION_COMPLETE_COLUMN}    BOOLEAN NOT NULL DEFAULT FALSE")
     cols.append("    PRIMARY KEY (workspace, doc_id)")
     return (
         "CREATE TABLE IF NOT EXISTS dlightrag_doc_metadata (\n"
@@ -154,6 +155,13 @@ _SEARCH_COLUMN = "custom_metadata_search"
 # matches against the same table and column.
 METADATA_TABLE = _METADATA_TABLE
 METADATA_SEARCH_COLUMN = _SEARCH_COLUMN
+
+
+def metadata_visibility_condition(alias: str | None = None) -> str:
+    """Render the one fail-closed Product Document publication predicate."""
+    prefix = f"{pg_identifier(alias)}." if alias else ""
+    return f"{prefix}{_FINALIZATION_COMPLETE_COLUMN} IS TRUE"
+
 
 _FIELD_STATS_TABLE = "dlightrag_metadata_field_stats"
 _CUSTOM_SCHEMA_KEY_LIMIT = 128
@@ -230,12 +238,23 @@ LANGUAGE plpgsql
 AS $$
 BEGIN
     IF TG_OP = 'INSERT' THEN
-        {_increment_field_stats(_presence_rows("NEW"))}
+        IF NEW.{_FINALIZATION_COMPLETE_COLUMN} IS TRUE THEN
+            {_increment_field_stats(_presence_rows("NEW"))}
+        END IF;
     ELSIF TG_OP = 'UPDATE' THEN
-        {_increment_field_stats(_presence_difference("NEW", "OLD"))}
-        {_decrement_field_stats(_presence_difference("OLD", "NEW"))}
+        IF OLD.{_FINALIZATION_COMPLETE_COLUMN} IS TRUE
+           AND NEW.{_FINALIZATION_COMPLETE_COLUMN} IS TRUE THEN
+            {_increment_field_stats(_presence_difference("NEW", "OLD"))}
+            {_decrement_field_stats(_presence_difference("OLD", "NEW"))}
+        ELSIF OLD.{_FINALIZATION_COMPLETE_COLUMN} IS TRUE THEN
+            {_decrement_field_stats(_presence_rows("OLD"))}
+        ELSIF NEW.{_FINALIZATION_COMPLETE_COLUMN} IS TRUE THEN
+            {_increment_field_stats(_presence_rows("NEW"))}
+        END IF;
     ELSE
-        {_decrement_field_stats(_presence_rows("OLD"))}
+        IF OLD.{_FINALIZATION_COMPLETE_COLUMN} IS TRUE THEN
+            {_decrement_field_stats(_presence_rows("OLD"))}
+        END IF;
     END IF;
     RETURN NULL;
 END
@@ -283,8 +302,11 @@ GROUP BY present.workspace, present.field_id
 """  # noqa: S608 - composes only fixed backfill fragments
 
 
-_BACKFILL_FIELD_STATS = _backfill_field_stats()
-_BACKFILL_WORKSPACE_FIELD_STATS = _backfill_field_stats("metadata.workspace = $1")
+_VISIBLE_STATS_PREDICATE = metadata_visibility_condition("metadata")
+_BACKFILL_FIELD_STATS = _backfill_field_stats(_VISIBLE_STATS_PREDICATE)
+_BACKFILL_WORKSPACE_FIELD_STATS = _backfill_field_stats(
+    f"metadata.workspace = $1 AND {_VISIBLE_STATS_PREDICATE}"
+)
 
 
 def _metadata_partition_spec() -> PartitionedTableSpec:
@@ -410,6 +432,17 @@ def _build_schema_migrations() -> tuple[Migration, ...]:
     )
     migrations.append(
         Migration(
+            "column_finalization_complete",
+            "Persist the application-owned ingestion finalization journal",
+            (
+                "ALTER TABLE dlightrag_doc_metadata "
+                f"ADD COLUMN IF NOT EXISTS {_FINALIZATION_COMPLETE_COLUMN} "
+                "BOOLEAN DEFAULT FALSE",
+            ),
+        )
+    )
+    migrations.append(
+        Migration(
             "metadata_field_stats",
             "Maintain bounded planner field availability counts",
             (
@@ -424,12 +457,30 @@ def _build_schema_migrations() -> tuple[Migration, ...]:
     )
     migrations.append(
         Migration(
-            "column_finalization_complete",
-            "Persist the application-owned ingestion finalization journal",
+            "product_document_visibility",
+            "Enforce finalized-only Product Document visibility and statistics",
             (
                 "ALTER TABLE dlightrag_doc_metadata "
                 f"ADD COLUMN IF NOT EXISTS {_FINALIZATION_COMPLETE_COLUMN} "
                 "BOOLEAN DEFAULT FALSE",
+                "UPDATE dlightrag_doc_metadata "  # noqa: S608 - fixed internal column
+                f"SET {_FINALIZATION_COMPLETE_COLUMN} = FALSE "
+                f"WHERE {_FINALIZATION_COMPLETE_COLUMN} IS NULL",
+                "ALTER TABLE dlightrag_doc_metadata "
+                f"ALTER COLUMN {_FINALIZATION_COMPLETE_COLUMN} SET DEFAULT FALSE",
+                "ALTER TABLE dlightrag_doc_metadata "
+                f"ALTER COLUMN {_FINALIZATION_COMPLETE_COLUMN} SET NOT NULL",
+                "ALTER TABLE dlightrag_doc_metadata "
+                "ADD CONSTRAINT dlightrag_doc_metadata_finalization_not_null "
+                f"CHECK ({_FINALIZATION_COMPLETE_COLUMN} IS NOT NULL)",
+                "CREATE INDEX IF NOT EXISTS idx_dm_visible_doc "
+                "ON dlightrag_doc_metadata (workspace, doc_id) "
+                f"WHERE {metadata_visibility_condition()}",
+                _CREATE_FIELD_STATS_TRIGGER_FN,
+                _DROP_FIELD_STATS_TRIGGER,
+                _CREATE_FIELD_STATS_TRIGGER,
+                f"TRUNCATE TABLE {_FIELD_STATS_TABLE}",
+                _BACKFILL_FIELD_STATS,
             ),
         )
     )
@@ -454,7 +505,9 @@ _SCHEMA_TABLES = (
             *(f"idx_dm_{f.field_id}" for f in _PG_METADATA_COLUMNS if f.indexed),
             "idx_dm_custom_metadata_search",
             "idx_dm_filename_trgm",
+            "idx_dm_visible_doc",
         ),
+        checks=("dlightrag_doc_metadata_finalization_not_null",),
         partitioned_by=("workspace",),
         required_child_partitions=(default_child_name("dlightrag_doc_metadata"),),
     ),
@@ -498,17 +551,30 @@ def _search_assignment(placeholder: str, table_qualified: str) -> str:
 
 
 def _build_upsert() -> str:
-    columns = ("workspace", "doc_id", *_UPSERT_FIELD_IDS, _SEARCH_COLUMN)
+    value_columns = ("workspace", "doc_id", *_UPSERT_FIELD_IDS)
+    columns = (*value_columns, _SEARCH_COLUMN)
     insert_columns = ", ".join(columns)
-    placeholders = ",".join(f"${idx}" for idx in range(1, len(columns)))
+    marker_slot = 3 + _UPSERT_FIELD_IDS.index(_FINALIZATION_COMPLETE_COLUMN)
+    value_expressions = [f"${idx}" for idx in range(1, len(value_columns) + 1)]
+    # A new partial row is unpublished, while a conflict update can still
+    # distinguish omitted marker (preserve) from explicit False (hide).
+    value_expressions[marker_slot - 1] = f"COALESCE(${marker_slot}, FALSE)"
     custom_placeholder = f"${_custom_placeholder_index(columns)}"
-    placeholders += (
-        ", dlightrag_canonical_custom_metadata("
-        f"COALESCE({custom_placeholder}::jsonb, '{{}}'::jsonb))"
+    value_expressions.append(
+        f"dlightrag_canonical_custom_metadata(COALESCE({custom_placeholder}::jsonb, '{{}}'::jsonb))"
     )
+    placeholders = ",".join(value_expressions)
     updates = [
         "    "
-        + _field_assignment(field_id, f"EXCLUDED.{field_id}", f"dlightrag_doc_metadata.{field_id}")
+        + _field_assignment(
+            field_id,
+            (
+                f"${marker_slot}"
+                if field_id == _FINALIZATION_COMPLETE_COLUMN
+                else f"EXCLUDED.{field_id}"
+            ),
+            f"dlightrag_doc_metadata.{field_id}",
+        )
         for field_id in _UPSERT_FIELD_IDS
     ]
     updates.append(
@@ -537,7 +603,8 @@ def _build_update() -> str:
     return (
         "UPDATE dlightrag_doc_metadata SET\n"
         + ",\n".join(assignments)
-        + "\nWHERE workspace = $1 AND doc_id = $2"
+        + "\nWHERE workspace = $1 AND doc_id = $2 "
+        + f"AND {metadata_visibility_condition()}"
     )
 
 
@@ -677,7 +744,10 @@ def metadata_match_conditions(
     if filename_mode not in _FILENAME_MODES:
         raise ValueError("metadata match filename mode is invalid")
     column_prefix = f"{alias}." if alias else ""
-    conditions: list[str] = [f"{column_prefix}workspace = ${start_index}"]
+    conditions: list[str] = [
+        f"{column_prefix}workspace = ${start_index}",
+        metadata_visibility_condition(alias),
+    ]
     params: list[Any] = [workspace]
     idx = start_index + 1
 
@@ -885,6 +955,52 @@ class PGMetadataIndex(PostgresOperationRunner):
 
         rows = await self._run(_operation)
         return {str(row["doc_id"]): _decoded_row(row) for row in rows}
+
+    async def is_visible(self, doc_id: str) -> bool:
+        """Return whether one document has the exact publication marker."""
+
+        async def _operation(conn: Any) -> Any:
+            return await conn.fetchval(
+                "SELECT 1 FROM dlightrag_doc_metadata "  # noqa: S608 - fixed internal column
+                "WHERE workspace=$1 AND doc_id=$2 "
+                f"AND {metadata_visibility_condition()}",
+                self._workspace,
+                doc_id,
+            )
+
+        return bool(await self._run(_operation))
+
+    async def visible_subset(
+        self,
+        doc_ids: Sequence[str],
+        *,
+        scope: MetadataScope | None = None,
+    ) -> frozenset[str]:
+        """Apply publication and optional metadata scope to caller-bounded ids."""
+        unique_doc_ids = list(dict.fromkeys(str(doc_id) for doc_id in doc_ids if doc_id))
+        if not unique_doc_ids or (scope is not None and not scope):
+            return frozenset()
+
+        filters = scope.filters if scope is not None else MetadataFilter()
+        filename_mode = scope.filename_mode if scope is not None else "exact"
+        conditions, params = metadata_match_conditions(
+            self._workspace,
+            filters,
+            filename_mode=filename_mode,
+            start_index=2,
+            alias="m",
+        )
+        where = " AND ".join(conditions)
+        sql = (
+            f"SELECT m.doc_id FROM dlightrag_doc_metadata m "  # noqa: S608
+            f"WHERE m.doc_id = ANY($1::text[]) AND {where}"
+        )
+
+        async def _operation(conn: Any) -> list[Any]:
+            return await conn.fetch(sql, unique_doc_ids, *params)
+
+        rows = await self._run(_operation)
+        return frozenset(str(row["doc_id"]) for row in rows)
 
     async def delete(self, doc_id: str) -> None:
         """Delete metadata for a document."""

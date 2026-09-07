@@ -8,8 +8,8 @@ from typing import Any, cast
 import pytest
 
 from dlightrag._compose import _memory_embedder
-from dlightrag.adapters.postgres.answer.answer_runs import PGAnswerRunStore
 from dlightrag.adapters.postgres.core._pool import pg_pool
+from dlightrag.adapters.postgres.runtime.run_store import PGRunStore
 from dlightrag.adapters.postgres.web.web_conversations import PGWebConversationStore
 from dlightrag.application import Application, ApplicationClosedError
 from dlightrag.application.answer_runs import AnswerService
@@ -19,20 +19,21 @@ from dlightrag.application.config import DlightragConfig
 from dlightrag.application.corpus_admin import CorpusAdmin
 from dlightrag.application.errors import StorageSchemaError
 from dlightrag.application.health import ApplicationHealth
-from dlightrag.application.retrieval import RetrievalService
+from dlightrag.application.retrieval import PinnedRetrievalModel, RetrievalService
 from dlightrag.application.settings import model_settings_for_role
 from dlightrag.application.web_conversations import (
     WebConversationSchemaError,
     WebConversationService,
 )
-from dlightrag.engine.ai.capacity import CONTEXT_POLICY_REVISION
+from dlightrag.engine.ai.capacity import CONTEXT_POLICY_REVISION, ModelProfile
+from dlightrag.engine.ai.catalog import current_model_catalog_revision
 from dlightrag.engine.ai.fingerprints import ModelFingerprint, model_fingerprint
 from dlightrag.engine.ai.settings import MODEL_ROLE_NAMES
-from dlightrag.engine.answer.execution import IncompatibleActiveRunError
 from dlightrag.engine.answer.model_runtime import AnswerModelRuntime
+from dlightrag.engine.rag.workspace.pool import WorkspaceUnavailableError
 from dlightrag.engine.rag.workspace.ports import CorpusSchemaError
 from dlightrag.engine.rag.workspace.workspaces import normalize_workspace
-from dlightrag.engine.runtime import RunCoordinator, RunSchemaError
+from dlightrag.engine.runtime import IncompatibleActiveRunError, RunCoordinator, RunSchemaError
 from tests.config_helpers import mutate_config
 
 _CLOSE_ORDER = [
@@ -228,6 +229,7 @@ class _Parts:
         self.cancellation_listener = _CancellationListener(self.recorder)
         self.corpora = _Corpora(self.recorder)
         self.retrieval = _Retrieval(self.recorder)
+        self.runs = object()
         self.answers = object()
         self.web_conversations = _WebConversations(self.recorder)
 
@@ -244,12 +246,13 @@ class _Parts:
                 capabilities=cast(AnswerCapabilityCoordinator, self.capabilities),
                 pool=cast(Any, self.pool),
                 models=cast(AnswerModelRuntime, self.models),
-                run_store=cast(PGAnswerRunStore, self.run_store),
+                run_store=cast(PGRunStore, self.run_store),
                 web_store=cast(PGWebConversationStore, self.web_store),
                 coordinator=cast(RunCoordinator, self.coordinator),
                 cancellation_listener=cast(Any, self.cancellation_listener),
                 corpora=cast(CorpusAdmin, self.corpora),
                 retrieval=cast(RetrievalService, self.retrieval),
+                runs=cast(Any, self.runs),
                 answers=cast(AnswerService, self.answers),
                 memory=cast(Any, self.answers),
                 memory_store=cast(Any, self.memory_store),
@@ -278,16 +281,54 @@ def _pinned(fingerprint: ModelFingerprint, role: str) -> dict[str, Any]:
     }
 
 
-def _requirement(config: DlightragConfig, **overrides: Any) -> dict[str, Any]:
+def _requirement(
+    config: DlightragConfig, *, run_kind: str = "answer", **overrides: Any
+) -> dict[str, Any]:
     """One active run pinned to exactly this deployment's policy and models."""
-    return {
+    prepared = {
+        "query": "why",
+        "workspaces": ["default"],
         "context_policy_revision": CONTEXT_POLICY_REVISION,
+        "model_catalog_revision": current_model_catalog_revision(),
+        "idempotency_fingerprint": "test-fingerprint",
         "pinned_models": [
             _pinned(model_fingerprint(model_settings_for_role(config, role)), role)
             for role in MODEL_ROLE_NAMES
         ],
         **overrides,
     }
+    return {"run_kind": run_kind, "prepared_input": prepared}
+
+
+def _retrieval_requirement(
+    config: DlightragConfig, *, with_images: bool = False, **overrides: Any
+) -> dict[str, Any]:
+    roles = ("extract", "vlm") if with_images else ("extract",)
+    prepared = {
+        "query": "why",
+        "workspaces": ["default"],
+        "top_k": 40,
+        "chunk_top_k": 20,
+        "federated_rerank": False,
+        "bm25_query": None,
+        "filters": None,
+        "query_images": (
+            [{"type": "image_url", "image_url": {"url": "data:x"}}] if with_images else []
+        ),
+        "context_policy_revision": CONTEXT_POLICY_REVISION,
+        "model_catalog_revision": current_model_catalog_revision(),
+        "idempotency_fingerprint": "test-fingerprint",
+        "pinned_models": [
+            PinnedRetrievalModel(
+                role=role,
+                fingerprint=model_fingerprint(model_settings_for_role(config, role)),
+                profile=ModelProfile(context_window_tokens=200_000),
+            ).as_json()
+            for role in roles
+        ],
+        **overrides,
+    }
+    return {"run_kind": "retrieval", "prepared_input": prepared}
 
 
 def test_memory_dense_leg_reuses_root_embedding_settings(
@@ -337,7 +378,6 @@ async def test_application_exposes_only_typed_services_and_closes_in_dependency_
         "retrieval:planner_for",
         "capabilities:probe_all",
         f"pool:acquire:{normalize_workspace(test_config.deployment.workspace)}",
-        "corpora:start_recovery",
         "listener:start",
         "coordinator:start",
         "web_conversations:start_retention",
@@ -449,7 +489,11 @@ async def test_active_runs_pinned_to_this_deployment_start_normally(
     test_config: DlightragConfig,
 ) -> None:
     parts = _Parts()
-    parts.run_store.requirements = (_requirement(test_config),)
+    parts.run_store.requirements = (
+        _requirement(test_config),
+        _retrieval_requirement(test_config),
+        _retrieval_requirement(test_config, with_images=True),
+    )
     application = parts.application(test_config)
 
     await application.astart()
@@ -457,12 +501,29 @@ async def test_active_runs_pinned_to_this_deployment_start_normally(
     assert application.health.is_ready is True
 
 
+async def test_irrelevant_retrieval_capability_drift_does_not_block_startup(
+    test_config: DlightragConfig,
+) -> None:
+    parts = _Parts()
+    parts.run_store.requirements = (
+        _retrieval_requirement(
+            test_config,
+            capability_facts={"rerank_supports_vision": "obsolete-probe-value"},
+        ),
+    )
+
+    await parts.application(test_config).astart()
+
+    assert parts.health.is_ready is True
+
+
 @pytest.mark.parametrize(
     ("override", "detail"),
     [
         pytest.param({"context_policy_revision": "stale"}, "context policy", id="policy"),
+        pytest.param({"model_catalog_revision": "stale"}, "model catalog", id="model-catalog"),
         pytest.param({"pinned_models": "not-an-array"}, "durable input schema", id="schema"),
-        pytest.param({"pinned_models": []}, "complete model role set", id="roles"),
+        pytest.param({"pinned_models": []}, "durable input schema", id="roles"),
     ],
 )
 async def test_an_incompatible_active_run_fails_startup_and_closes(
@@ -478,13 +539,50 @@ async def test_an_incompatible_active_run_fails_startup_and_closes(
     assert parts.recorder.closed() == _CLOSE_ORDER
 
 
+@pytest.mark.parametrize(
+    ("override", "detail"),
+    [
+        pytest.param({"context_policy_revision": "stale"}, "context policy", id="policy"),
+        pytest.param({"model_catalog_revision": "stale"}, "model catalog", id="model-catalog"),
+        pytest.param({"pinned_models": "not-an-array"}, "durable input schema", id="schema"),
+        pytest.param({"pinned_models": []}, "durable input schema", id="roles"),
+    ],
+)
+async def test_an_incompatible_active_retrieval_fails_startup(
+    test_config: DlightragConfig, override: dict[str, Any], detail: str
+) -> None:
+    parts = _Parts()
+    parts.run_store.requirements = (_retrieval_requirement(test_config, **override),)
+
+    with pytest.raises(IncompatibleActiveRunError, match=detail):
+        await parts.application(test_config).astart()
+
+    assert parts.recorder.closed() == _CLOSE_ORDER
+
+
+async def test_an_active_retrieval_on_another_model_endpoint_fails_startup(
+    test_config: DlightragConfig,
+) -> None:
+    requirement = _retrieval_requirement(test_config)
+    prepared = requirement["prepared_input"]
+    foreign = dict(prepared["pinned_models"][0])
+    foreign["fingerprint"] = {**foreign["fingerprint"], "model": "some-other-model"}
+    prepared["pinned_models"] = [foreign]
+    parts = _Parts()
+    parts.run_store.requirements = (requirement,)
+
+    with pytest.raises(IncompatibleActiveRunError, match="another model endpoint"):
+        await parts.application(test_config).astart()
+
+
 async def test_an_active_run_on_another_model_endpoint_fails_startup(
     test_config: DlightragConfig,
 ) -> None:
     requirement = _requirement(test_config)
-    foreign = dict(requirement["pinned_models"][0])
+    prepared = requirement["prepared_input"]
+    foreign = dict(prepared["pinned_models"][0])
     foreign["fingerprint"] = {**foreign["fingerprint"], "model": "some-other-model"}
-    requirement["pinned_models"] = [foreign, *requirement["pinned_models"][1:]]
+    prepared["pinned_models"] = [foreign, *prepared["pinned_models"][1:]]
     parts = _Parts()
     parts.run_store.requirements = (requirement,)
 
@@ -496,14 +594,15 @@ async def test_a_failed_default_workspace_degrades_instead_of_closing(
     test_config: DlightragConfig,
 ) -> None:
     parts = _Parts()
-    parts.pool.acquire_error = RuntimeError("workspace unavailable")
+    parts.pool.acquire_error = WorkspaceUnavailableError("workspace unavailable")
     application = parts.application(test_config)
 
     await application.astart()
 
     assert application.health.is_degraded is True
     assert application.health.is_closed is False
-    assert any("workspace unavailable" in warning for warning in application.health.warnings)
+    assert application.health.warnings == ("Corpus storage unavailable",)
+    assert application.health.is_ready is True
     # A degraded process still owns runs: the coordinator and Web retention start.
     started = parts.recorder.started()
     assert "coordinator:start" in started
@@ -523,11 +622,8 @@ async def test_transient_startup_faults_warn_without_starting_the_run_coordinato
 
     assert application.health.is_degraded is True
     assert set(application.health.warnings) == {
-        "Answer run store unavailable",
-        "Answer runtime unavailable",
-        "Workspace registry unavailable",
-        "Ingest job recovery unavailable",
-        "Web conversations unavailable",
+        "Operational State unavailable",
+        "Corpus storage unavailable",
     }
     started = parts.recorder.started()
     assert "run_store:iter_active_run_requirements" not in started
@@ -535,7 +631,7 @@ async def test_transient_startup_faults_warn_without_starting_the_run_coordinato
     assert "web_conversations:start_retention" not in started
 
 
-async def test_registry_failure_alone_degrades_readiness(
+async def test_registry_failure_alone_degrades_liveness_not_readiness(
     test_config: DlightragConfig,
 ) -> None:
     parts = _Parts()
@@ -544,24 +640,9 @@ async def test_registry_failure_alone_degrades_readiness(
 
     await application.astart()
 
-    assert application.health.is_ready is False
+    assert application.health.is_ready is True
     assert application.health.is_degraded is True
-    assert application.health.warnings == ("Workspace registry unavailable",)
-    assert parts.coordinator.is_started is True
-
-
-async def test_ingest_recovery_failure_alone_degrades_readiness(
-    test_config: DlightragConfig,
-) -> None:
-    parts = _Parts()
-    parts.corpora.recovery_error = RuntimeError("recovery unavailable")
-    application = parts.application(test_config)
-
-    await application.astart()
-
-    assert application.health.is_ready is False
-    assert application.health.is_degraded is True
-    assert application.health.warnings == ("Ingest job recovery unavailable",)
+    assert application.health.warnings == ("Corpus storage unavailable",)
     assert parts.coordinator.is_started is True
 
 
@@ -575,7 +656,9 @@ async def test_a_coordinator_start_failure_degrades_the_application(
     await application.astart()
 
     assert application.health.is_degraded is True
-    assert "Answer runtime unavailable" in application.health.warnings
+    assert "Operational State unavailable" in application.health.warnings
+    assert "Run coordinator unavailable" in application.health.warnings
+    assert application.health.is_ready is False
     assert parts.coordinator.is_started is False
 
 

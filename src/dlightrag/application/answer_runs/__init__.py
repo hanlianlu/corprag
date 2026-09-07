@@ -8,17 +8,29 @@ contract imports.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from dlightrag.engine.runtime import (
-    AnswerRunCancelledError,
-    AnswerRunEvent,
-    AnswerRunFailedError,
-    AnswerRunPhase,
-    AnswerRunRecord,
-    AnswerRunStatus,
-    IdempotencyKeyConflict,
-)
+if TYPE_CHECKING:
+    from .child_roster import (
+        CHILD_ROSTER_PAGE_DEFAULT_LIMIT,
+        CHILD_ROSTER_PAGE_MAX_LIMIT,
+        ChildRosterCursor,
+        ChildRosterCursorCodec,
+        ChildRosterCursorError,
+        ChildRosterPage,
+        ChildRosterPageRequest,
+        ChildRosterRowPage,
+    )
+    from .service import (
+        AgentControlReceipt,
+        AgentTranscriptTail,
+        AnswerHistoryResource,
+        AnswerInputArtifact,
+        AnswerRequest,
+        AnswerRunAcceptor,
+        AnswerRuntimeUnavailableError,
+        AnswerService,
+    )
 
 _SERVICE_EXPORTS = {
     "AgentControlReceipt",
@@ -49,12 +61,6 @@ __all__ = [
     "AnswerInputArtifact",
     "AnswerRequest",
     "AnswerRunAcceptor",
-    "AnswerRunCancelledError",
-    "AnswerRunEvent",
-    "AnswerRunFailedError",
-    "AnswerRunPhase",
-    "AnswerRunRecord",
-    "AnswerRunStatus",
     "AnswerRuntimeUnavailableError",
     "AnswerService",
     "CHILD_ROSTER_PAGE_DEFAULT_LIMIT",
@@ -65,7 +71,6 @@ __all__ = [
     "ChildRosterPage",
     "ChildRosterPageRequest",
     "ChildRosterRowPage",
-    "IdempotencyKeyConflict",
 ]
 
 

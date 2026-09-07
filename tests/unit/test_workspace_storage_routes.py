@@ -83,40 +83,6 @@ async def test_storage_status_route_404_for_unknown_workspace(
     assert response.status_code == 404
 
 
-async def test_delete_workspace_under_fence_maps_to_409_with_retry_after(
-    route_client: tuple[AsyncClient, AsyncMock],
-) -> None:
-    client, application_double = route_client
-    application_double.corpora.reset.side_effect = WorkspaceWriteFencedError(
-        workspace="finance", retry_after_seconds=23.0
-    )
-
-    response = await client.delete("/workspaces/finance")
-
-    assert response.status_code == 409
-    assert response.headers["Retry-After"] == "23"
-    assert "retry after 23 seconds" in response.json()["detail"]
-
-
-async def test_delete_files_under_fence_maps_to_409_with_retry_after(
-    route_client: tuple[AsyncClient, AsyncMock],
-) -> None:
-    client, application_double = route_client
-    application_double.corpora.delete_files.side_effect = WorkspaceWriteFencedError(
-        workspace="finance", retry_after_seconds=5.2
-    )
-
-    response = await client.request(
-        "DELETE",
-        "/files",
-        json={"filenames": ["report.pdf"], "workspace": "finance"},
-    )
-
-    assert response.status_code == 409
-    assert response.headers["Retry-After"] == "6"  # ceil, never floor
-    assert "retry after 6 seconds" in response.json()["detail"]
-
-
 async def test_update_metadata_under_fence_maps_to_409_with_retry_after(
     route_client: tuple[AsyncClient, AsyncMock],
 ) -> None:

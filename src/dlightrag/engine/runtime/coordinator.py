@@ -6,7 +6,7 @@ reserves a local execution slot *before* it claims a row, so a worker never
 holds a lease while waiting for capacity, and every durable write it makes is
 predicated on its own lease owner and fencing epoch. Lease duration, heartbeat
 cadence, sweep cadence, and token coalescing are fixed internal constants; the
-public worker bound is ``runtime.answer_worker_concurrency``. AI provider calls
+public worker bound is ``runtime.query.worker_concurrency``. AI provider calls
 and RAG pipeline work have independent admission owners.
 """
 
@@ -20,17 +20,20 @@ import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 from typing import Any, Protocol, assert_never
 
-from dlightrag.engine.runtime.contracts import AnswerRunPhase
+from dlightrag.engine.runtime.contracts import RunKind, RunLane, RunPhase
 from dlightrag.engine.runtime.errors import RunExecutionError
 from dlightrag.engine.runtime.records import (
     AlreadyCommittedTerminal,
-    AnswerRunEvent,
     ClaimedRun,
-    CoordinatorOwnedSuccess,
+    Deferred,
+    Failed,
     PendingPublication,
+    RunEvent,
     RunExecutionOutcome,
+    Succeeded,
+    WaitingForRepair,
 )
-from dlightrag.engine.runtime.store import AnswerRunStore
+from dlightrag.engine.runtime.store import RunStore
 from dlightrag.engine.runtime.subscription import RunEventBroker, follow_run_events
 
 logger = logging.getLogger(__name__)
@@ -66,7 +69,7 @@ def _startup_jitter(cadence: float) -> float:
     return random.uniform(0.0, max(0.0, cadence) * _MAINTENANCE_JITTER_FRACTION)  # noqa: S311
 
 
-class RunCancelledError(Exception):
+class RunCancellationObserved(Exception):
     """The run's owner requested cancellation and the worker observed it."""
 
 
@@ -99,9 +102,7 @@ class DurableWrites:
         while self._writes:
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
-                logger.warning(
-                    "Shutdown left %d durable Answer writes in flight", len(self._writes)
-                )
+                logger.warning("Shutdown left %d durable Run writes in flight", len(self._writes))
                 return
             await asyncio.wait(tuple(self._writes), timeout=remaining)
 
@@ -134,7 +135,7 @@ class RunSession:
 
     def __init__(
         self,
-        store: AnswerRunStore,
+        store: RunStore,
         claimed: ClaimedRun,
         *,
         broker: RunEventBroker,
@@ -151,13 +152,15 @@ class RunSession:
         self.durable_progress_version = run.durable_progress_version
         self.execution = execution
         self.prepared_input: Mapping[str, Any] | None = run.prepared_input
-        self.workspace_epoch: int | None = run.workspace_epoch
+        self.checkpoint: Mapping[str, Any] | None = run.checkpoint
+        self.workspace_epoch: int | None = run.agent_workspace_epoch
         self._store = store
         self._broker = broker
         self._writes = writes
         self._notify = notify
         self._token_flush_sleep = _token_flush_sleep
         self._cancel_requested = run.cancel_requested
+        self._handoff_started = run.handoff_started_at is not None
         self._lease_lost = False
         self._sealed = False
         self._lane = asyncio.Lock()
@@ -180,6 +183,10 @@ class RunSession:
     def lease_lost(self) -> bool:
         return self._lease_lost
 
+    @property
+    def handoff_started(self) -> bool:
+        return self._handoff_started
+
     def observe_cancellation(self) -> None:
         self._cancel_requested = True
 
@@ -190,7 +197,7 @@ class RunSession:
         """Raise at a control boundary once the owner asked to cancel."""
         self._guard()
         if self._cancel_requested:
-            raise RunCancelledError
+            raise RunCancellationObserved
 
     def _guard(self) -> None:
         """Refuse every further durable write once this session lost coherence."""
@@ -202,7 +209,51 @@ class RunSession:
             raise RuntimeError("run session is closed")
 
     # -- durable writes -------------------------------------------------
-    async def enter_phase(self, phase: AnswerRunPhase) -> None:
+    async def checkpoint_state(
+        self, checkpoint: Mapping[str, object], *, phase: RunPhase | None = None
+    ) -> None:
+        """Replace the executor-owned bounded checkpoint under this run's fence."""
+        async with self._lane:
+            self._guard()
+            await self._flush_locked()
+            committed = await self._writes.shield(
+                self._store.write_checkpoint(
+                    owner_id=self.owner_id,
+                    run_id=self.run_id,
+                    worker_id=self.worker_id,
+                    fencing_epoch=self.fencing_epoch,
+                    checkpoint=checkpoint,
+                    phase=phase,
+                )
+            )
+            if not committed:
+                self._lease_lost = True
+                raise LeaseLostError
+
+    async def begin_handoff(self, checkpoint: Mapping[str, object]) -> None:
+        """Atomically cross the point after which cancellation is rejected."""
+        async with self._lane:
+            self._guard()
+            await self._flush_locked()
+            committed = await self._writes.shield(
+                self._store.start_handoff(
+                    owner_id=self.owner_id,
+                    run_id=self.run_id,
+                    worker_id=self.worker_id,
+                    fencing_epoch=self.fencing_epoch,
+                    checkpoint=checkpoint,
+                )
+            )
+            if not committed:
+                # Cancellation and handoff are a single-row race. A cancellation
+                # that won is observed as cancellation, not as an ambiguous lease loss.
+                if self._cancel_requested:
+                    raise RunCancellationObserved
+                self._lease_lost = True
+                raise LeaseLostError
+            self._handoff_started = True
+
+    async def enter_phase(self, phase: RunPhase) -> None:
         async with self._lane:
             self._guard()
             await self._flush_locked()
@@ -231,7 +282,7 @@ class RunSession:
                 self._flush_deadline = now + TOKEN_BATCH_SECONDS
                 self._flush_task = asyncio.create_task(
                     self._flush_timer(self._flush_deadline),
-                    name=f"answer-token-flush:{self.run_id}",
+                    name=f"run-token-flush:{self.run_id}",
                 )
             if self._pending_chars >= TOKEN_BATCH_CHARS or now >= self._flush_deadline:
                 await self._flush_locked()
@@ -243,11 +294,14 @@ class RunSession:
             self._guard()
             await self._flush_locked()
             await self._fenced(
-                self._store.append_reset(
+                self._store.append_event(
                     owner_id=self.owner_id,
                     run_id=self.run_id,
                     worker_id=self.worker_id,
                     fencing_epoch=self.fencing_epoch,
+                    phase=None,
+                    event_type="reset",
+                    payload={},
                 )
             )
             self._reset_pending = False
@@ -262,11 +316,12 @@ class RunSession:
             self._guard()
             await self._flush_locked()
             await self._fenced(
-                self._store.append_tool_event(
+                self._store.append_event(
                     owner_id=self.owner_id,
                     run_id=self.run_id,
                     worker_id=self.worker_id,
                     fencing_epoch=self.fencing_epoch,
+                    phase=None,
                     event_type=event_type,
                     payload=payload,
                 )
@@ -289,21 +344,26 @@ class RunSession:
         try:
             if self._reset_pending:
                 await self._fenced(
-                    self._store.append_reset(
+                    self._store.append_event(
                         owner_id=self.owner_id,
                         run_id=self.run_id,
                         worker_id=self.worker_id,
                         fencing_epoch=self.fencing_epoch,
+                        phase=None,
+                        event_type="reset",
+                        payload={},
                     )
                 )
                 self._reset_pending = False
             await self._fenced(
-                self._store.append_token_batch(
+                self._store.append_event(
                     owner_id=self.owner_id,
                     run_id=self.run_id,
                     worker_id=self.worker_id,
                     fencing_epoch=self.fencing_epoch,
-                    text=text,
+                    phase=None,
+                    event_type="token",
+                    payload={"text": text},
                 )
             )
         except Exception as exc:
@@ -391,42 +451,67 @@ class RunCoordinator:
     def __init__(
         self,
         *,
-        store: AnswerRunStore,
-        executor: RunExecutor,
-        answer_worker_concurrency: int,
+        store: RunStore,
+        executors: Mapping[RunKind, RunExecutor],
+        query_worker_concurrency: int,
+        corpus_mutation_worker_concurrency: int = 1,
         worker_id: str | None = None,
         heartbeat_seconds: float = RUN_HEARTBEAT_SECONDS,
         sweep_seconds: float = SWEEP_SECONDS,
         maintenance_seconds: float = MAINTENANCE_SECONDS,
         _token_flush_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
-        if answer_worker_concurrency < 1:
-            raise ValueError("answer_worker_concurrency must be positive")
+        if query_worker_concurrency < 1:
+            raise ValueError("query_worker_concurrency must be positive")
+        if corpus_mutation_worker_concurrency < 1:
+            raise ValueError("corpus_mutation_worker_concurrency must be positive")
+        if not executors:
+            raise ValueError("at least one run executor must be registered")
         self._store = store
-        self._executor = executor
-        self._answer_worker_concurrency = int(answer_worker_concurrency)
-        self._worker_id = worker_id or f"answer-worker-{uuid.uuid4().hex}"
+        self._executors = dict(executors)
+        self._run_kinds = tuple(self._executors)
+        self._lane_kinds: dict[RunLane, tuple[RunKind, ...]] = {
+            "query": tuple(kind for kind in self._run_kinds if kind != "corpus_mutation"),
+            "corpus_mutation": tuple(kind for kind in self._run_kinds if kind == "corpus_mutation"),
+        }
+        self._lanes: tuple[RunLane, ...] = tuple(
+            lane for lane, kinds in self._lane_kinds.items() if kinds
+        )
+        self._query_worker_concurrency = int(query_worker_concurrency)
+        self._corpus_mutation_worker_concurrency = int(corpus_mutation_worker_concurrency)
+        self._worker_id = worker_id or f"run-worker-{uuid.uuid4().hex}"
         self._heartbeat_seconds = heartbeat_seconds
         self._sweep_seconds = sweep_seconds
         self._maintenance_seconds = maintenance_seconds
         # Private deterministic test seam; production always uses asyncio.sleep
         # with the fixed TOKEN_BATCH_SECONDS bound.
         self._token_flush_sleep = _token_flush_sleep
-        self._slots = asyncio.Semaphore(self._answer_worker_concurrency)
+        self._slots_by_lane: dict[RunLane, asyncio.Semaphore] = {
+            "query": asyncio.Semaphore(self._query_worker_concurrency),
+            "corpus_mutation": asyncio.Semaphore(self._corpus_mutation_worker_concurrency),
+        }
+        # Kept as the Query-lane test/introspection seam; scheduling uses the
+        # lane-indexed pools above.
+        self._slots = self._slots_by_lane["query"]
         self._broker = RunEventBroker()
         self._writes = DurableWrites()
         self._wake = asyncio.Event()
         self._acceptance_lock = asyncio.Lock()
         self._closing = False
         self._scheduler: asyncio.Task[None] | None = None
+        self._mutation_scheduler: asyncio.Task[None] | None = None
         self._sweeper: asyncio.Task[None] | None = None
         self._maintainer: asyncio.Task[None] | None = None
         self._runs: dict[str, asyncio.Task[None]] = {}
         self._sessions: dict[str, RunSession] = {}
 
     @property
-    def answer_worker_concurrency(self) -> int:
-        return self._answer_worker_concurrency
+    def query_worker_concurrency(self) -> int:
+        return self._query_worker_concurrency
+
+    @property
+    def corpus_mutation_worker_concurrency(self) -> int:
+        return self._corpus_mutation_worker_concurrency
 
     @property
     def worker_id(self) -> str:
@@ -439,7 +524,11 @@ class RunCoordinator:
     @property
     def is_started(self) -> bool:
         """Whether this process can currently execute newly accepted runs."""
-        tasks = (self._scheduler, self._sweeper, self._maintainer)
+        tasks = [self._sweeper, self._maintainer]
+        if self._lane_kinds["query"]:
+            tasks.append(self._scheduler)
+        if self._lane_kinds["corpus_mutation"]:
+            tasks.append(self._mutation_scheduler)
         return not self._closing and all(task is not None and not task.done() for task in tasks)
 
     @contextlib.asynccontextmanager
@@ -454,7 +543,12 @@ class RunCoordinator:
             if self._scheduler is not None:
                 return
             self._closing = False
-            self._scheduler = asyncio.create_task(self._schedule_forever())
+            if self._lane_kinds["query"]:
+                self._scheduler = asyncio.create_task(self._schedule_forever("query"))
+            if self._lane_kinds["corpus_mutation"]:
+                self._mutation_scheduler = asyncio.create_task(
+                    self._schedule_forever("corpus_mutation")
+                )
             self._sweeper = asyncio.create_task(self._sweep_forever())
             self._maintainer = asyncio.create_task(self._maintain_forever())
 
@@ -466,7 +560,12 @@ class RunCoordinator:
         single cancelled terminal transition.
         """
         task = self._runs.get(run_id)
-        if task is not None and not task.done():
+        session = self._sessions.get(run_id)
+        if (
+            task is not None
+            and not task.done()
+            and not (session is not None and session.handoff_started)
+        ):
             task.cancel()
 
     def wake(self) -> None:
@@ -478,12 +577,18 @@ class RunCoordinator:
         async with self._acceptance_lock:
             self._closing = True
             self._wake.set()
-            for task in (self._scheduler, self._sweeper, self._maintainer):
+            for task in (
+                self._scheduler,
+                self._mutation_scheduler,
+                self._sweeper,
+                self._maintainer,
+            ):
                 if task is not None:
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
             self._scheduler = None
+            self._mutation_scheduler = None
             self._sweeper = None
             self._maintainer = None
             running = list(self._runs.values())
@@ -498,7 +603,7 @@ class RunCoordinator:
 
     def subscribe(
         self, *, owner_id: str, run_id: str, after_sequence: int = 0
-    ) -> AsyncGenerator[AnswerRunEvent]:
+    ) -> AsyncGenerator[RunEvent]:
         """Follow one run's durable events; detaching never mutates the run."""
 
         async def _is_finished() -> bool:
@@ -515,35 +620,43 @@ class RunCoordinator:
         )
 
     # -- scheduling -----------------------------------------------------
-    async def _schedule_forever(self) -> None:
+    async def _schedule_forever(self, lane: RunLane = "query") -> None:
+        slots = self._slots_by_lane[lane]
+        run_kinds = self._lane_kinds[lane]
         while not self._closing:
-            await self._slots.acquire()
+            await slots.acquire()
             if self._closing:
-                self._slots.release()
+                slots.release()
                 return
             claimed: ClaimedRun | None = None
             try:
-                claimed = await self._store.claim_next(worker_id=self._worker_id)
+                claimed = await self._store.claim_next(
+                    worker_id=self._worker_id,
+                    run_kinds=run_kinds,
+                    lanes=(lane,),
+                )
             except Exception:
-                logger.warning("Answer run claim failed", exc_info=True)
+                logger.warning("%s Run claim failed", lane, exc_info=True)
             if claimed is None:
-                self._slots.release()
+                slots.release()
                 await self._idle()
                 continue
             run_id = claimed.run.run_id
             task = asyncio.create_task(self._execute(claimed))
             self._runs[run_id] = task
-            task.add_done_callback(lambda _task, key=run_id: self._forget(key))
+            task.add_done_callback(
+                lambda _task, key=run_id, owned_slots=slots: self._forget(key, owned_slots)
+            )
 
     async def _idle(self) -> None:
         self._wake.clear()
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(self._wake.wait(), timeout=self._sweep_seconds)
 
-    def _forget(self, run_id: str) -> None:
+    def _forget(self, run_id: str, slots: asyncio.Semaphore | None = None) -> None:
         self._runs.pop(run_id, None)
         self._sessions.pop(run_id, None)
-        self._slots.release()
+        (slots or self._slots).release()
         self._wake.set()
 
     async def _sweep_forever(self) -> None:
@@ -554,7 +667,7 @@ class RunCoordinator:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.warning("Answer run sweep failed", exc_info=True)
+                logger.warning("Run sweep failed", exc_info=True)
             await asyncio.sleep(self._sweep_seconds)
 
     async def _maintain_forever(self) -> None:
@@ -570,7 +683,7 @@ class RunCoordinator:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.warning("Answer run retention failed", exc_info=True)
+                logger.warning("Run retention failed", exc_info=True)
             await asyncio.sleep(self._maintenance_seconds)
 
     async def _maintain_once(self) -> None:
@@ -598,12 +711,47 @@ class RunCoordinator:
         self._sessions[session.run_id] = session
         heartbeat = asyncio.create_task(self._heartbeat_forever(session))
         try:
-            outcome = await self._executor.execute(session)
-            if isinstance(outcome, CoordinatorOwnedSuccess):
+            executor = self._executors.get(claimed.run.run_kind)
+            if executor is None:
+                raise RunExecutionError(
+                    "executor_unavailable",
+                    "No executor is registered for this run kind.",
+                )
+            outcome = await executor.execute(session)
+            if isinstance(outcome, Succeeded):
                 # Sealing flushes pending text and joins/disarms its timer before
                 # the terminal write, leaving one strict event order.
                 await session._seal(flush_tokens=True)
                 await self._finish_success(session, outcome.result)
+            elif isinstance(outcome, Failed):
+                await session._seal(flush_tokens=True)
+                await self._finish_failure(
+                    session,
+                    outcome.error_kind,
+                    outcome.error_message,
+                    result=outcome.result,
+                )
+            elif isinstance(outcome, Deferred):
+                await session.aclose()
+                await self._store.defer(
+                    owner_id=session.owner_id,
+                    run_id=session.run_id,
+                    worker_id=session.worker_id,
+                    fencing_epoch=session.fencing_epoch,
+                    checkpoint=outcome.checkpoint,
+                    next_attempt_at=outcome.next_attempt_at,
+                )
+                self._wake.set()
+            elif isinstance(outcome, WaitingForRepair):
+                await session.aclose()
+                await self._store.wait_for_repair(
+                    owner_id=session.owner_id,
+                    run_id=session.run_id,
+                    worker_id=session.worker_id,
+                    fencing_epoch=session.fencing_epoch,
+                    checkpoint=outcome.checkpoint,
+                )
+                self._wake.set()
             elif isinstance(outcome, AlreadyCommittedTerminal):
                 # The executor owns that atomic terminal; it must not leave a
                 # local timer behind after handing control back.
@@ -618,12 +766,10 @@ class RunCoordinator:
             await session.aclose()
             await self._release(session)
             raise
-        except RunCancelledError:
+        except RunCancellationObserved:
             await self._finish_cancelled(session)
         except LeaseLostError:
-            logger.info(
-                "Answer run %s lost its lease; leaving recovery to the next owner", session.run_id
-            )
+            logger.info("Run %s lost its lease; leaving recovery to the next owner", session.run_id)
         except RunExecutionError as exc:
             await self._finish_failure(session, exc.kind, exc.public_message)
         except Exception:
@@ -643,9 +789,7 @@ class RunCoordinator:
                 pass
             except Exception:
                 # A dead heartbeat is never this run's outcome.
-                logger.warning(
-                    "Answer run %s heartbeat ended in failure", session.run_id, exc_info=True
-                )
+                logger.warning("Run %s heartbeat ended in failure", session.run_id, exc_info=True)
             await session.aclose()
 
     async def _heartbeat_forever(self, session: RunSession) -> None:
@@ -668,7 +812,7 @@ class RunCoordinator:
                 raise
             except Exception:
                 logger.warning(
-                    "Answer run %s heartbeat failed; retrying next cadence",
+                    "Run %s heartbeat failed; retrying next cadence",
                     session.run_id,
                     exc_info=True,
                 )
@@ -699,7 +843,14 @@ class RunCoordinator:
         if not outcome.committed:
             session.observe_lease_loss()
 
-    async def _finish_failure(self, session: RunSession, kind: str, message: str) -> None:
+    async def _finish_failure(
+        self,
+        session: RunSession,
+        kind: str,
+        message: str,
+        *,
+        result: Mapping[str, Any] | None = None,
+    ) -> None:
         # Failure still preserves text when possible, but a failed/ambiguous
         # token append is never retried.  Either way the timer is gone before
         # the terminal transition.
@@ -716,6 +867,7 @@ class RunCoordinator:
                     fencing_epoch=session.fencing_epoch,
                     error_kind=kind,
                     error_message=message,
+                    **({"result": result} if result is not None else {}),
                 )
             )
         self._broker.notify(session.owner_id, session.run_id)
@@ -762,6 +914,6 @@ __all__ = [
     "RunCoordinator",
     "RunExecutor",
     "LeaseLostError",
-    "RunCancelledError",
+    "RunCancellationObserved",
     "RunSession",
 ]

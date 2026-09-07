@@ -765,13 +765,14 @@ async def _parent_columns(conn: Any, parent: str) -> list[str]:
 async def _create_staging(conn: Any, parent: str, staging: str, workspace: str) -> None:
     """Detached copy of the parent's shape plus the exact partition bound.
 
-    The explicit CHECK constraint matches the future partition bound, so
-    ATTACH PARTITION skips the whole-table validation scan.
+    Parent CHECK constraints are required on the detached table before it can
+    be attached as a partition. The explicit workspace constraint matches the
+    future partition bound, so ATTACH PARTITION skips the whole-table scan.
     """
     await conn.execute(
         f"CREATE TABLE {pg_identifier(staging)} ("  # noqa: S608
         f"LIKE {pg_qualified_identifier(parent)} "
-        "INCLUDING DEFAULTS INCLUDING STORAGE INCLUDING COMPRESSION"
+        "INCLUDING DEFAULTS INCLUDING CONSTRAINTS INCLUDING STORAGE INCLUDING COMPRESSION"
         ")"
     )
     workspace_literal = await conn.fetchval("SELECT quote_literal($1)", workspace)

@@ -1,5 +1,5 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
-"""Inline retrieval use case over authorized canonical workspaces."""
+"""Durable top-level Retrieval and the shared raw Retrieval Stage."""
 
 import asyncio
 import copy
@@ -8,14 +8,33 @@ import json
 import logging
 import time
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
+from contextlib import AbstractAsyncContextManager, aclosing
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
+from uuid import uuid7
 
 from dlightrag.application.errors import CorpusUnavailableError
-from dlightrag.engine.ai.capacity import ModelProfile
+from dlightrag.application.runs import (
+    IdempotencyKeyConflict,
+    RunCancelledError,
+    RunCapacityExceededError,
+    RunCreation,
+    RunEvent,
+    RunFailedError,
+    RunRuntimeUnavailableError,
+)
+from dlightrag.engine.ai.capacity import CONTEXT_POLICY_REVISION, ModelProfile
+from dlightrag.engine.ai.catalog import current_model_catalog_revision
+from dlightrag.engine.ai.fingerprints import ModelFingerprint
+from dlightrag.engine.ai.settings import ModelRole
 from dlightrag.engine.ai.telemetry import Telemetry
-from dlightrag.engine.rag.retrieval import MetadataFilter, RetrievalContexts, RetrievalResult
+from dlightrag.engine.rag.retrieval import (
+    MetadataFilter,
+    RetrievalContexts,
+    RetrievalOptions,
+    RetrievalResult,
+)
 from dlightrag.engine.rag.retrieval.federation import (
     FederatedReranker,
     FederationMergePolicy,
@@ -29,6 +48,31 @@ from dlightrag.engine.rag.workspace.pool import WorkspacePool
 from dlightrag.engine.rag.workspace.ports import (
     CorpusUnavailableError as _EngineCorpusUnavailableError,
 )
+from dlightrag.engine.rag.workspace.workspaces import require_canonical_workspace_id
+from dlightrag.engine.runtime import (
+    RETRIEVAL_RUN_RETENTION_SECONDS,
+    PreparedInputTooLargeError,
+    PreparedRunEnvelope,
+    RunAccessScope,
+    RunKind,
+    RunRecord,
+    require_prepared_input_bounds,
+    run_request_fingerprint,
+)
+from dlightrag.engine.runtime import (
+    IdempotencyKeyConflict as RuntimeIdempotencyKeyConflict,
+)
+from dlightrag.engine.runtime import (
+    RunCapacityExceededError as RuntimeRunCapacityExceededError,
+)
+from dlightrag.engine.runtime import (
+    RunCreation as RuntimeRunCreation,
+)
+from dlightrag.engine.runtime import (
+    RunEvent as RuntimeRunEvent,
+)
+
+from .execution import PinnedRetrievalModel, RetrievalRunInput, restore_retrieval_result
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +91,11 @@ class _VisualQueryCacheKey:
 
 
 class RetrievalTimeoutError(RuntimeError):
-    """One inline retrieval did not finish within its request budget."""
+    """Legacy name for a terminal Retrieval timeout classification."""
+
+
+class RetrievalInputError(ValueError):
+    """A top-level Retrieval request failed pre-acceptance validation."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,20 +106,6 @@ class RetrievalSettings:
     query_image_limit: int
     federation_min_chunks_per_workspace: int = 7
     workspace_fanout_concurrency: int = 8
-
-
-@dataclass(frozen=True, slots=True)
-class RetrievalOptions:
-    """Caller-awaited retrieval knobs travelling the answer-run corridor.
-
-    One small object instead of three parallel scalars through contracts,
-    durable records, the executor seam, and the retrieval service. Public
-    serialization stays flat; this bundles only the in-process corridor.
-    """
-
-    top_k: int | None = None
-    chunk_top_k: int | None = None
-    federated_rerank: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,11 +120,10 @@ class RetrieveProjection:
 
 @dataclass(frozen=True, slots=True)
 class RetrieveRequest:
-    """One trusted inline retrieval request with concrete canonical workspaces."""
+    """One authorized Retrieval request with concrete canonical workspaces."""
 
     query: str
     workspaces: tuple[str, ...]
-    projection: RetrieveProjection
     top_k: int | None = None
     chunk_top_k: int | None = None
     bm25_query: str | None = None
@@ -119,8 +152,40 @@ class PlannerProvider(Protocol):
     async def aclose(self) -> None: ...
 
 
+class RetrievalRunRepository(Protocol):
+    """Owner-scoped generic Run operations used by Retrieval acceptance."""
+
+    async def replay_run(
+        self,
+        *,
+        owner_id: str,
+        idempotency_key: str,
+        idempotency_fingerprint: str,
+        run_kind: RunKind,
+    ) -> RuntimeRunCreation | None: ...
+
+    async def accept_run(
+        self, *, envelope: PreparedRunEnvelope, run_id: str
+    ) -> RuntimeRunCreation: ...
+
+    async def get_run(self, *, owner_id: str, run_id: str) -> RunRecord | None: ...
+
+
+class RetrievalRunScheduler(Protocol):
+    @property
+    def is_started(self) -> bool: ...
+
+    def admission(self) -> AbstractAsyncContextManager[bool]: ...
+
+    def wake(self) -> None: ...
+
+    def subscribe(
+        self, *, owner_id: str, run_id: str, after_sequence: int = 0
+    ) -> AsyncGenerator[RuntimeRunEvent]: ...
+
+
 class RetrievalService:
-    """Plan, retrieve, and project one caller-awaited result."""
+    """Accept durable Retrieval and expose the raw stage Answer reuses directly."""
 
     def __init__(
         self,
@@ -132,6 +197,11 @@ class RetrievalService:
         projector: RetrievalProjection,
         settings: RetrievalSettings,
         telemetry: Telemetry,
+        store: RetrievalRunRepository | None = None,
+        coordinator: RetrievalRunScheduler | None = None,
+        model_profile_for_role: Callable[[ModelRole], ModelProfile] | None = None,
+        model_fingerprint_for_role: Callable[[ModelRole], ModelFingerprint] | None = None,
+        run_retention_seconds: int = RETRIEVAL_RUN_RETENTION_SECONDS,
         clock: Callable[[], float] = time.monotonic,
         federated_reranker_factory: Callable[[], FederatedReranker | None] | None = None,
     ) -> None:
@@ -142,6 +212,11 @@ class RetrievalService:
         self._projector = projector
         self._settings = settings
         self._telemetry = telemetry
+        self._store = store
+        self._coordinator = coordinator
+        self._model_profile_for_role = model_profile_for_role
+        self._model_fingerprint_for_role = model_fingerprint_for_role
+        self._run_retention_seconds = int(run_retention_seconds)
         self._clock = clock
         self._federated_reranker_factory = federated_reranker_factory
         self._federated_reranker: FederatedReranker | None = None
@@ -179,6 +254,15 @@ class RetrievalService:
     @property
     def closed(self) -> bool:
         return self._closed
+
+    def bind_runtime(
+        self, *, store: RetrievalRunRepository, coordinator: RetrievalRunScheduler
+    ) -> None:
+        """Complete the single composition cycle shared with this service's executor."""
+        if self._store is not None or self._coordinator is not None:
+            raise RuntimeError("Retrieval runtime is already bound")
+        self._store = store
+        self._coordinator = coordinator
 
     async def _acquire(self, workspace: str) -> Any:
         """Acquire one workspace and translate Engine availability errors."""
@@ -321,24 +405,228 @@ class RetrievalService:
         while len(self._visual_query_cache) > _VISUAL_QUERY_CACHE_SIZE:
             self._visual_query_cache.popitem(last=False)
 
-    async def retrieve(self, request: RetrieveRequest) -> RetrieveResponse:
+    async def create(
+        self,
+        *,
+        request: RetrieveRequest,
+        owner_id: str,
+        idempotency_key: str | None = None,
+    ) -> RunCreation:
+        """Accept one durable Retrieval and return without waiting for execution."""
+        run_input, fingerprint, accepted_input = self._normalized_run_input(request)
+        store = self._store
+        coordinator = self._coordinator
+        if store is None or coordinator is None:
+            raise RunRuntimeUnavailableError("Retrieval runtime is unavailable")
+        try:
+            if idempotency_key is not None:
+                replay = await store.replay_run(
+                    owner_id=owner_id,
+                    idempotency_key=idempotency_key,
+                    idempotency_fingerprint=fingerprint,
+                    run_kind="retrieval",
+                )
+                if replay is not None:
+                    return RunCreation.from_runtime(replay)
+            if not coordinator.is_started:
+                raise RunRuntimeUnavailableError("Retrieval runtime is unavailable")
+            prepared_input = run_input.as_request()
+            try:
+                require_prepared_input_bounds(prepared_input)
+            except PreparedInputTooLargeError as exc:
+                raise RetrievalInputError(str(exc)) from exc
+            async with coordinator.admission() as runtime_available:
+                if not runtime_available:
+                    raise RunRuntimeUnavailableError("Retrieval runtime is unavailable")
+                run_id = str(uuid7())
+                creation = await store.accept_run(
+                    envelope=PreparedRunEnvelope(
+                        run_kind="retrieval",
+                        lane="query",
+                        submitted_by=owner_id,
+                        access_scope=RunAccessScope(kind="owner", scope_id=owner_id),
+                        submission_key=idempotency_key or run_id,
+                        request_fingerprint=fingerprint,
+                        payload=prepared_input,
+                        accepted_input=accepted_input,
+                        retention_seconds=self._run_retention_seconds,
+                    ),
+                    run_id=run_id,
+                )
+                coordinator.wake()
+        except RuntimeIdempotencyKeyConflict as exc:
+            raise IdempotencyKeyConflict(str(exc)) from exc
+        except RuntimeRunCapacityExceededError as exc:
+            raise RunCapacityExceededError(str(exc)) from exc
+        return RunCreation.from_runtime(creation)
+
+    def _normalized_run_input(
+        self, request: RetrieveRequest
+    ) -> tuple[RetrievalRunInput, str, dict[str, Any]]:
         if self._closed:
             raise CorpusUnavailableError("Retrieval service is closed")
         if not request.workspaces:
-            raise ValueError("At least one canonical workspace is required")
-        if len(request.query_images) > self._settings.query_image_limit:
-            raise ValueError(
+            raise RetrievalInputError("At least one canonical workspace is required")
+        workspaces = tuple(
+            require_canonical_workspace_id(workspace) for workspace in request.workspaces
+        )
+        images = tuple(dict(image) for image in request.query_images)
+        if len(images) > self._settings.query_image_limit:
+            raise RetrievalInputError(
                 f"at most {self._settings.query_image_limit} current images are allowed"
             )
+        top_k = request.top_k or self._settings.default_top_k
+        chunk_top_k = request.chunk_top_k or self._settings.default_chunk_top_k
+        if top_k < 1 or top_k > self._settings.default_top_k * 10:
+            raise RetrievalInputError(
+                f"top_k must be between 1 and {self._settings.default_top_k * 10}"
+            )
+        if chunk_top_k < 1 or chunk_top_k > self._settings.default_chunk_top_k * 10:
+            raise RetrievalInputError(
+                f"chunk_top_k must be between 1 and {self._settings.default_chunk_top_k * 10}"
+            )
+        filters = (
+            request.filters.model_dump(exclude_none=True, mode="json")
+            if request.filters is not None
+            else None
+        )
+        normalized_request = {
+            "query": request.query,
+            "workspaces": list(workspaces),
+            "top_k": top_k,
+            "chunk_top_k": chunk_top_k,
+            "federated_rerank": bool(request.federated_rerank),
+            "filters": filters,
+            "bm25_query": (request.bm25_query or "").strip() or None,
+            "query_images": [dict(image) for image in images],
+        }
+        fingerprint = run_request_fingerprint(normalized_request)
+        if self._model_profile_for_role is None or self._model_fingerprint_for_role is None:
+            raise RunRuntimeUnavailableError("Retrieval model pinning is unavailable")
+        roles: tuple[ModelRole, ...] = ("extract", "vlm") if images else ("extract",)
+        pinned_models = tuple(
+            PinnedRetrievalModel(
+                role=role,
+                fingerprint=self._model_fingerprint_for_role(role),
+                profile=self._model_profile_for_role(role),
+            )
+            for role in roles
+        )
+        run_input = RetrievalRunInput(
+            query=request.query,
+            workspaces=workspaces,
+            retrieval=RetrievalOptions(
+                top_k=top_k,
+                chunk_top_k=chunk_top_k,
+                federated_rerank=bool(request.federated_rerank),
+            ),
+            bm25_query=normalized_request["bm25_query"],
+            filters=filters,
+            query_images=images,
+            pinned_models=pinned_models,
+            context_policy_revision=CONTEXT_POLICY_REVISION,
+            model_catalog_revision=current_model_catalog_revision(),
+            idempotency_fingerprint=fingerprint,
+        )
+        accepted_input = {
+            **{key: value for key, value in normalized_request.items() if key != "query_images"},
+            "query_image_count": len(images),
+            "query_image_digests": [_query_image_hexdigest((image,)) for image in images],
+            "result_projection": "retrieval_v1",
+            "retention_seconds": self._run_retention_seconds,
+        }
+        return run_input, fingerprint, accepted_input
 
-        self.warm(request.workspaces)
-        try:
-            async with asyncio.timeout(self._settings.timeout_seconds):
-                return await self._retrieve(request)
-        except TimeoutError as exc:
-            raise RetrievalTimeoutError(
-                f"Retrieval timed out after {self._settings.timeout_seconds:g}s"
-            ) from exc
+    async def wait(
+        self,
+        *,
+        owner_id: str,
+        run_id: str,
+        projection: RetrieveProjection,
+    ) -> RetrieveResponse:
+        """Wait for one owned run and apply the caller's current reader scope."""
+        store = self._store
+        coordinator = self._coordinator
+        if store is None or coordinator is None:
+            raise RunRuntimeUnavailableError("Retrieval runtime is unavailable")
+        async with aclosing(coordinator.subscribe(owner_id=owner_id, run_id=run_id)) as events:
+            async for _event in events:
+                pass
+        final = await store.get_run(owner_id=owner_id, run_id=run_id)
+        if final is None:
+            raise RunFailedError(
+                "retrieval_run_missing",
+                "Retrieval disappeared before it finished.",
+            )
+        if final.status == "succeeded":
+            return self.project_stored(final.result or {}, projection)
+        if final.status == "cancelled":
+            raise RunCancelledError(final.run_id)
+        raise RunFailedError(
+            final.error_kind or "retrieval_failed",
+            final.error_message or "Retrieval failed.",
+        )
+
+    def project_stored(
+        self,
+        stored: Mapping[str, Any],
+        projection: RetrieveProjection,
+    ) -> RetrieveResponse:
+        """Apply current reader scope to canonical Retrieval output."""
+        result = restore_retrieval_result(stored)
+        projected = self._projector(result, projection)
+        return RetrieveResponse(
+            contexts=projected.contexts,
+            sources=projected.sources,
+            trace=dict(result.trace),
+            image_descriptions=tuple(result.image_descriptions),
+        )
+
+    async def retrieve(
+        self,
+        request: RetrieveRequest,
+        *,
+        owner_id: str,
+        projection: RetrieveProjection,
+        idempotency_key: str | None = None,
+    ) -> RetrieveResponse:
+        """Create one durable Retrieval and wait through the common lifecycle."""
+        creation = await self.create(
+            request=request,
+            owner_id=owner_id,
+            idempotency_key=idempotency_key,
+        )
+        return await self.wait(
+            owner_id=owner_id,
+            run_id=creation.run.run_id,
+            projection=projection,
+        )
+
+    async def stream(
+        self,
+        *,
+        request: RetrieveRequest,
+        owner_id: str,
+        idempotency_key: str | None = None,
+    ) -> AsyncGenerator[RunEvent]:
+        """Create one durable Retrieval and follow its common ordered events."""
+        creation = await self.create(
+            request=request,
+            owner_id=owner_id,
+            idempotency_key=idempotency_key,
+        )
+        coordinator = self._coordinator
+        if coordinator is None:
+            raise RunRuntimeUnavailableError("Retrieval runtime is unavailable")
+        async with aclosing(
+            coordinator.subscribe(owner_id=owner_id, run_id=creation.run.run_id)
+        ) as events:
+            async for event in events:
+                yield RunEvent.from_runtime(event)
+
+    async def prepare_query_images(self, images: Sequence[Mapping[str, Any]]) -> list[str]:
+        """Describe accepted query images during owned run execution."""
+        return await self._image_preparer(images) if images else []
 
     def warm(self, workspaces: Sequence[str]) -> None:
         """Start or join one owned warm waiter for an identical workspace set."""
@@ -354,30 +642,6 @@ class RetrievalService:
         self._warmups[key] = warmup
         warmup.add_done_callback(
             lambda completed, warm_key=key: self._observe_warmup(warm_key, completed)
-        )
-
-    async def _retrieve(self, request: RetrieveRequest) -> RetrieveResponse:
-        images = tuple(dict(image) for image in request.query_images)
-        descriptions = await self._image_preparer(images) if images else []
-        result = await self.retrieve_result(
-            request.query,
-            workspaces=request.workspaces,
-            retrieval=RetrievalOptions(
-                top_k=request.top_k,
-                chunk_top_k=request.chunk_top_k,
-                federated_rerank=request.federated_rerank,
-            ),
-            bm25_query=request.bm25_query,
-            filters=request.filters,
-            query_images=images,
-            image_descriptions=descriptions,
-        )
-        projected = self._projector(result, request.projection)
-        return RetrieveResponse(
-            contexts=projected.contexts,
-            sources=projected.sources,
-            trace=dict(result.trace),
-            image_descriptions=tuple(descriptions),
         )
 
     async def retrieve_result(
@@ -568,6 +832,16 @@ class RetrievalService:
             logger.debug("Workspace warm-up failed", exc_info=error)
 
 
+def retrieval_response_payload(response: RetrieveResponse) -> dict[str, Any]:
+    """Serialize the shared reader projection for REST and MCP."""
+    return {
+        "contexts": response.contexts,
+        "sources": [dict(source) for source in response.sources],
+        "trace": dict(response.trace),
+        "image_descriptions": list(response.image_descriptions),
+    }
+
+
 def _query_image_digest(blocks: Sequence[Mapping[str, Any]]) -> bytes:
     payload = json.dumps(
         [dict(block) for block in blocks],
@@ -576,6 +850,10 @@ def _query_image_digest(blocks: Sequence[Mapping[str, Any]]) -> bytes:
         ensure_ascii=False,
     ).encode("utf-8")
     return hashlib.sha256(payload).digest()
+
+
+def _query_image_hexdigest(blocks: Sequence[Mapping[str, Any]]) -> str:
+    return _query_image_digest(blocks).hex()
 
 
 def _positive_int_or_none(value: int | None) -> int | None:
@@ -597,9 +875,13 @@ __all__ = [
     "RetrieveProjection",
     "RetrieveRequest",
     "RetrieveResponse",
+    "RetrievalInputError",
     "RetrievalOptions",
+    "RetrievalRunRepository",
+    "RetrievalRunScheduler",
     "RetrievalService",
     "RetrievalSettings",
     "RetrievalTimeoutError",
     "SchemaLookup",
+    "retrieval_response_payload",
 ]

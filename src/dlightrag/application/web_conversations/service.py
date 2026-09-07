@@ -20,6 +20,7 @@ from dlightrag.application.answer_runs import (
 )
 from dlightrag.application.answer_runs.execution import AnswerRunRequest
 from dlightrag.application.answer_runs.routing import RoutingAcceptance
+from dlightrag.application.runs import RunView
 from dlightrag.engine.agent.session.fold import PriorTurns
 from dlightrag.engine.ai.media import thumbnail_bytes
 from dlightrag.engine.answer.history import (
@@ -28,11 +29,12 @@ from dlightrag.engine.answer.history import (
 )
 from dlightrag.engine.answer.resources.models import ResourceInput
 from dlightrag.engine.runtime import (
-    AnswerRunRecord,
     PendingArtifact,
     PendingArtifactReference,
-    answer_run_request_fingerprint,
+    PreparedRunEnvelope,
+    RunKind,
     parse_run_id,
+    run_request_fingerprint,
 )
 
 from .models import (
@@ -98,7 +100,7 @@ def _is_image_mime(mime_type: str | None) -> bool:
 class WebAnswerSubmission:
     """The run and conversation entry one accepted browser submission created."""
 
-    run: AnswerRunRecord
+    run: RunView
     turn_id: str
     turn_number: int
     conversation: ConversationSummary
@@ -129,7 +131,10 @@ class _WebAnswerAcceptor(AnswerRunAcceptor[WebAnswerSubmission]):
         owner_id: str,
         idempotency_key: str,
         idempotency_fingerprint: str,
+        run_kind: RunKind,
     ) -> WebAnswerSubmission | None:
+        if run_kind != "answer":
+            raise ValueError("Web Answer replay requires an Answer run kind")
         creation = await self.store.replay_answer_turn(
             principal_id=owner_id,
             conversation_id=self.conversation_id,
@@ -141,23 +146,19 @@ class _WebAnswerAcceptor(AnswerRunAcceptor[WebAnswerSubmission]):
     async def create_run(
         self,
         *,
-        owner_id: str,
-        prepared_input: Mapping[str, Any],
-        idempotency_fingerprint: str,
-        idempotency_key: str | None = None,
+        envelope: PreparedRunEnvelope,
+        run_id: str,
         resources: Sequence[Mapping[str, Any]] = (),
         artifacts: Sequence[PendingArtifact] = (),
         references: Sequence[PendingArtifactReference] = (),
         routing: RoutingAcceptance | None = None,
     ) -> WebAnswerSubmission | None:
-        if idempotency_key is None:
-            raise ValueError("Web Answer acceptance requires a submission id")
         creation = await self.store.create_answer_turn(
-            principal_id=owner_id,
+            principal_id=envelope.submitted_by,
             conversation_id=self.conversation_id,
-            submission_id=idempotency_key,
-            request=prepared_input,
-            idempotency_fingerprint=idempotency_fingerprint,
+            submission_id=envelope.submission_key,
+            envelope=envelope,
+            run_id=run_id,
             artifacts=artifacts,
             references=references,
             title_hint=self.title_hint,
@@ -546,7 +547,7 @@ class WebConversationService:
             if create_conversation
             else parent.conversation_id
         )
-        fingerprint = answer_run_request_fingerprint(
+        fingerprint = run_request_fingerprint(
             {
                 "conversation_id": conversation_id,
                 "parent_run_id": parent_run_id,
@@ -748,7 +749,7 @@ def _web_answer_request_fingerprint(
     requested_skill: str | None = None,
 ) -> str:
     """Hash only the stable browser submission, before conversation enrichment."""
-    return answer_run_request_fingerprint(
+    return run_request_fingerprint(
         {
             "conversation_id": conversation_id,
             "query": query,

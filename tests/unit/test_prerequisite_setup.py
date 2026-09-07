@@ -24,6 +24,31 @@ def wiz():
     return module
 
 
+def _repository_mineru_backup_names() -> set[str]:
+    return {path.name for path in _ROOT.glob(".env.mineru.bak-*")}
+
+
+@pytest.fixture(autouse=True)
+def _isolate_wizard_mutable_paths(wiz, tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """Keep every setup-managed repository file inside the test sandbox."""
+    repository_backups_before = _repository_mineru_backup_names()
+    isolated_repo = tmp_path / "setup-repository"
+    isolated_repo.mkdir()
+    monkeypatch.setattr(wiz, "REPO_ROOT", isolated_repo)
+    for name, filename in {
+        "CONFIG_PATH": "config.yaml",
+        "ENV_PATH": ".env",
+        "ENV_EXAMPLE_PATH": ".env.example",
+        "MINERU_ENV_PATH": ".env.mineru",
+        "MINERU_ENV_EXAMPLE_PATH": ".env.mineru.example",
+    }.items():
+        monkeypatch.setattr(wiz, name, isolated_repo / filename)
+
+    yield
+
+    assert _repository_mineru_backup_names() == repository_backups_before
+
+
 class _ScriptedPrompter:
     """Feeds pre-scripted answers to the Models step without a TTY."""
 
@@ -49,6 +74,18 @@ class _ScriptedPrompter:
 def test_module_imports(wiz):
     assert wiz.CONFIG_PATH.name == "config.yaml"
     assert wiz.ENV_PATH.name == ".env"
+
+
+def test_parser_backups_stay_in_test_sandbox(wiz, monkeypatch: pytest.MonkeyPatch):
+    for path in (wiz.CONFIG_PATH, wiz.ENV_PATH, wiz.MINERU_ENV_PATH):
+        path.write_text("test-only\n", encoding="utf-8")
+    repository_backups_before = _repository_mineru_backup_names()
+    monkeypatch.setattr(wiz, "validate_config", lambda: None)
+
+    wiz._apply_parser_change(lambda: None)
+
+    assert _repository_mineru_backup_names() == repository_backups_before
+    assert len(list(wiz.MINERU_ENV_PATH.parent.glob(".env.mineru.bak-*"))) == 1
 
 
 def test_inline_script_environment_installs_the_local_product() -> None:
@@ -270,7 +307,7 @@ def test_write_config_rejects_legacy_schema_with_actionable_message(wiz, tmp_pat
     src = tmp_path / "config.yaml"
     src.write_text("llm:\n  default:\n    model: old\n", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="3.0 eight-section schema"):
+    with pytest.raises(ValueError, match="3.0 nine-section schema"):
         wiz.write_config_yaml(src, llm_default={"model": "new"})
 
 

@@ -81,9 +81,9 @@ def test_constructor_overrides_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 def test_nested_runtime_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setitem(DlightragConfig.model_config, "env_file", None)
-    monkeypatch.setenv("DLIGHTRAG_ANSWER__RUNTIME__ANSWER_WORKER_CONCURRENCY", "7")
+    monkeypatch.setenv("DLIGHTRAG_RUNTIME__QUERY__WORKER_CONCURRENCY", "7")
 
-    assert DlightragConfig().answer.runtime.answer_worker_concurrency == 7
+    assert DlightragConfig().runtime.query.worker_concurrency == 7
 
 
 def test_flat_runtime_environment_is_rejected(

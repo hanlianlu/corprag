@@ -35,17 +35,13 @@ def _memory_embedder(
 
 
 def _actionable_error(exc: Exception) -> str:
-    msg = f"{type(exc).__name__}: {exc}"
+    """Return fixed operator guidance without reflecting endpoints or secrets."""
     text = str(exc).lower()
-    if "connection" in text and ("refused" in text or "reset" in text):
-        return f"{msg}. Check DLIGHTRAG_STORAGE__POSTGRES__* or model server settings."
-    if "asyncpg" in type(exc).__module__:
-        return f"{msg}. Check DLIGHTRAG_STORAGE__POSTGRES__HOST/PORT/USER/PASSWORD."
-    if "timeout" in text or "timed out" in text:
-        return f"{msg}. Service may be overloaded or unreachable."
     if "authentication" in text or "password" in text or "denied" in text:
-        return f"{msg}. Check API keys or database credentials."
-    return msg
+        return "Dependency authentication failed; check deployment credentials."
+    if "connection" in text or "timeout" in text or "timed out" in text:
+        return "A configured dependency is unreachable; check deployment endpoints."
+    return f"Dependency initialization failed ({type(exc).__name__})."
 
 
 def _initialize_process(config: DlightragConfig) -> None:
@@ -74,28 +70,33 @@ def _compose(config: DlightragConfig) -> _ApplicationComponents:
     from PIL import Image
 
     from dlightrag.adapters.observability import LangfuseTelemetry
-    from dlightrag.adapters.postgres.answer.answer_runs import PGAnswerRunStore
     from dlightrag.adapters.postgres.answer.memory_settings import PGMemorySettingsStore
     from dlightrag.adapters.postgres.corpus.corpus import PGReadinessProbe, build_pg_corpus_backend
     from dlightrag.adapters.postgres.corpus.file_panel import PGFilePanelStore
     from dlightrag.adapters.postgres.corpus.pg_metadata_index import PGMetadataIndex
     from dlightrag.adapters.postgres.corpus.pg_metadata_search import PGMetadataSearchStore
     from dlightrag.adapters.postgres.model_catalogue import PGModelCatalogueStore
+    from dlightrag.adapters.postgres.runtime import PGRunBlobStore, PGRunStore
     from dlightrag.adapters.postgres.web.web_conversations import PGWebConversationStore
     from dlightrag.application.answer_runs import AnswerService
     from dlightrag.application.answer_runs.capabilities import (
         AnswerCapabilityCoordinator,
         AnswerCapabilityView,
     )
-    from dlightrag.application.corpus_admin import CorpusAdmin
+    from dlightrag.application.corpus_admin import (
+        CorpusAdmin,
+        CorpusMutationExecutor,
+        CorpusMutationService,
+    )
     from dlightrag.application.health import ApplicationHealth
     from dlightrag.application.memory import MemoryService
     from dlightrag.application.model_catalogue import ModelCatalogueAdmin
-    from dlightrag.application.retrieval import RetrievalService
+    from dlightrag.application.retrieval import RetrievalExecutor, RetrievalService
     from dlightrag.application.retrieval._answer_projection import (
         AnswerQueryImagePreparer,
         project_answer_retrieval,
     )
+    from dlightrag.application.runs import RunService
     from dlightrag.application.settings import (
         answer_capability_settings,
         answer_executor_settings,
@@ -117,13 +118,12 @@ def _compose(config: DlightragConfig) -> _ApplicationComponents:
     from dlightrag.engine.ai.fingerprints import model_fingerprint
     from dlightrag.engine.ai.media import MAX_DECODE_IMAGE_PIXELS
     from dlightrag.engine.ai.scheduler import ModelScheduler
-    from dlightrag.engine.ai.settings import MODEL_ROLE_NAMES
+    from dlightrag.engine.ai.settings import MODEL_ROLE_NAMES, ModelRole
     from dlightrag.engine.ai.telemetry import safe_log_text
     from dlightrag.engine.ai.vision import ModelImageCapabilities
     from dlightrag.engine.answer.execution import AnswerExecutor, AnswerResourceResolver
     from dlightrag.engine.answer.model_runtime import AnswerModelRuntime
     from dlightrag.engine.rag.corpus.downloads import SourceDownloadService
-    from dlightrag.engine.rag.corpus.ingestion.jobs import IngestJobCoordinator
     from dlightrag.engine.rag.retrieval.federation import FederatedReranker
     from dlightrag.engine.rag.retrieval.rerank import build_product_reranker
     from dlightrag.engine.rag.retrieval.runtime import RetrievalPlannerRuntime
@@ -131,7 +131,7 @@ def _compose(config: DlightragConfig) -> _ApplicationComponents:
     from dlightrag.engine.rag.workspace.ports import CorpusSchemaError
     from dlightrag.engine.rag.workspace.workspace_rag import WorkspaceRag
     from dlightrag.engine.rag.workspace.workspaces import normalize_workspace
-    from dlightrag.engine.runtime import RunCoordinator
+    from dlightrag.engine.runtime import RunCoordinator, RunExecutor, RunKind
 
     # Large document scans are DlightRAG product policy, not an AI package import side effect.
     Image.MAX_IMAGE_PIXELS = MAX_DECODE_IMAGE_PIXELS
@@ -180,7 +180,21 @@ def _compose(config: DlightragConfig) -> _ApplicationComponents:
         logger.info("Created WorkspaceRag for workspace '%s'", safe_log_text(workspace_id))
         return runtime
 
-    pool = WorkspacePool(build=build_workspace)
+    default_workspace = normalize_workspace(config.deployment.workspace)
+
+    def workspace_unavailable(workspace_id: str) -> None:
+        if workspace_id == default_workspace:
+            health.mark_component_degraded("corpus_storage")
+
+    def workspace_available(workspace_id: str) -> None:
+        if workspace_id == default_workspace:
+            health.mark_component_healthy("corpus_storage")
+
+    pool = WorkspacePool(
+        build=build_workspace,
+        on_workspace_unavailable=workspace_unavailable,
+        on_workspace_available=workspace_available,
+    )
     cursor_secrets = CursorSecretBox(
         (
             f"{config.storage.postgres.host}\0"
@@ -194,11 +208,6 @@ def _compose(config: DlightragConfig) -> _ApplicationComponents:
         settings=corpus_admin_settings(config),
         pool=pool,
         maintenance=corpus_backend.maintenance,
-        ingest_jobs=IngestJobCoordinator(
-            lambda workspace: pool.acquire(workspace),
-            input_root=config.input_dir_path,
-            store=corpus_backend.ingest_jobs,
-        ),
         file_panel=PGFilePanelStore(),
         metadata_search=PGMetadataSearchStore(),
         promotion_worker=corpus_backend.promotion,
@@ -274,11 +283,22 @@ def _compose(config: DlightragConfig) -> _ApplicationComponents:
         projector=project_answer_retrieval,
         settings=retrieval_settings(config),
         telemetry=telemetry,
+        model_profile_for_role=lambda role: capabilities.model_profile(role),
+        model_fingerprint_for_role=lambda role: model_fingerprint(
+            model_settings_for_role(config, role)
+        ),
         federated_reranker_factory=federated_reranker_factory,
     )
 
-    run_store = PGAnswerRunStore(
-        retention_seconds=config.answer.runtime.answer_run_retention_days * 24 * 3600
+    run_blob_store = PGRunBlobStore()
+    run_store = PGRunStore(
+        retention_seconds=config.runtime.run_retention_days * 24 * 3600,
+        query_max_active_runs=config.runtime.query.max_active_runs,
+        query_max_nonterminal_runs=config.runtime.query.max_nonterminal_runs,
+        corpus_mutation_max_active_runs=config.runtime.corpus_mutation.max_active_runs,
+        corpus_mutation_max_nonterminal_runs=(config.runtime.corpus_mutation.max_nonterminal_runs),
+        promotion_doc_threshold=config.corpus.promotion.doc_threshold,
+        promotion_chunk_threshold=config.corpus.promotion.chunk_threshold,
     )
     memory_embedder = _memory_embedder(config, scheduler=scheduler, telemetry=telemetry)
     memory_store = PostgresMemoryStore(
@@ -289,7 +309,7 @@ def _compose(config: DlightragConfig) -> _ApplicationComponents:
     memory = MemoryService(
         memory_store,
         settings_store=memory_settings,
-        superseded_retention_days=config.answer.runtime.answer_run_retention_days,
+        superseded_retention_days=config.runtime.run_retention_days,
         # Stable across workers sharing the operational database. Cursors
         # carry no authorization state and expire on credential rotation.
         memory_list_cursor_secret=cursor_secrets.derive("dlightrag-memory-list-cursor"),
@@ -311,6 +331,7 @@ def _compose(config: DlightragConfig) -> _ApplicationComponents:
     )
     answer_executor = AnswerExecutor(
         store=run_store,
+        blob_store=run_blob_store,
         pool=pool,
         warm=retrieval.warm,
         retrieve=retrieval.retrieve_result,
@@ -331,11 +352,48 @@ def _compose(config: DlightragConfig) -> _ApplicationComponents:
         memory_capability_current=memory.capability_current,
         external_tools=outbound_tools,
         skills_bundle_factory=skills_bundle_factory(config, ensure_dirs=True),
+        on_dependency_unavailable=health.mark_component_degraded,
+        on_dependency_recovered=health.mark_component_healthy,
     )
+
+    model_roles: dict[str, ModelRole] = {name: name for name in MODEL_ROLE_NAMES}
+
+    def retrieval_model_fingerprint(role: str):
+        selected_role = model_roles.get(role)
+        if selected_role is None:
+            raise ValueError(f"unknown pinned Retrieval model role: {role}")
+        return model_fingerprint(model_settings_for_role(config, selected_role))
+
+    retrieval_executor = RetrievalExecutor(
+        operation=retrieval,
+        timeout_seconds=config.corpus.retrieval.timeout,
+        model_fingerprint_for_role=retrieval_model_fingerprint,
+        on_dependency_unavailable=health.mark_component_degraded,
+        on_dependency_recovered=health.mark_component_healthy,
+    )
+    executors: dict[RunKind, RunExecutor] = {
+        "answer": answer_executor,
+        "retrieval": retrieval_executor,
+    }
+    if not config.is_reader:
+        executors["corpus_mutation"] = CorpusMutationExecutor(
+            pool=pool,
+            maintenance=corpus_backend.maintenance,
+            store=run_store,
+        )
     coordinator = RunCoordinator(
         store=run_store,
-        executor=answer_executor,
-        answer_worker_concurrency=config.answer.runtime.answer_worker_concurrency,
+        executors=executors,
+        query_worker_concurrency=config.runtime.query.worker_concurrency,
+        corpus_mutation_worker_concurrency=(config.runtime.corpus_mutation.worker_concurrency),
+    )
+    retrieval.bind_runtime(store=run_store, coordinator=coordinator)
+
+    runs = RunService(store=run_store, scheduler=coordinator)
+    corpus_mutations = CorpusMutationService(
+        input_root=config.input_dir_path,
+        store=run_store,
+        coordinator=coordinator,
     )
 
     async def _cancel_local(owner: str, run_id: str) -> None:
@@ -348,6 +406,7 @@ def _compose(config: DlightragConfig) -> _ApplicationComponents:
 
     answers = AnswerService(
         store=run_store,
+        blob_store=run_blob_store,
         coordinator=coordinator,
         retrieval=retrieval,
         capabilities=capabilities,
@@ -362,6 +421,7 @@ def _compose(config: DlightragConfig) -> _ApplicationComponents:
         # Stable across workers sharing the operational database. Cursors
         # carry no authorization state and expire on credential rotation.
         child_roster_cursor_secret=cursor_secrets.derive("dlightrag-child-roster-cursor"),
+        run_retention_seconds=config.runtime.run_retention_days * 24 * 3600,
     )
     web_store = PGWebConversationStore(run_store=run_store)
     web_conversations = WebConversationService(
@@ -384,7 +444,9 @@ def _compose(config: DlightragConfig) -> _ApplicationComponents:
         coordinator=coordinator,
         cancellation_listener=cancellation_listener,
         corpora=corpora,
+        corpus_mutations=corpus_mutations,
         retrieval=retrieval,
+        runs=runs,
         answers=answers,
         memory=memory,
         memory_store=memory_store,

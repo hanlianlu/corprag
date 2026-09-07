@@ -25,12 +25,13 @@ from typing import Any
 import asyncpg
 import pytest
 
-from dlightrag.adapters.postgres.answer.answer_runs import (
-    PGAnswerRunStore,
+from dlightrag.adapters.postgres.runtime.run_store import (
+    PGRunStore,
 )
 from dlightrag.adapters.postgres.web.web_conversations import (
     PGWebConversationStore,
 )
+from dlightrag.application.answer_runs.envelope import accepted_input_envelope
 from dlightrag.application.web_conversations import (
     ConversationCursor,
     ConversationHistoryPageRequest,
@@ -41,11 +42,13 @@ from dlightrag.engine.runtime import (
     IdempotencyKeyConflict,
     PendingArtifact,
     PendingArtifactReference,
+    PreparedRunEnvelope,
+    RunAccessScope,
     RunDeletion,
-    answer_run_request_fingerprint,
     artifact_digest,
+    run_request_fingerprint,
 )
-from tests.conftest import FingerprintingAnswerRunStore
+from tests.conftest import FingerprintingRunStore
 
 pytestmark = [
     pytest.mark.integration,
@@ -110,14 +113,14 @@ async def pool(db_name: str) -> AsyncIterator[Any]:
 
 
 @pytest.fixture
-async def runs(pool: Any) -> PGAnswerRunStore:
-    store = FingerprintingAnswerRunStore(pool=pool)
+async def runs(pool: Any) -> FingerprintingRunStore:
+    store = FingerprintingRunStore(pool=pool)
     await store.initialize()
     return store
 
 
 @pytest.fixture
-async def store(pool: Any, runs: PGAnswerRunStore) -> PGWebConversationStore:
+async def store(pool: Any, runs: FingerprintingRunStore) -> PGWebConversationStore:
     created = PGWebConversationStore(pool=pool, run_store=runs)
     await created.initialize()
     return created
@@ -209,7 +212,7 @@ class _MeasuredPool:
         return _MeasuredAcquire(self._pool.acquire(), self._metrics)
 
 
-class _MeasuredRunStore(PGAnswerRunStore):
+class _MeasuredRunStore(PGRunStore):
     def __init__(self, *, pool: Any, fail_on_call: int | None = None) -> None:
         super().__init__(pool=pool)
         self.fail_on_call = fail_on_call
@@ -256,6 +259,22 @@ def _request(query: str = "why", **extra: Any) -> dict[str, Any]:
     }
 
 
+def _turn_envelope(
+    *, owner: str, request: dict[str, Any], submission_id: str, fingerprint: str
+) -> PreparedRunEnvelope:
+    return PreparedRunEnvelope(
+        run_kind="answer",
+        lane="query",
+        submitted_by=owner,
+        access_scope=RunAccessScope(kind="owner", scope_id=owner),
+        submission_key=submission_id,
+        request_fingerprint=fingerprint,
+        payload=request,
+        accepted_input=accepted_input_envelope(request),
+        retention_seconds=365 * 24 * 60 * 60,
+    )
+
+
 async def _conversation(store: PGWebConversationStore, owner: str = _OWNER) -> str:
     row = await store.create_conversation(owner)
     return str(row["conversation_id"])
@@ -277,16 +296,23 @@ async def _submit(
         **(request if request is not None else _request()),
         "agent_session_id": conversation_id,
     }
+    effective_submission_id = submission_id or str(uuid.uuid4())
+    fingerprint = (
+        idempotency_fingerprint
+        if idempotency_fingerprint is not None
+        else run_request_fingerprint(effective_request)
+    )
     return await store.create_answer_turn(
         principal_id=owner,
         conversation_id=conversation_id,
-        submission_id=submission_id or str(uuid.uuid4()),
-        request=effective_request,
-        idempotency_fingerprint=(
-            idempotency_fingerprint
-            if idempotency_fingerprint is not None
-            else answer_run_request_fingerprint(effective_request)
+        submission_id=effective_submission_id,
+        envelope=_turn_envelope(
+            owner=owner,
+            request=effective_request,
+            submission_id=effective_submission_id,
+            fingerprint=fingerprint,
         ),
+        run_id=str(uuid.uuid7()),
         artifacts=artifacts or [],
         references=references or [],
         title_hint="why",
@@ -298,7 +324,7 @@ async def _finish(pool: Any, run_id: str, *, status: str, error: str | None = No
     """Drive one run to a terminal state the way its worker eventually would."""
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE dlightrag_answer_runs "
+            "UPDATE dlightrag_runs "
             "SET status = $2, finished_at = NOW(), prepared_input_json = NULL, "
             "    result_json = CASE WHEN $2 = 'succeeded' "
             '        THEN \'{"answer": "done"}\'::jsonb ELSE NULL END, '
@@ -313,8 +339,10 @@ async def _finish(pool: Any, run_id: str, *, status: str, error: str | None = No
 async def _backdate_finish(pool: Any, run_id: str, *, days: int) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE dlightrag_answer_runs "
-            "SET finished_at = NOW() - ($2 * INTERVAL '1 day') WHERE run_id = $1",
+            "UPDATE dlightrag_runs "
+            "SET finished_at = NOW() - ($2 * INTERVAL '1 day'), "
+            "purge_after = NOW() - ($2 * INTERVAL '1 day') "
+            "+ make_interval(secs => retention_seconds::double precision) WHERE run_id = $1",
             uuid.UUID(run_id),
             days,
         )
@@ -339,11 +367,14 @@ async def _bulk_linked_runs(
 ) -> None:
     await conn.execute(
         """
-        INSERT INTO dlightrag_answer_runs (
-            owner_id, run_id, prepared_input_json, request_fingerprint
+        INSERT INTO dlightrag_runs (
+            owner_id, run_id, run_kind, lane, submitted_by, access_scope_kind,
+            submission_key, prepared_input_json, accepted_input_json,
+            request_fingerprint, retention_seconds
         )
-        SELECT $1, md5('run:' || series::text)::uuid, '{}'::jsonb,
-               md5('fingerprint:' || series::text)
+        SELECT $1, md5('run:' || series::text)::uuid, 'answer', 'query', $1, 'owner',
+               md5('submission:' || series::text), '{}'::jsonb, '{}'::jsonb,
+               md5('fingerprint:' || series::text), 31536000
         FROM generate_series(1, $2) AS series
         """,
         _OWNER,
@@ -401,7 +432,7 @@ async def test_a_submission_commits_the_run_bytes_and_turn_together(
         row = await conn.fetchrow(
             "SELECT t.answer_run_id::text AS run_id, r.status "
             "FROM web_conversation_turns AS t "
-            "JOIN dlightrag_answer_runs AS r "
+            "JOIN dlightrag_runs AS r "
             "  ON r.owner_id = t.principal_id AND r.run_id = t.answer_run_id "
             "WHERE t.turn_id = $1::text::uuid",
             creation.turn.turn_id,
@@ -427,7 +458,7 @@ async def test_first_submission_creates_conversation_run_and_turn_together(
     assert creation.summary["conversation_id"] == conversation_id
     assert creation.turn.turn_number == 1
     assert await _count(pool, "web_conversations") == 1
-    assert await _count(pool, "dlightrag_answer_runs") == 1
+    assert await _count(pool, "dlightrag_runs") == 1
     assert await _count(pool, "web_conversation_turns") == 1
 
 
@@ -454,7 +485,7 @@ async def test_concurrent_first_submission_replays_one_atomic_conversation(
     assert {result.summary["conversation_id"] for result in accepted} == {conversation_id}
     assert len({result.turn.answer_run_id for result in accepted}) == 1
     assert await _count(pool, "web_conversations") == 1
-    assert await _count(pool, "dlightrag_answer_runs") == 1
+    assert await _count(pool, "dlightrag_runs") == 1
     assert await _count(pool, "web_conversation_turns") == 1
 
 
@@ -464,7 +495,7 @@ async def test_a_submission_to_an_unknown_conversation_writes_nothing(
     creation = await _submit(store, str(uuid.uuid4()))
 
     assert creation is None
-    assert await _count(pool, "dlightrag_answer_runs") == 0
+    assert await _count(pool, "dlightrag_runs") == 0
     assert await _count(pool, "web_conversation_turns") == 0
 
 
@@ -476,7 +507,7 @@ async def test_a_foreign_conversation_is_never_written_to(
     creation = await _submit(store, conversation_id, owner=_OWNER)
 
     assert creation is None
-    assert await _count(pool, "dlightrag_answer_runs") == 0
+    assert await _count(pool, "dlightrag_runs") == 0
 
 
 # ---------------------------------------------------------------------------
@@ -510,12 +541,18 @@ async def test_forked_conversation_maps_to_a_new_lane_in_the_parent_session(
         "parent_run_id": str(uuid.uuid4()),
         "continuation_kind": "fork",
     }
+    submission_id = str(uuid.uuid4())
     created = await store.create_answer_turn(
         principal_id=_OWNER,
         conversation_id=branch_conversation,
-        submission_id=str(uuid.uuid4()),
-        request=request,
-        idempotency_fingerprint=answer_run_request_fingerprint(request),
+        submission_id=submission_id,
+        envelope=_turn_envelope(
+            owner=_OWNER,
+            request=request,
+            submission_id=submission_id,
+            fingerprint=run_request_fingerprint(request),
+        ),
+        run_id=str(uuid.uuid7()),
         artifacts=(),
         references=(),
         title_hint="branch",
@@ -544,7 +581,7 @@ async def test_replaying_a_submission_returns_the_same_run_and_turn(
     assert second.replayed is True
     assert second.turn.turn_id == first.turn.turn_id
     assert second.turn.answer_run_id == first.turn.answer_run_id
-    assert await _count(pool, "dlightrag_answer_runs") == 1
+    assert await _count(pool, "dlightrag_runs") == 1
     assert await _count(pool, "web_conversation_turns") == 1
 
 
@@ -553,7 +590,7 @@ async def test_public_fingerprint_controls_atomic_web_replay(
 ) -> None:
     conversation_id = await _conversation(store)
     submission_id = str(uuid.uuid4())
-    public_fingerprint = answer_run_request_fingerprint(_request())
+    public_fingerprint = run_request_fingerprint(_request())
 
     first = await _submit(
         store,
@@ -579,9 +616,9 @@ async def test_public_fingerprint_controls_atomic_web_replay(
             conversation_id,
             submission_id=submission_id,
             request=_request(pinned_models=[{"revision": "old"}]),
-            idempotency_fingerprint=answer_run_request_fingerprint(_request("changed")),
+            idempotency_fingerprint=run_request_fingerprint(_request("changed")),
         )
-    assert await _count(pool, "dlightrag_answer_runs") == 1
+    assert await _count(pool, "dlightrag_runs") == 1
 
 
 async def test_concurrent_identical_submissions_create_exactly_one_turn(
@@ -596,7 +633,7 @@ async def test_concurrent_identical_submissions_create_exactly_one_turn(
 
     run_ids = {result.turn.answer_run_id for result in results if result is not None}
     assert len(run_ids) == 1
-    assert await _count(pool, "dlightrag_answer_runs") == 1
+    assert await _count(pool, "dlightrag_runs") == 1
     assert await _count(pool, "web_conversation_turns") == 1
 
 
@@ -615,7 +652,7 @@ async def test_reusing_a_submission_with_different_input_is_a_conflict(
             request=_request("a different question"),
         )
 
-    assert await _count(pool, "dlightrag_answer_runs") == 1
+    assert await _count(pool, "dlightrag_runs") == 1
 
 
 async def test_reusing_a_submission_in_another_conversation_is_a_conflict(
@@ -673,14 +710,14 @@ async def test_the_same_submission_in_two_conversations_at_once_is_a_conflict(
     rejected = [item for item in outcomes if isinstance(item, BaseException)]
     assert len(accepted) == 1
     assert [type(error) for error in rejected] == [ConversationSubmissionConflict]
-    assert await _count(pool, "dlightrag_answer_runs") == 1
+    assert await _count(pool, "dlightrag_runs") == 1
     assert await _count(pool, "web_conversation_turns") == 1
     assert await _count(pool, "dlightrag_blobs") == 1
     assert await _count(pool, "dlightrag_answer_run_artifacts") == 1
 
 
 async def test_the_submission_key_is_owner_wide_not_conversation_scoped(
-    store: PGWebConversationStore, runs: PGAnswerRunStore
+    store: PGWebConversationStore, runs: FingerprintingRunStore
 ) -> None:
     """The run's idempotency key is the submission id in the owner's namespace."""
     conversation_id = await _conversation(store)
@@ -691,7 +728,7 @@ async def test_the_submission_key_is_owner_wide_not_conversation_scoped(
     assert creation is not None
     record = await runs.get_run(owner_id=_OWNER, run_id=creation.turn.answer_run_id)
     assert record is not None
-    assert record.idempotency_key == submission_id
+    assert record.submission_key == submission_id
 
 
 async def test_two_principals_may_use_the_same_submission_id(
@@ -705,11 +742,11 @@ async def test_two_principals_may_use_the_same_submission_id(
     await _submit(store, theirs, owner=_OTHER_OWNER, submission_id=submission_id)
 
     assert await _count(pool, "web_conversation_turns") == 2
-    assert await _count(pool, "dlightrag_answer_runs") == 2
+    assert await _count(pool, "dlightrag_runs") == 2
 
 
 async def test_a_run_created_outside_a_conversation_keeps_the_same_key_namespace(
-    store: PGWebConversationStore, runs: PGAnswerRunStore
+    store: PGWebConversationStore, runs: FingerprintingRunStore
 ) -> None:
     conversation_id = await _conversation(store)
     submission_id = str(uuid.uuid4())
@@ -720,7 +757,7 @@ async def test_a_run_created_outside_a_conversation_keeps_the_same_key_namespace
         await runs.create_run(
             owner_id=_OWNER,
             prepared_input=other_request,
-            idempotency_fingerprint=answer_run_request_fingerprint(other_request),
+            idempotency_fingerprint=run_request_fingerprint(other_request),
             idempotency_key=submission_id,
         )
 
@@ -955,7 +992,7 @@ async def test_a_snapshot_projects_each_turn_from_its_run(
     assert page is not None
     assert [turn.turn_number for turn in page.turns] == [1, 2]
     assert [turn.run.status for turn in page.turns] == ["queued", "succeeded"]
-    assert (page.turns[0].run.prepared_input or {})["query"] == "first"
+    assert page.turns[0].run.request_input()["query"] == "first"
     assert page.turns[1].run.result == {"answer": "done"}
 
 
@@ -986,14 +1023,14 @@ async def _hold_conversation_lock(conn: Any, conversation_id: str) -> Any:
     return transaction
 
 
-async def _link_turn(conn: Any, runs: PGAnswerRunStore, conversation_id: str) -> str:
+async def _link_turn(conn: Any, runs: FingerprintingRunStore, conversation_id: str) -> str:
     """Create the run and its turn the way an accepted submission would."""
     request = _request("late")
     creation = await runs.create_run_in(
         conn,
         owner_id=_OWNER,
         request=request,
-        idempotency_fingerprint=answer_run_request_fingerprint(request),
+        idempotency_fingerprint=run_request_fingerprint(request),
     )
     await conn.execute(
         "INSERT INTO web_conversation_turns "
@@ -1009,7 +1046,7 @@ async def _link_turn(conn: Any, runs: PGAnswerRunStore, conversation_id: str) ->
 
 
 async def test_deleting_a_conversation_never_orphans_a_turn_committed_behind_it(
-    store: PGWebConversationStore, runs: PGAnswerRunStore, pool: Any
+    store: PGWebConversationStore, runs: FingerprintingRunStore, pool: Any
 ) -> None:
     """The deleter must snapshot run ids under the conversation lock, not before it."""
     conversation_id = await _conversation(store)
@@ -1023,11 +1060,11 @@ async def test_deleting_a_conversation_never_orphans_a_turn_committed_behind_it(
 
     assert await deletion is True
     assert await _count(pool, "web_conversation_turns") == 0
-    assert await _count(pool, "dlightrag_answer_runs") == 0
+    assert await _count(pool, "dlightrag_runs") == 0
 
 
 async def test_deleting_every_conversation_never_orphans_a_turn_committed_behind_it(
-    store: PGWebConversationStore, runs: PGAnswerRunStore, pool: Any
+    store: PGWebConversationStore, runs: FingerprintingRunStore, pool: Any
 ) -> None:
     conversation_id = await _conversation(store)
 
@@ -1040,11 +1077,11 @@ async def test_deleting_every_conversation_never_orphans_a_turn_committed_behind
 
     assert await deletion == 1
     assert await _count(pool, "web_conversation_turns") == 0
-    assert await _count(pool, "dlightrag_answer_runs") == 0
+    assert await _count(pool, "dlightrag_runs") == 0
 
 
 async def test_two_delete_all_callers_wait_for_a_concurrent_submission_without_deadlock(
-    store: PGWebConversationStore, runs: PGAnswerRunStore, pool: Any
+    store: PGWebConversationStore, runs: FingerprintingRunStore, pool: Any
 ) -> None:
     conversation_id = await _conversation(store)
 
@@ -1061,7 +1098,7 @@ async def test_two_delete_all_callers_wait_for_a_concurrent_submission_without_d
     assert await runs.get_run(owner_id=_OWNER, run_id=late_run_id) is None
     assert await _count(pool, "web_conversations") == 0
     assert await _count(pool, "web_conversation_turns") == 0
-    assert await _count(pool, "dlightrag_answer_runs") == 0
+    assert await _count(pool, "dlightrag_runs") == 0
 
 
 async def test_deleting_a_conversation_deletes_its_runs_and_frees_its_bytes(
@@ -1090,7 +1127,7 @@ async def test_deleting_a_conversation_deletes_its_runs_and_frees_its_bytes(
 
     assert await store.delete_conversation(_OWNER, conversation_id) is True
 
-    assert await _count(pool, "dlightrag_answer_runs") == 0
+    assert await _count(pool, "dlightrag_runs") == 0
     assert await _count(pool, "dlightrag_answer_run_artifacts") == 0
     assert await _count(pool, "dlightrag_blobs") == 0
     assert await _count(pool, "web_conversation_turns") == 0
@@ -1119,7 +1156,7 @@ async def test_deletion_keeps_bytes_another_run_still_references(
     await store.delete_conversation(_OWNER, doomed)
 
     assert await _count(pool, "dlightrag_blobs", owner_id=_OWNER, digest=digest) == 1
-    assert await _count(pool, "dlightrag_answer_runs") == 1
+    assert await _count(pool, "dlightrag_runs") == 1
 
 
 async def test_deleting_every_conversation_deletes_every_linked_run(
@@ -1132,8 +1169,8 @@ async def test_deleting_every_conversation_deletes_every_linked_run(
 
     assert await store.delete_all_conversations(_OWNER) == 1
 
-    assert await _count(pool, "dlightrag_answer_runs", owner_id=_OWNER) == 0
-    assert await _count(pool, "dlightrag_answer_runs", owner_id=_OTHER_OWNER) == 1
+    assert await _count(pool, "dlightrag_runs", owner_id=_OWNER) == 0
+    assert await _count(pool, "dlightrag_runs", owner_id=_OTHER_OWNER) == 1
 
 
 async def test_ten_thousand_linked_runs_delete_with_a_bounded_client_working_set(
@@ -1179,7 +1216,7 @@ async def test_ten_thousand_linked_runs_delete_with_a_bounded_client_working_set
     assert metrics.queries == (5 * batch_count) + 4
     assert await _count(pool, "web_conversations") == 0
     assert await _count(pool, "web_conversation_turns") == 0
-    assert await _count(pool, "dlightrag_answer_runs") == 0
+    assert await _count(pool, "dlightrag_runs") == 0
     assert await _count(pool, "dlightrag_answer_run_artifacts") == 0
     assert await _count(pool, "dlightrag_blobs") == 0
 
@@ -1299,7 +1336,7 @@ async def test_failure_after_multiple_batches_rolls_back_runs_blobs_sessions_and
     assert metrics.outer_transactions == 1
     assert await _count(pool, "web_conversations") == 1
     assert await _count(pool, "web_conversation_turns") == total
-    assert await _count(pool, "dlightrag_answer_runs") == total
+    assert await _count(pool, "dlightrag_runs") == total
     assert await _count(pool, "dlightrag_answer_run_artifacts") == total
     assert await _count(pool, "dlightrag_blobs") == total
     assert await _count(pool, "dlightrag_answer_run_routing") == total
@@ -1331,12 +1368,18 @@ async def test_a_shared_fork_session_is_cleaned_only_after_its_final_routing_ref
         "parent_run_id": parent_creation.turn.answer_run_id,
         "continuation_kind": "fork",
     }
+    submission_id = str(uuid.uuid4())
     fork_creation = await store.create_answer_turn(
         principal_id=_OWNER,
         conversation_id=fork_conversation,
-        submission_id=str(uuid.uuid4()),
-        request=request,
-        idempotency_fingerprint=answer_run_request_fingerprint(request),
+        submission_id=submission_id,
+        envelope=_turn_envelope(
+            owner=_OWNER,
+            request=request,
+            submission_id=submission_id,
+            fingerprint=run_request_fingerprint(request),
+        ),
+        run_id=str(uuid.uuid7()),
         title_hint="fork",
         create_conversation=True,
         forked_from_conversation_id=parent_conversation,
@@ -1353,7 +1396,7 @@ async def test_a_shared_fork_session_is_cleaned_only_after_its_final_routing_ref
 
 
 async def test_a_successful_linked_run_prunes_after_the_retention_floor(
-    store: PGWebConversationStore, runs: PGAnswerRunStore, pool: Any
+    store: PGWebConversationStore, runs: FingerprintingRunStore, pool: Any
 ) -> None:
     """The unified retention clock applies to conversation-linked runs too."""
     conversation_id = await _conversation(store)
@@ -1389,7 +1432,7 @@ async def test_a_successful_linked_run_prunes_after_the_retention_floor(
 
 async def test_empty_conversation_rebases_to_a_fresh_main_lane_after_session_retention(
     store: PGWebConversationStore,
-    runs: PGAnswerRunStore,
+    runs: FingerprintingRunStore,
     pool: Any,
 ) -> None:
     conversation_id = await _conversation(store)
@@ -1422,7 +1465,7 @@ async def test_empty_conversation_rebases_to_a_fresh_main_lane_after_session_ret
 
 async def test_session_delete_wins_race_before_empty_conversation_acceptance(
     store: PGWebConversationStore,
-    runs: PGAnswerRunStore,
+    runs: FingerprintingRunStore,
     pool: Any,
 ) -> None:
     conversation_id = await _conversation(store)
@@ -1467,7 +1510,7 @@ async def test_session_delete_wins_race_before_empty_conversation_acceptance(
 
 
 async def test_an_expired_event_log_is_still_trimmed_for_a_linked_run(
-    store: PGWebConversationStore, runs: PGAnswerRunStore, pool: Any
+    store: PGWebConversationStore, runs: FingerprintingRunStore, pool: Any
 ) -> None:
     """Event trim uses the same retention clock, not a separate exemption."""
     conversation_id = await _conversation(store)
@@ -1486,7 +1529,7 @@ async def test_an_expired_event_log_is_still_trimmed_for_a_linked_run(
 
 @pytest.mark.parametrize("status", ["failed", "cancelled"])
 async def test_a_failed_or_cancelled_linked_run_prunes_and_cascades_its_turn(
-    store: PGWebConversationStore, runs: PGAnswerRunStore, pool: Any, status: str
+    store: PGWebConversationStore, runs: FingerprintingRunStore, pool: Any, status: str
 ) -> None:
     conversation_id = await _conversation(store)
     creation = await _submit(store, conversation_id)
@@ -1507,13 +1550,13 @@ async def test_a_failed_or_cancelled_linked_run_prunes_and_cascades_its_turn(
 
 
 async def test_an_unlinked_successful_run_still_prunes(
-    store: PGWebConversationStore, runs: PGAnswerRunStore, pool: Any
+    store: PGWebConversationStore, runs: FingerprintingRunStore, pool: Any
 ) -> None:
     request = _request()
     creation = await runs.create_run(
         owner_id=_OWNER,
         prepared_input=request,
-        idempotency_fingerprint=answer_run_request_fingerprint(request),
+        idempotency_fingerprint=run_request_fingerprint(request),
     )
     await _finish(pool, creation.run.run_id, status="succeeded")
     await _backdate_finish(pool, creation.run.run_id, days=370)
@@ -1522,7 +1565,7 @@ async def test_an_unlinked_successful_run_still_prunes(
 
 
 async def test_deleting_a_run_row_cascades_its_conversation_turn(
-    store: PGWebConversationStore, runs: PGAnswerRunStore, pool: Any
+    store: PGWebConversationStore, runs: FingerprintingRunStore, pool: Any
 ) -> None:
     conversation_id = await _conversation(store)
     creation = await _submit(store, conversation_id)
@@ -1534,7 +1577,7 @@ async def test_deleting_a_run_row_cascades_its_conversation_turn(
 
 
 async def test_a_turn_cannot_reference_a_run_another_principal_owns(
-    store: PGWebConversationStore, runs: PGAnswerRunStore, pool: Any
+    store: PGWebConversationStore, runs: FingerprintingRunStore, pool: Any
 ) -> None:
     """The foreign key carries the principal, so the link is owner-scoped."""
     conversation_id = await _conversation(store)
@@ -1542,7 +1585,7 @@ async def test_a_turn_cannot_reference_a_run_another_principal_owns(
     foreign = await runs.create_run(
         owner_id=_OTHER_OWNER,
         prepared_input=request,
-        idempotency_fingerprint=answer_run_request_fingerprint(request),
+        idempotency_fingerprint=run_request_fingerprint(request),
     )
 
     async with pool.acquire() as conn:
@@ -1561,7 +1604,7 @@ async def test_a_turn_cannot_reference_a_run_another_principal_owns(
 
 
 async def test_the_accepted_envelope_survives_the_terminal_transition(
-    store: PGWebConversationStore, runs: PGAnswerRunStore, pool: Any
+    store: PGWebConversationStore, runs: FingerprintingRunStore, pool: Any
 ) -> None:
     """Blocker 1 regression: finish clears prepared input, not the envelope."""
     conversation_id = await _conversation(store)
@@ -1652,7 +1695,7 @@ async def test_submission_seed_keeps_first_attachment_ordinals_and_skips_incompl
     await _finish(pool, legacy.turn.answer_run_id, status="succeeded")
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE dlightrag_answer_runs "
+            "UPDATE dlightrag_runs "
             "SET accepted_input_json = jsonb_set(accepted_input_json, '{attachments}', $2::jsonb) "
             "WHERE owner_id = $1 AND run_id = $3::uuid",
             _OWNER,
@@ -1667,7 +1710,7 @@ async def test_submission_seed_keeps_first_attachment_ordinals_and_skips_incompl
 
 
 async def test_an_empty_conversation_is_reclaimed_after_its_turns_age_out(
-    store: PGWebConversationStore, runs: PGAnswerRunStore, pool: Any
+    store: PGWebConversationStore, runs: FingerprintingRunStore, pool: Any
 ) -> None:
     """Turns live and die with their runs; the empty row is then reclaimed."""
     conversation_id = await _conversation(store)
@@ -1736,22 +1779,27 @@ async def test_older_turns_remain_durable_and_keyset_reachable(
     """A presentation page is a read bound; its cursor keeps older turns reachable."""
     conversation_id = await _conversation(store)
     for index in range(3):
+        request = {
+            **_request(f"question {index}"),
+            "agent_session_id": conversation_id,
+        }
+        submission_id = str(uuid.uuid4())
         await store.create_answer_turn(
             principal_id=_OWNER,
             conversation_id=conversation_id,
-            submission_id=str(uuid.uuid4()),
-            request={
-                **_request(f"question {index}"),
-                "agent_session_id": conversation_id,
-            },
-            idempotency_fingerprint=answer_run_request_fingerprint(
-                {**_request(f"question {index}"), "agent_session_id": conversation_id}
+            submission_id=submission_id,
+            envelope=_turn_envelope(
+                owner=_OWNER,
+                request=request,
+                submission_id=submission_id,
+                fingerprint=run_request_fingerprint(request),
             ),
+            run_id=str(uuid.uuid7()),
             title_hint="why",
         )
 
     assert await _count(pool, "web_conversation_turns") == 3
-    assert await _count(pool, "dlightrag_answer_runs") == 3
+    assert await _count(pool, "dlightrag_runs") == 3
 
     page = await store.history_page(
         _OWNER,
@@ -1797,8 +1845,7 @@ async def test_conversation_deletion_takes_the_same_lock_order_as_run_retention(
         transaction = blocker.transaction()
         await transaction.start()
         await blocker.fetchrow(
-            "SELECT run_id FROM dlightrag_answer_runs "
-            "WHERE owner_id = $1 AND run_id = $2 FOR UPDATE",
+            "SELECT run_id FROM dlightrag_runs WHERE owner_id = $1 AND run_id = $2 FOR UPDATE",
             _OWNER,
             run_uuid,
         )
@@ -1808,7 +1855,7 @@ async def test_conversation_deletion_takes_the_same_lock_order_as_run_retention(
         assert not deleting.done()
 
         await blocker.execute(
-            "DELETE FROM dlightrag_answer_runs WHERE owner_id = $1 AND run_id = $2",
+            "DELETE FROM dlightrag_runs WHERE owner_id = $1 AND run_id = $2",
             _OWNER,
             run_uuid,
         )

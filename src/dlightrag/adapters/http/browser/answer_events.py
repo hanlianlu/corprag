@@ -26,9 +26,9 @@ from dlightrag.adapters.http.browser.events import (
 )
 from dlightrag.adapters.http.browser.presentation import build_answer_presentation
 from dlightrag.adapters.http.streaming.answer_stream import sse_frame
-from dlightrag.application.answer_runs import AnswerRunEvent
 from dlightrag.application.answer_runs.results import project_answer_result
 from dlightrag.application.answer_runs.sources import SourceDownloadLinkBuilder
+from dlightrag.application.runs import RunEvent
 
 
 def render_done_event(
@@ -66,7 +66,7 @@ def render_done_event(
 
 
 def _browser_payload(
-    event: AnswerRunEvent,
+    event: RunEvent,
     *,
     downloadable_workspaces: set[str] | None,
     visual_workspaces: set[str] | None,
@@ -117,21 +117,22 @@ def _browser_payload(
             safe["live"] = live_after is None or event.sequence > live_after
             return safe
         case "done":
-            return render_done_event(
+            done = render_done_event(
                 payload,
                 downloadable_workspaces=downloadable_workspaces,
                 visual_workspaces=visual_workspaces,
                 run_id=run_id,
             )
+            return {"status": "cancelled"} if done.status == "cancelled" else done
         case _:
             return AnswerErrorEvent(
+                kind=str(payload.get("kind") or "answer_stream_failed"),
                 message=str(payload.get("message") or "Service error. Please try again."),
-                error_kind=str(payload.get("kind") or "answer_stream_failed"),
             )
 
 
 def browser_frame(
-    event: AnswerRunEvent,
+    event: RunEvent,
     *,
     downloadable_workspaces: set[str] | None = None,
     visual_workspaces: set[str] | None = None,

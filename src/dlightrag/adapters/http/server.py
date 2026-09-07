@@ -33,7 +33,8 @@ from dlightrag.application.model_catalogue import (
     ModelCatalogueSchemaError,
     ModelCatalogueUnavailableError,
 )
-from dlightrag.application.retrieval import CorpusUnavailableError, RetrievalTimeoutError
+from dlightrag.application.retrieval import CorpusUnavailableError, RetrievalInputError
+from dlightrag.application.runs import RunRuntimeUnavailableError
 from dlightrag.application.web_conversations import WebConversationSchemaError
 
 if TYPE_CHECKING:
@@ -72,7 +73,12 @@ def _request_body_limits(cfg: DlightragConfig) -> tuple[int, dict[str, int]]:
         {
             "/answer": answer_multipart_max,
             "/web/api/answer": answer_multipart_max,
-            "/ingest/blob": cfg.corpus.ingestion.max_upload_bytes + _MULTIPART_ENVELOPE_BYTES,
+            "/runs/corpus/ingest/upload": cfg.corpus.ingestion.max_upload_bytes
+            + _MULTIPART_ENVELOPE_BYTES,
+            "/runs/corpus/replace/upload": cfg.corpus.ingestion.max_upload_bytes
+            + _MULTIPART_ENVELOPE_BYTES,
+            "/runs/corpus/ingest/uploads": cfg.max_upload_batch_bytes + _MULTIPART_ENVELOPE_BYTES,
+            "/runs/corpus/replace/uploads": cfg.max_upload_batch_bytes + _MULTIPART_ENVELOPE_BYTES,
             "/web/api/files/upload": cfg.max_upload_batch_bytes + _MULTIPART_ENVELOPE_BYTES,
         },
     )
@@ -95,7 +101,6 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         logger.exception("Failed to initialize DlightRAG application")
         raise
     _app.state.application = application
-    _app.state.health = application.health
     try:
         yield
     finally:
@@ -180,6 +185,7 @@ def create_app(*, include_web_app: bool = True) -> FastAPI:
     @application.exception_handler(ApplicationClosedError)
     @application.exception_handler(CorpusUnavailableError)
     @application.exception_handler(AnswerRuntimeUnavailableError)
+    @application.exception_handler(RunRuntimeUnavailableError)
     @application.exception_handler(ModelCatalogueUnavailableError)
     async def rag_unavailable_handler(
         request: Request,  # noqa: ARG001
@@ -187,19 +193,20 @@ def create_app(*, include_web_app: bool = True) -> FastAPI:
             ApplicationClosedError
             | CorpusUnavailableError
             | AnswerRuntimeUnavailableError
+            | RunRuntimeUnavailableError
             | ModelCatalogueUnavailableError
         ),
     ) -> JSONResponse:
         body = ErrorDetail(detail=str(exc), error_type="unavailable")
         return JSONResponse(status_code=503, content=body.model_dump())
 
-    @application.exception_handler(RetrievalTimeoutError)
-    async def retrieval_timeout_handler(
+    @application.exception_handler(RetrievalInputError)
+    async def retrieval_input_handler(
         request: Request,  # noqa: ARG001
-        exc: RetrievalTimeoutError,
+        exc: RetrievalInputError,
     ) -> JSONResponse:
-        body = ErrorDetail(detail=str(exc), error_type="unavailable")
-        return JSONResponse(status_code=504, content=body.model_dump())
+        body = ErrorDetail(detail=str(exc), error_type="validation")
+        return JSONResponse(status_code=422, content=body.model_dump())
 
     @application.exception_handler(PermissionError)
     async def permission_error_handler(

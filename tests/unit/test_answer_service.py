@@ -28,6 +28,13 @@ from dlightrag.application.answer_runs.errors import (
 )
 from dlightrag.application.answer_runs.execution import AnswerRunInput, AnswerRunRequest
 from dlightrag.application.answer_runs.routing import decide_resolved_mode
+from dlightrag.application.runs import (
+    RunCancelledError,
+    RunFailedError,
+)
+from dlightrag.application.runs import (
+    RunEvent as ApplicationRunEvent,
+)
 from dlightrag.engine.ai.capacity import CONTEXT_POLICY_REVISION, ModelProfile
 from dlightrag.engine.ai.catalog import MODEL_CATALOG_REVISION
 from dlightrag.engine.ai.fingerprints import ModelFingerprint
@@ -35,15 +42,15 @@ from dlightrag.engine.ai.settings import MODEL_ROLE_NAMES, ModelRole
 from dlightrag.engine.answer.execution import AnswerResourceResolver, AnswerResourceSettings
 from dlightrag.engine.answer.resources.models import ResourceInput
 from dlightrag.engine.runtime import (
-    AnswerRunCancelledError,
-    AnswerRunEvent,
-    AnswerRunFailedError,
-    AnswerRunRecord,
     CancellationOutcome,
     PendingArtifact,
     PendingArtifactReference,
+    PreparedRunEnvelope,
+    RunAccessScope,
     RunArtifactReference,
     RunCreation,
+    RunEvent,
+    RunRecord,
 )
 from tests.unit.conftest import answer_image_policy
 
@@ -58,16 +65,21 @@ _PROFILE = ModelProfile(
 def _record(
     *,
     run_id: str = "run-1",
+    run_kind: str = "answer",
     status: str = "queued",
     result: Mapping[str, Any] | None = None,
     error_kind: str | None = None,
     error_message: str | None = None,
     accepted_input: Mapping[str, Any] | None = None,
-) -> AnswerRunRecord:
-    return AnswerRunRecord(
-        owner_id=_OWNER,
+) -> RunRecord:
+    return RunRecord(
         run_id=run_id,
-        idempotency_key=None,
+        run_kind=run_kind,  # type: ignore[arg-type]
+        lane="query",
+        submitted_by=_OWNER,
+        access_scope=RunAccessScope(kind="owner", scope_id=_OWNER),
+        submission_key=None or str(run_id),
+        request_fingerprint="test-fingerprint",
         prepared_input={"query": "q"},
         status=status,  # type: ignore[arg-type]
         phase=None,
@@ -99,7 +111,7 @@ class _Store:
         self,
         *,
         replay: RunCreation | None = None,
-        run: AnswerRunRecord | None = None,
+        run: RunRecord | None = None,
         references: tuple[RunArtifactReference, ...] = (),
         blobs: Mapping[str, bytes] | None = None,
     ) -> None:
@@ -120,10 +132,8 @@ class _Store:
     async def create_run(
         self,
         *,
-        owner_id: str,
-        prepared_input: Mapping[str, Any],
-        idempotency_fingerprint: str,
-        idempotency_key: str | None = None,
+        envelope: PreparedRunEnvelope,
+        run_id: str,
         resources: Sequence[Mapping[str, Any]] = (),
         artifacts: Sequence[PendingArtifact] = (),
         references: Sequence[PendingArtifactReference] = (),
@@ -131,11 +141,13 @@ class _Store:
     ) -> RunCreation:
         self.created.append(
             {
-                "owner_id": owner_id,
-                "prepared_input": dict(prepared_input),
-                "idempotency_fingerprint": idempotency_fingerprint,
+                "owner_id": envelope.submitted_by,
+                "run_id": run_id,
+                "envelope": envelope,
+                "prepared_input": dict(envelope.payload),
+                "idempotency_fingerprint": envelope.request_fingerprint,
                 "resources": resources,
-                "idempotency_key": idempotency_key,
+                "idempotency_key": envelope.submission_key,
                 "artifacts": [artifact.content for artifact in artifacts],
                 "references": list(references),
                 "routing": routing,
@@ -149,19 +161,21 @@ class _Store:
         owner_id: str,
         idempotency_key: str,
         idempotency_fingerprint: str,
+        run_kind: str,
     ) -> RunCreation | None:
         del owner_id, idempotency_key, idempotency_fingerprint
+        assert run_kind == "answer"
         self.replay_calls += 1
         return self._replay
 
-    async def get_run(self, *, owner_id: str, run_id: str) -> AnswerRunRecord | None:
+    async def get_run(self, *, owner_id: str, run_id: str) -> RunRecord | None:
         if owner_id != _OWNER or run_id != self._run.run_id:
             return None
         return self._run
 
     async def list_runs(
         self, *, owner_id: str, after_run_id: str | None = None, limit: int = 50
-    ) -> tuple[AnswerRunRecord, ...]:
+    ) -> tuple[RunRecord, ...]:
         if owner_id != _OWNER:
             return ()
         return (self._run,)
@@ -222,7 +236,7 @@ class _Store:
             return ()
         return self._references
 
-    async def stream_artifact(
+    async def stream(
         self,
         *,
         owner_id: str,
@@ -237,7 +251,7 @@ class _Store:
         if blob is not None:
             yield blob[max(0, offset) :]
 
-    async def blob_size(self, *, owner_id: str, digest: str) -> int | None:
+    async def size(self, *, owner_id: str, digest: str) -> int | None:
         if owner_id != _OWNER:
             return None
         blob = self._blobs.get(digest)
@@ -247,7 +261,7 @@ class _Store:
 class _Coordinator:
     """The started coordinator, replaying a scripted event stream."""
 
-    def __init__(self, events: Sequence[AnswerRunEvent] = (), *, block: bool = False) -> None:
+    def __init__(self, events: Sequence[RunEvent] = (), *, block: bool = False) -> None:
         self._events = tuple(events)
         self._block = block
         self.is_started = True
@@ -274,10 +288,10 @@ class _Coordinator:
 
     def subscribe(
         self, *, owner_id: str, run_id: str, after_sequence: int = 0
-    ) -> AsyncGenerator[AnswerRunEvent]:
+    ) -> AsyncGenerator[RunEvent]:
         self.subscriptions.append((owner_id, run_id, after_sequence))
 
-        async def _events() -> AsyncGenerator[AnswerRunEvent]:
+        async def _events() -> AsyncGenerator[RunEvent]:
             for event in self._events:
                 yield event
             self.attached.set()
@@ -479,8 +493,10 @@ def _service(
     resources: Any = None,
     memory_capability: Any = None,
 ) -> AnswerService:
+    selected_store = store or _Store()
     return AnswerService(
-        store=store or _Store(),
+        store=selected_store,
+        blob_store=selected_store,
         coordinator=coordinator or _Coordinator(),
         retrieval=retrieval or _Retrieval(),
         capabilities=capabilities or _Capabilities(),
@@ -859,7 +875,8 @@ async def test_idempotent_replay_returns_before_preparation_and_materialization(
 
     creation = await service.create(request=_request(), owner_id=_OWNER, idempotency_key="key-1")
 
-    assert creation is replayed
+    assert creation.replayed is True
+    assert creation.run.run_id == replayed.run.run_id
     assert resources.calls == []
     assert retrieval.calls == []
     assert store.created == []
@@ -891,7 +908,8 @@ async def test_idempotent_replay_precedes_live_multimodal_capability_validation(
         idempotency_key="key-image",
     )
 
-    assert creation is replayed
+    assert creation.replayed is True
+    assert creation.run.run_id == replayed.run.run_id
     assert resources.calls == []
     assert store.created == []
     assert store.replay_calls == 1
@@ -1074,7 +1092,8 @@ async def test_idempotent_replay_survives_local_runtime_unavailability() -> None
         idempotency_key="key-1",
     )
 
-    assert creation is replayed
+    assert creation.replayed is True
+    assert creation.run.run_id == replayed.run.run_id
     assert store.replay_calls == 1
     assert store.created == []
     assert coordinator.wakes == 0
@@ -1092,7 +1111,7 @@ async def test_wait_projects_a_succeeded_run_into_its_canonical_result() -> None
 async def test_wait_raises_the_typed_cancellation_of_a_cancelled_run() -> None:
     service = _service(store=_Store(run=_record(status="cancelled")))
 
-    with pytest.raises(AnswerRunCancelledError):
+    with pytest.raises(RunCancelledError):
         await service.wait(owner_id=_OWNER, run_id="run-1")
 
 
@@ -1102,7 +1121,7 @@ async def test_wait_raises_the_public_failure_of_a_failed_run() -> None:
     )
     service = _service(store=store)
 
-    with pytest.raises(AnswerRunFailedError) as failure:
+    with pytest.raises(RunFailedError) as failure:
         await service.wait(owner_id=_OWNER, run_id="run-1")
 
     assert failure.value.error_kind == "model_unavailable"
@@ -1123,14 +1142,14 @@ async def test_observer_cancellation_never_requests_run_cancellation() -> None:
     assert store.cancellations == []
 
 
-async def test_cancel_is_the_only_owner_scoped_run_mutation() -> None:
-    store = _Store()
-    service = _service(store=store)
+def test_answer_service_does_not_own_the_common_run_lifecycle() -> None:
+    service = _service()
 
-    outcome = await service.cancel(owner_id=_OWNER, run_id="run-1")
-
-    assert outcome.outcome == "cancelled"
-    assert store.cancellations == [(_OWNER, "run-1")]
+    assert not hasattr(service, "get")
+    assert not hasattr(service, "list")
+    assert not hasattr(service, "cancel")
+    assert not hasattr(service, "resume")
+    assert not hasattr(service, "subscribe")
 
 
 async def test_answer_creates_a_durable_run_and_waits_for_its_result() -> None:
@@ -1146,7 +1165,7 @@ async def test_answer_creates_a_durable_run_and_waits_for_its_result() -> None:
 
 
 async def test_answer_stream_creates_a_durable_run_and_follows_its_events() -> None:
-    event = AnswerRunEvent(
+    event = RunEvent(
         sequence=1,
         event_type="token",
         payload={"text": "hi"},
@@ -1158,7 +1177,14 @@ async def test_answer_stream_creates_a_durable_run_and_follows_its_events() -> N
 
     streamed = [item async for item in service.answer_stream(_request(), owner_id=_OWNER)]
 
-    assert streamed == [event]
+    assert streamed == [
+        ApplicationRunEvent(
+            sequence=event.sequence,
+            event_type=event.event_type,
+            payload=event.payload,
+            created_at=event.created_at,
+        )
+    ]
     assert len(store.created) == 1
     assert coordinator.subscriptions == [(_OWNER, "run-1", 0)]
 
@@ -1236,6 +1262,75 @@ async def test_read_input_artifact_is_owner_scoped() -> None:
     assert store.artifact_reads == []
 
 
+async def test_retrieval_id_is_unknown_to_every_answer_only_interface() -> None:
+    store = _Store(
+        run=_record(
+            run_kind="retrieval",
+            status="succeeded",
+            result={"answer": "fabricated retrieval answer"},
+            accepted_input={
+                "query": "retrieval query",
+                "workspaces": ["finance"],
+                "agent_session_id": "0199a0a0-0000-7000-8000-000000000099",
+            },
+        ),
+        references=(
+            _reference(kind="published_artifact", ordinal=0, digest="d0", filename="report.md"),
+        ),
+        blobs={"d0": b"retrieval bytes"},
+    )
+    store.transcript_rows = ({"role": "assistant", "content": "fabricated"},)
+    store.child_page_rows = ({"child_session_id": "fabricated"},)
+    service = _service(store=store)
+    service.create = AsyncMock()  # type: ignore[method-assign]
+
+    assert await service.steer(owner_id=_OWNER, run_id="run-1", instruction="continue") is None
+    assert await service.transcript_tail(owner_id=_OWNER, run_id="run-1") is None
+    assert await service.children(owner_id=_OWNER, run_id="run-1") is None
+    assert await service.continuation_workspaces(owner_id=_OWNER, run_id="run-1") is None
+    assert await service.list_artifacts(owner_id=_OWNER, run_id="run-1") is None
+    assert (
+        await service.read_artifact(
+            owner_id=_OWNER, run_id="run-1", resource_id="published_artifact-0"
+        )
+        is None
+    )
+    assert (
+        await service.open_artifact(
+            owner_id=_OWNER, run_id="run-1", resource_id="published_artifact-0"
+        )
+        is None
+    )
+    assert (
+        await service.artifact_size(
+            owner_id=_OWNER, run_id="run-1", resource_id="published_artifact-0"
+        )
+        is None
+    )
+    assert await service.read_input_artifact(owner_id=_OWNER, run_id="run-1", ordinal=0) is None
+    assert (
+        await service.follow_up(
+            owner_id=_OWNER,
+            run_id="run-1",
+            query="fabricate answer",
+            authorized_workspaces=("finance",),
+        )
+        is None
+    )
+    assert (
+        await service.fork(
+            owner_id=_OWNER,
+            run_id="run-1",
+            query="fabricate branch",
+            authorized_workspaces=("finance",),
+        )
+        is None
+    )
+    service.create.assert_not_awaited()
+    assert store.controls == []
+    assert store.artifact_reads == []
+
+
 async def test_capabilities_exposes_the_public_immutable_snapshot() -> None:
     snapshot = AnswerCapabilities(answer=None, vlm_status="supported")
     view = _CapabilityView(snapshot)
@@ -1255,7 +1350,6 @@ async def test_agent_controls_share_ordered_service_interface() -> None:
     assert first is not None and first.control_sequence == 1
     assert second is not None and second.control_sequence == 2
     assert [item["content"] for item in store.controls] == ["focus on risks", "compare dates"]
-    assert await service.resume(owner_id=_OWNER, run_id="run-1") == store._run
 
 
 async def test_transcript_and_child_roster_are_owner_scoped() -> None:

@@ -57,7 +57,7 @@ class ScopedChunkReader(Protocol):
 
     async def read_scoped(
         self,
-        scope: MetadataScope,
+        scope: MetadataScope | None,
         chunk_ids: list[str],
     ) -> list[dict[str, Any] | None]: ...
 
@@ -80,7 +80,7 @@ class FilteredVectorSearch(Protocol):
         self,
         embedding: list[float],
         *,
-        scope: MetadataScope,
+        scope: MetadataScope | None,
         top_k: int,
     ) -> list[dict[str, Any]]: ...
 

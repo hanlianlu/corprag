@@ -278,8 +278,8 @@ def _install_event_transport(
             state["cancelled"] += 1
         route.continue_()
 
-    page.route("**/web/api/answer/*/events", handle)
-    page.route("**/web/api/answer/*", count_cancel)
+    page.route("**/web/api/runs/*/events", handle)
+    page.route("**/web/api/runs/*", count_cancel)
     return state
 
 

@@ -253,11 +253,11 @@ def _required_domain_scopes() -> list[
     """Each domain store with the scope, versions, and tables it validates.
 
     The Web conversation store validates the durable Answer run schema too: its
-    turns carry a foreign key into ``dlightrag_answer_runs``, so a reader whose
+    turns carry a foreign key into ``dlightrag_runs``, so a reader whose
     run schema is absent must fail there as well.
     """
-    from dlightrag.adapters.postgres.answer import answer_runs
     from dlightrag.adapters.postgres.corpus import pg_metadata_index, workspaces
+    from dlightrag.adapters.postgres.runtime import run_store
     from dlightrag.adapters.postgres.web import web_conversations
     from dlightrag.application.web_conversations import WebConversationSchemaError
     from dlightrag.engine.rag.workspace.ports import CorpusSchemaError
@@ -279,10 +279,10 @@ def _required_domain_scopes() -> list[
             CorpusSchemaError,
         ),
         (
-            "answer_runs",
-            answer_runs.ANSWER_RUN_MIGRATIONS,
-            answer_runs.ANSWER_RUN_SCHEMA_TABLES,
-            answer_runs.PGAnswerRunStore,
+            "runs",
+            run_store.RUN_MIGRATIONS,
+            run_store.RUN_SCHEMA_TABLES,
+            run_store.PGRunStore,
             RunSchemaError,
         ),
         (
@@ -297,20 +297,19 @@ def _required_domain_scopes() -> list[
 
 def _prerequisite_versions(scope: str) -> set[tuple[str, str]]:
     """Versions another scope must already carry before this one validates."""
-    from dlightrag.adapters.postgres.answer import answer_runs
+    from dlightrag.adapters.postgres.runtime import run_store
 
     if scope != "web_conversations":
         return set()
     return {
-        (answer_runs.ANSWER_RUN_MIGRATION_SCOPE, migration.version)
-        for migration in answer_runs.ANSWER_RUN_MIGRATIONS
+        (run_store.RUN_MIGRATION_SCOPE, migration.version) for migration in run_store.RUN_MIGRATIONS
     }
 
 
 def _prerequisite_tables(scope: str) -> tuple[Any, ...]:
-    from dlightrag.adapters.postgres.answer import answer_runs
+    from dlightrag.adapters.postgres.runtime import run_store
 
-    return answer_runs.ANSWER_RUN_SCHEMA_TABLES if scope == "web_conversations" else ()
+    return run_store.RUN_SCHEMA_TABLES if scope == "web_conversations" else ()
 
 
 @contextmanager
@@ -348,7 +347,7 @@ async def test_reader_startup_fails_on_incompatible_domain_schema(scope_index: i
 
     scope, _migrations, tables, store_cls, schema_error = _required_domain_scopes()[scope_index]
     conn = _SchemaConn(set(), tables + _prerequisite_tables(scope))
-    expected = "answer_runs" if scope == "web_conversations" else scope
+    expected = "runs" if scope == "web_conversations" else scope
     expected_error = RunSchemaError if scope == "web_conversations" else schema_error
 
     with _domain_pool_routed_to(conn), pytest.raises(expected_error, match=expected):
@@ -409,6 +408,42 @@ async def test_reader_serves_web_routes() -> None:
 
 
 class TestReadOnlyAdapter:
+    def test_external_vector_storages_are_never_bound_to_postgres(self) -> None:
+        import dlightrag.adapters.postgres.corpus.lightrag_readonly as readonly
+
+        vector = object()
+        kv = object()
+        lightrag = SimpleNamespace(
+            **{name: None for name in readonly.READ_ONLY_STORAGE_ATTRS},
+        )
+        lightrag.full_docs = kv
+        lightrag.chunks_vdb = vector
+        lightrag.entities_vdb = vector
+        lightrag.relationships_vdb = vector
+
+        active = readonly._active_lightrag_storages(
+            lightrag,
+            vector_storage="MilvusVectorDBStorage",
+        )
+
+        assert active == [kv]
+        assert vector not in active
+
+    def test_external_vector_reader_attach_is_rejected_explicitly(self) -> None:
+        import dlightrag.adapters.postgres.corpus.lightrag_readonly as readonly
+
+        config = _config(service_role="reader")
+        mutate = cast(Any, config.storage.lightrag)
+        object.__setattr__(mutate, "vector_storage", "MilvusVectorDBStorage")
+
+        with pytest.raises(ValueError, match="no public nonmutating|supports PGVectorStorage"):
+            asyncio.run(
+                readonly.attach_lightrag_storages_read_only(
+                    SimpleNamespace(),
+                    config=config,
+                )
+            )
+
     def test_overrides_initdb_without_ddl_bootstrap(self) -> None:
         from lightrag.kg.postgres_impl import PostgreSQLDB
 

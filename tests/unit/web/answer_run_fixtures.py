@@ -4,6 +4,7 @@
 import datetime
 from dataclasses import asdict, replace
 from typing import Any
+from uuid import uuid7
 
 from dlightrag.application.answer_runs import (
     AnswerInputArtifact,
@@ -11,6 +12,8 @@ from dlightrag.application.answer_runs import (
     AnswerRunAcceptor,
     AnswerService,
 )
+from dlightrag.application.answer_runs.envelope import accepted_input_envelope
+from dlightrag.application.runs import RunStatus, RunView
 from dlightrag.application.web_conversations import (
     AnswerTurnCreation,
     ConversationSummary,
@@ -21,9 +24,9 @@ from dlightrag.engine.ai.capacity import ModelProfile
 from dlightrag.engine.ai.tokens import estimate_messages_tokens, estimate_tokens
 from dlightrag.engine.answer.history import HistoryProjectionTarget
 from dlightrag.engine.runtime import (
-    AnswerRunRecord,
-    AnswerRunStatus,
     PendingArtifact,
+    PreparedRunEnvelope,
+    RunAccessScope,
 )
 
 NOW = datetime.datetime(2026, 8, 12, tzinfo=datetime.UTC)
@@ -56,6 +59,7 @@ class FakeAnswers(AnswerService):
             owner_id=owner_id,
             idempotency_key=idempotency_key,
             idempotency_fingerprint=idempotency_fingerprint,
+            run_kind="answer",
         )
         if replay is not None:
             return replay
@@ -79,17 +83,27 @@ class FakeAnswers(AnswerService):
                 episodic_summary=projected.episodic_summary,
             )
         self.prepared.append(request)
+        prepared_input = {
+            "query": request.query,
+            "workspaces": list(request.workspaces),
+            "agent_session_id": request.agent_session_id,
+            "agent_lane_id": request.agent_lane_id,
+            "source_lane_id": request.source_lane_id,
+        }
+        run_id = str(uuid7())
         return await acceptor.create_run(
-            owner_id=owner_id,
-            idempotency_key=idempotency_key,
-            idempotency_fingerprint=idempotency_fingerprint,
-            prepared_input={
-                "query": request.query,
-                "workspaces": list(request.workspaces),
-                "agent_session_id": request.agent_session_id,
-                "agent_lane_id": request.agent_lane_id,
-                "source_lane_id": request.source_lane_id,
-            },
+            envelope=PreparedRunEnvelope(
+                run_kind="answer",
+                lane="query",
+                submitted_by=owner_id,
+                access_scope=RunAccessScope(kind="owner", scope_id=owner_id),
+                submission_key=idempotency_key or run_id,
+                request_fingerprint=idempotency_fingerprint,
+                payload=prepared_input,
+                accepted_input=accepted_input_envelope(prepared_input),
+                retention_seconds=365 * 24 * 60 * 60,
+            ),
+            run_id=run_id,
             artifacts=tuple(
                 PendingArtifact(content=resource.content)
                 for resource in request.resources
@@ -163,7 +177,7 @@ def run_request(**overrides: Any) -> dict[str, Any]:
 
 def answer_run(
     *,
-    status: AnswerRunStatus = "queued",
+    status: RunStatus = "queued",
     request: dict[str, Any] | None = None,
     accepted: dict[str, Any] | None = None,
     result: dict[str, Any] | None = None,
@@ -173,38 +187,33 @@ def answer_run(
     events_trimmed_at: datetime.datetime | None = None,
     run_id: str = RUN_ID,
     owner_id: str = "owner-1",
-) -> AnswerRunRecord:
+) -> RunView:
     terminal = status in ("succeeded", "failed", "cancelled")
-    return AnswerRunRecord(
-        owner_id=owner_id,
+    return RunView(
         run_id=run_id,
-        idempotency_key=SUBMISSION_ID,
-        prepared_input=request if request is not None else run_request(),
-        accepted_input=accepted,
+        run_kind="answer",
+        lane="query",
+        submitted_by=owner_id,
+        access_scope_kind="owner",
+        access_scope_id=owner_id,
         status=status,
         phase=None,
-        stop_reason=None,
-        cancel_requested_at=cancel_requested_at,
-        lease_owner=None,
-        lease_expires_at=None,
-        fencing_epoch=0,
         durable_progress_version=0,
-        last_reclaim_progress_version=0,
-        reclaims_without_progress=0,
         next_event_sequence=1,
         events_trimmed_at=events_trimmed_at,
+        cancel_requested=cancel_requested_at is not None,
         result=result,
         error_kind=error_kind,
         error_message=error_message,
         created_at=NOW,
-        updated_at=NOW,
         started_at=None,
         finished_at=NOW if terminal else None,
+        request=accepted if accepted is not None else request or run_request(),
     )
 
 
 def linked_turn(
-    run: AnswerRunRecord | None = None, *, turn_number: int = 1, conversation_id: str = ""
+    run: RunView | None = None, *, turn_number: int = 1, conversation_id: str = ""
 ) -> LinkedTurn:
     return LinkedTurn(
         turn_id=TURN_ID,
@@ -228,7 +237,7 @@ def conversation_summary(conversation_id: str) -> ConversationSummary:
 def answer_turn_creation(
     *,
     conversation_id: str,
-    run: AnswerRunRecord | None = None,
+    run: RunView | None = None,
     replayed: bool = False,
 ) -> AnswerTurnCreation:
     return AnswerTurnCreation(
@@ -241,7 +250,7 @@ def answer_turn_creation(
 def web_answer_submission(
     *,
     conversation_id: str,
-    run: AnswerRunRecord | None = None,
+    run: RunView | None = None,
 ) -> WebAnswerSubmission:
     return WebAnswerSubmission(
         run=run if run is not None else answer_run(),

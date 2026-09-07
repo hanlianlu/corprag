@@ -11,15 +11,19 @@ class RunSchemaError(RuntimeError):
     """The durable run schema is incompatible with this Runtime revision."""
 
 
-class AnswerRunCancelledError(RuntimeError):
+class IncompatibleActiveRunError(RuntimeError):
+    """An accepted active Run cannot execute under this Runtime revision."""
+
+
+class RunCancelledError(RuntimeError):
     """The run this caller waited on was cancelled by its owner."""
 
     def __init__(self, run_id: str) -> None:
-        super().__init__(f"Answer run {run_id} was cancelled")
+        super().__init__(f"Run {run_id} was cancelled")
         self.run_id = run_id
 
 
-class AnswerRunFailedError(RuntimeError):
+class RunFailedError(RuntimeError):
     """The run this caller waited on failed with one public error."""
 
     def __init__(self, kind: str, message: str) -> None:
@@ -38,8 +42,9 @@ class RunExecutionError(RuntimeError):
 
 
 __all__ = [
-    "AnswerRunCancelledError",
-    "AnswerRunFailedError",
+    "IncompatibleActiveRunError",
+    "RunCancelledError",
+    "RunFailedError",
     "RunExecutionError",
     "RunSchemaError",
 ]

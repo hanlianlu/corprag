@@ -1,26 +1,37 @@
-# Durable Answer Runs
+# RunRuntime And Durable Query And Corpus Mutation Execution
 
-This document owns answer lifecycle, fencing, recovery, event persistence,
-resource blobs, and the Web conversation adapter. Public endpoint shapes live in
+This document owns the common Retrieval, Answer, and Corpus Mutation Run lifecycle, fencing,
+recovery, event persistence, resource blobs, and the Web conversation adapter.
+Public endpoint shapes live in
 [Interfaces](interfaces.md); retrieval and generation behavior lives in
 [Retrieval and Answer](retrieval-answer.md); PostgreSQL deployment details live
 in [PostgreSQL](postgresql.md).
 
 `dlightrag.engine.runtime` owns storage-neutral lifecycle records, store ports,
 fenced sessions, subscriptions, cancellation listening, and `RunCoordinator`.
-Engine Answer owns product execution and maps product failures to
-`RunExecutionError`. `PGAnswerRunStore` implements the runtime port without
-creating an Engine dependency on PostgreSQL.
+Composition registers operation-specific Retrieval, Answer, and Corpus Mutation
+executors; Runtime does not import their request models. `PGRunStore` implements the operational
+runtime port and `PGRunBlobStore` implements the immutable PostgreSQL `BYTEA`
+blob seam without creating an Engine dependency on PostgreSQL.
 
 ## Guarantees And Limits
 
-- Every answer on every interface is one durable run with one ID/lifecycle.
-- Disconnecting a client never cancels its run.
-- Recovery restores complete typed Agent Operation state or exact Fast stages.
-- Committed effects do not execute again; pending effects replay only under the
-  pinned plan and contract.
-- All transports see the same events, Artifacts, and canonical result.
-- Retrieval, citation, and federation semantics do not change for durability.
+- One operation-neutral `RunRuntime` owns every durable run ID and lifecycle;
+  top-level Retrieval and Answer executors share the Query Lane, while ingest,
+  replace, exact delete, retry, and reset use the Corpus Mutation Lane.
+- An Answer's internal Retrieval Stage executes directly under that Answer's
+  capacity and recovery authority; it is never a nested Run.
+- Disconnecting a client never cancels its Run.
+- Retrieval recovery re-executes pinned normalized input; Answer recovery
+  restores complete typed Agent Operation state or exact Fast stages.
+- Committed Answer effects do not execute again; pending effects replay only
+  under the pinned plan and contract.
+- Every interface observes the same common state and terminal result. REST,
+  same-origin browser, MCP, Python client, and Application observers use the
+  same Run identity and durable sequence.
+- Corpus mutations are FIFO within one Workspace and may proceed concurrently
+  across Workspaces. Their worker, active-claim, and nonterminal bounds are
+  independent from Query-lane bounds.
 
 DlightRAG does **not** promise exactly-once execution for an interrupted
 read-only tool batch or exactly-once token generation before final result
@@ -30,31 +41,50 @@ storage shim.
 
 ## Lifecycle
 
-`POST /answer` always validates and persists a run before returning HTTP 202.
-There is no temporary answer mode or `stream` request field.
+`POST /retrieve`, `POST /answer`, and Corpus Mutation acceptance validate and
+persist a Run before returning a descriptor (HTTP surfaces return 202). There
+is no inline remote Retrieval result, temporary Answer mode, `stream` request
+field, or separate ingest lifecycle.
 
 ```text
-accept  -> run + routing + pinned input + blobs (one transaction)
-claim   -> oldest eligible row; fencing epoch++; lease heartbeat
-execute -> durable phases/events and Agent or Fast settlements
+accept  -> Run + bounded immutable prepared input
+claim   -> oldest lane-eligible row; active permit; fencing epoch++; lease
+execute -> operation-owned phases/checkpoints and durable events
 finish  -> canonical result + exactly one terminal event (one transaction)
-recover -> reclaim expired lease and restore total durable state
+recover -> reclaim an expired lease and execute from durable authority
 ```
 
-An execution slot is one of
-`answer.runtime.answer_worker_concurrency` local runs. The coordinator reserves a
-slot **before** claiming a row, so a worker never holds a lease while waiting for
-local capacity. Model-provider and ingestion concurrency are independent.
+Retrieval acceptance pins its normalized query/options, authorized Workspace
+set, the required Extract and optional VLM profiles/fingerprints, capability
+facts, and policy revisions. Recovery can therefore repeat planning and search
+without trusting mutable request state. Answer acceptance additionally commits routing, Session
+state, and attachment references through its purpose-built transaction seam.
+
+An execution slot is one of `runtime.query.worker_concurrency` local runs. The
+coordinator reserves a slot **before** claiming a row, so a worker never holds a
+lease while waiting for local capacity. PostgreSQL atomically caps live Query-lane
+claims deployment-wide at `runtime.query.max_active_runs`; the default is 16 for
+both limits. Model-provider and LightRAG pipeline concurrency are independent from both Run
+lanes. Validated Corpus Mutation defaults are two local workers, two
+deployment-wide active claims, and a 1,000-Run nonterminal fuse. The
+[Slice 6 validation report](validation/run-runtime-slice-6.md) records the
+failure matrix, full-fuse rejection, active-cap exercise, 10k-client
+measurements, broad survival thresholds, and limitations.
 
 A free worker claims the oldest eligible queued or expired-running row with
 `FOR UPDATE SKIP LOCKED`. It sweeps bounded batches at startup, after local
 completion, and once per second so work from another host does not depend on a
 process-local wakeup.
 
-Accepted work queues indefinitely while all slots are busy. Queue age, queue
-depth, and slot exhaustion never become capacity failures. There is no answer
-wall-clock timeout. Individual LLM, embedding, rerank, URL, resource, and parser
-calls retain their own timeouts.
+Accepted Retrieval and Answer Runs queue while Query slots are busy, up to the
+deployment-wide `runtime.query.max_nonterminal_runs` admission fuse (default
+30,000). Corpus Mutation Runs queue independently up to
+`runtime.corpus_mutation.max_nonterminal_runs` (validated default 1,000). A full fuse rejects new acceptance before storing a Run; already
+accepted work remains durable. Answer has no wall-clock timeout. A top-level
+Retrieval's `corpus.retrieval.timeout` begins only after it is claimed and bounds
+its planning/search execution, not queue residence; expiry fails that Run with
+`retrieval_timeout`. Individual LLM, embedding, rerank, URL, resource, and
+parser calls retain their own timeouts.
 
 ## Leases, Fencing, And Recovery
 
@@ -79,6 +109,34 @@ The sweeper needs no execution slot to finalize a cancel-pending row without a
 live lease or abandon a no-progress run. Cancellation takes precedence over
 reclaim and abandonment.
 
+### Corpus Mutation Handoff And Repair
+
+A Corpus Mutation keeps one stable `track_id` for upstream reconciliation. It
+commits `handoff_started_at` before the first destructive or otherwise
+non-idempotent LightRAG effect. An expired lease after that point cannot merely
+repeat the effect: the executor first reconciles authoritative public LightRAG
+state. It proceeds only when reconciliation proves the effect is complete or
+safe to continue.
+
+If reconciliation cannot prove a safe outcome, the same nonterminal Run enters
+`waiting_for_repair`, releases its lease and active permit, and exposes bounded
+`repair_reason` and `repair_remedy` fields. It is not failed and no replacement
+Run is created. An authorized operator repairs upstream state, then explicitly
+resumes this same Run through REST, same-origin browser, MCP, Python, or the
+Application Run service. Resume records repair confirmation and requeues only
+that identity.
+
+A full Corpus Reset may instead name one waiting Run to supersede. The old Run
+becomes terminal `repair_superseded`, linked to the reset Run. Reset hides first,
+preserves Corpus Workspace identity and mutation history, and then clears
+corpus content. It is not Workspace Delete.
+
+Ingest finalization has a separate Product Document publication barrier. If
+LightRAG has committed `PROCESSED` but DlightRAG finalization is incomplete, the
+upstream status remains `PROCESSED` while metadata keeps the document hidden.
+Retry selectors include that document and execute only the missing idempotent
+same-ID finalization path; product code never rewrites LightRAG status.
+
 ### Graceful Shutdown
 
 The coordinator first stops claiming. Active workers may finish a settlement or
@@ -94,10 +152,12 @@ by shutdown or crash emits `reset` when reclaimed.
 
 ## Cancellation And Controls
 
-Deleting a queued run terminalizes it immediately. Deleting a running run sets
-`cancel_requested_at`; the worker observes it after awaited planning,
-retrieval/tool batches, between control turns, and at token-batch boundaries.
-If the lease expires first, the sweeper terminalizes it.
+Deleting a queued Run terminalizes it immediately. Deleting a running Run sets
+`cancel_requested_at`; the coordinator signals the owning worker, and executors
+also observe cancellation at their stable boundaries. A Corpus Mutation rejects
+cancellation once its upstream handoff has started unless an operation-owned
+safe settlement wins the row-lock race. If the lease expires
+first, the sweeper terminalizes it.
 
 Cancellation and successful finalization serialize on the run-row lock.
 Success is allowed only while no cancellation is pending. Cancelling a terminal
@@ -107,52 +167,58 @@ worker still must observe cancellation.
 Steer instructions enter an ordered inbox and are consumed at stable checkpoints
 as durable `ControlMessage` entries. A terminal-race steer/follow-up creates a
 fresh linked Operation. Fork creates a new Lane in the same Agent Session.
-Endpoint details are in [Interfaces](interfaces.md#answer-run-endpoints).
+Endpoint details are in
+[Interfaces](interfaces.md#run-lifecycle-and-answer-endpoints).
 
-Closing an SSE subscriber or cancelling `AnswerService.answer()` /
-`answer_stream()` only detaches the caller. Explicit cancellation is the sole
-client action that sets `cancel_requested_at`.
+Closing an SSE subscriber or cancelling a caller-awaited Application
+`RetrievalService.retrieve()` / `stream()` or `AnswerService.answer()` /
+`answer_stream()` call only detaches the caller. Explicit Run cancellation is
+the sole client action that sets `cancel_requested_at`.
 
 ## Idempotency And Pinned Input
 
-Run IDs are UUIDv7. One optional idempotency key is unique per owner:
+Run IDs are UUIDv7. Every accepted envelope has a submission key unique within
+`(run_kind, submitted_by)`; when a caller omits its optional key, the Application
+uses the generated run ID:
 
 - REST: `Idempotency-Key`
 - MCP/Application: `idempotency_key`
-- Web: `submission_id`
+- Web Answer submission: `submission_id`
 
 A matching normalized replay returns the existing run with current status;
 conflicting input returns 409. No key always creates a new run. The key expires
 with the run row.
 
-The fingerprint hashes canonical normalized public input: query, authorized
-workspace set, options, bounded history, ordered resource descriptors, and
-validated upload digests. It excludes headers, temporary paths,
-authorization-dependent URLs, secrets, and later-resolved model facts. A replay
-returns before profile resolution, URL fetches, image descriptions, or history
+The fingerprint hashes the kind-specific normalized public input. Retrieval
+includes query, authorized Workspace set, limits, lexical/filter options,
+federated-rerank choice, and query images; Answer additionally includes bounded
+history and ordered Resource descriptors. It excludes headers, temporary paths,
+authorization-dependent projected URLs, secrets, and later execution output. A
+replay returns before planning, URL fetches, image descriptions, or history
 projection are repeated.
 
-The immutable prepared input stores accepted history/resources/scope plus each
-role's endpoint fingerprint and effective model profile, catalogue/context-policy
-revisions, and accepted image descriptions. Recovery uses these pinned facts;
-provider credentials remain deployment state. A changed global arithmetic
-revision alone does not invalidate the run.
+The immutable prepared input stores the execution facts each kind needs. Both
+pin relevant endpoint fingerprints, effective model profiles, and
+catalogue/context-policy revisions. Retrieval also retains current-image bytes
+only while nonterminal; its terminal accepted envelope keeps their count and
+SHA-256 identities, not their bytes. Answer retains its accepted
+history/Resources/scope, image descriptions, and Agent Plan. Recovery uses these
+pinned facts; provider credentials remain deployment state. An incompatible
+model fingerprint, model-catalogue revision, or context-policy revision fails
+closed at startup and again before execution rather than silently running with
+changed semantics.
 
 ## Durable Events
 
-Events have gap-free, monotonically increasing per-run sequences:
+Events have gap-free, monotonically increasing per-Run sequences. Retrieval
+and Corpus Mutation emit `progress` plus one terminal `done` or `error`; Corpus
+Mutation also persists handoff, deferral, and repair phases on the Run. Answer may additionally
+emit `token`, `reset`, and `tool_start` / `tool_progress` / `tool_end`.
 
-- `progress`
-- `token`
-- `reset`
-- `tool_start`, `tool_progress`, `tool_end`
-- `done`
-- `error`
-
-Appending locks the run row, consumes its next sequence, and checks live lease
-owner/epoch. Token text is coalesced into bounded chunks. Tool events store only
-name, status, elapsed time, output byte count, spill state, call identity, and
-attachment count—never stdout/stderr.
+Appending locks the Run row, consumes its next sequence, and checks live lease
+owner/epoch. Answer token text is coalesced into bounded chunks. Tool events
+store only name, status, elapsed time, output byte count, spill state, call
+identity, and attachment count—never stdout/stderr.
 
 A terminal transaction stores status/error/result and appends exactly one
 terminal event:
@@ -161,43 +227,54 @@ terminal event:
 - cancellation: `done` with `status="cancelled"`, no result;
 - failure: `error` with public kind/message.
 
-SSE closes after replaying the terminal event. Intermediate contexts are not
-published because Research may change them. `progress` is last-writer-wins and
-may move backward after recovery. `reset` invalidates all previously streamed
+SSE closes after replaying the terminal event. Retrieval publishes no contexts
+before its terminal result. Intermediate Answer contexts are not published
+because Research may change them. `progress` is last-writer-wins and may move
+backward after recovery. Answer `reset` invalidates all previously streamed
 draft text before a tool-bearing turn, provider retry or failure, continuing
 follow-up/correction, interrupted regeneration, or canonical citation/Artifact
-rewrite. Only a successful `done.result` is terminal answer authority.
+rewrite. Only a successful `done.result` is terminal result authority.
 
-Stored results/events contain transport-neutral source identities. Each
-authorized read projects fresh download URLs without modifying stored events.
-Event retention may end before the run row: then SSE returns 410 while status
-continues to expose the result.
+Stored results/events contain transport-neutral source identities, never
+projection URLs or inline image bytes. REST rechecks current permissions and
+projects fresh download/visual URLs; MCP keeps download URLs null and projects
+permitted visual routes. Neither modifies stored events. Trusted Application
+callers provide an explicit `RetrieveProjection` when they want a projected
+Retrieval result. Event retention may end before the Run row: then SSE returns
+410 while status continues to expose the result.
 
 ## PostgreSQL State
 
-### `dlightrag_answer_runs`
+### `dlightrag_runs`
 
-One row owns:
+One operation-neutral row owns:
 
-- owner, UUIDv7 run ID, and optional idempotency key/fingerprint;
+- globally unique UUIDv7 run ID, `run_kind`, execution `lane`, submitter, access
+  scope, mandatory submission key, and request fingerprint;
 - bounded `prepared_input_json` while queued/running;
 - status, phase, stop reason, cancellation time;
 - lease owner/expiration and fencing epoch;
 - durable progress/reclaim counters and next event sequence;
-- routing/continuation lineage;
+- retention policy, `purge_after`, retry eligibility, active permit, and opaque
+  executor checkpoint;
 - final result or terminal error; and
 - created/updated/started/finished/event-trim timestamps.
+
+Answer routing and continuation lineage remain in Answer-owned projection tables.
 
 The row is the sole authority for lifecycle. Research state lives in the Agent
 Session's immutable parent-linked entries and closed typed registers. Fast stage
 state is stored under deterministic stage identities.
 
-Terminal runs and event logs follow the configured retention floor from
-`finished_at` in bounded `SKIP LOCKED` batches. Conversation turns do not extend
-it. Deleting the last routed run makes its Agent Session tree eligible for
-cleanup; shared Sessions and child trees still referenced by runs survive.
+Every accepted Run stores its own retention selection and receives
+`purge_after` at terminal settlement. Answer uses the configured
+`runtime.run_retention_days` floor (default 365 days); top-level Retrieval and
+Corpus Mutation use seven days. Nonterminal Runs are never retention-pruned. Sweeps use bounded
+`SKIP LOCKED` batches. Conversation turns do not extend Answer retention.
+Deleting the last routed Answer Run makes its Agent Session tree eligible for
+cleanup; shared Sessions and child trees still referenced by Runs survive.
 
-### `dlightrag_answer_run_events`
+### `dlightrag_run_events`
 
 Rows are keyed by run and sequence and cascade with the run. Worker writes
 require the active lease/epoch. Queued cancellation and sweeper transitions use
@@ -321,9 +398,10 @@ owner-scoped submission lookup and never blindly repeats POST.
 ## Reader Role And Artifact Topology
 
 A `reader` is corpus-read-only, not operationally read-only. It can execute
-answers and write runs/events/artifacts/conversations, while CorpusAdmin and the
-LightRAG pool reject corpus mutation/DDL. Both roles use the same writable
-primary; writers migrate before readers validate schema and serve traffic.
+Retrieval and Answer Runs and write operational state, events, Answer Artifacts,
+and conversations, while CorpusAdmin and the LightRAG pool reject corpus
+mutation/DDL. Both roles use the same writable primary; writers migrate before
+readers validate schema and serve traffic.
 
 LightRAG parser artifacts use `file://` paths under the configured working
 directory. Multi-process/multi-host deployments therefore mount one shared
@@ -344,5 +422,6 @@ is outside this contract.
 - A stale worker cannot append, commit, or delete after lease loss.
 
 The contract is verified by unit state-transition tests; PostgreSQL integration
-tests for claiming, fencing, recovery, cancellation, pruning, and ownership;
+tests for claiming, fencing, per-Workspace mutation FIFO, cross-Workspace
+concurrency, post-handoff recovery, repair resume, cancellation, pruning, and ownership;
 transport/reconnect tests; process-restart tests; and the full `make ci` gate.

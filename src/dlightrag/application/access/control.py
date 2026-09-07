@@ -43,10 +43,7 @@ class AccessAction:
     WORKSPACE_UPDATE_METADATA = "workspace.update_metadata"
     WORKSPACE_READ_VISUAL_ASSET = "workspace.read_visual_asset"
     WORKSPACE_CREATE = "workspace.create"
-    WORKSPACE_DELETE = "workspace.delete"
     WORKSPACE_RESET = "workspace.reset"
-    JOB_READ = "job.read"
-    JOB_CANCEL = "job.cancel"
     # Storage/promotion facts are operator-facing: only the admin preset (and
     # explicitly granted rules) carry this action; ordinary readers/editors
     # never see tier, promotion state, or retry details.
@@ -66,14 +63,26 @@ _EDITOR_ACTIONS: tuple[str, ...] = (
     AccessAction.WORKSPACE_INGEST,
     AccessAction.WORKSPACE_UPDATE_METADATA,
     AccessAction.WORKSPACE_DELETE_FILES,
-    AccessAction.JOB_READ,
-    AccessAction.JOB_CANCEL,
 )
 ACTION_PRESETS: dict[str, tuple[str, ...]] = {
     "reader": _READER_ACTIONS,
     "editor": _EDITOR_ACTIONS,
     "admin": ("*",),
 }
+
+
+def corpus_mutation_access_action(action: object) -> str:
+    """Map one mutation's accepted action to its authorization boundary.
+
+    Unknown values fail closed to the strongest corpus mutation permission.
+    """
+    return {
+        "ingest": AccessAction.WORKSPACE_INGEST,
+        "replace": AccessAction.WORKSPACE_INGEST,
+        "retry": AccessAction.WORKSPACE_INGEST,
+        "delete": AccessAction.WORKSPACE_DELETE_FILES,
+        "reset": AccessAction.WORKSPACE_RESET,
+    }.get(str(action or ""), AccessAction.WORKSPACE_RESET)
 
 
 class AccessDeniedError(PermissionError):

@@ -19,7 +19,7 @@ and over any key of the `custom_metadata` JSONB column.
 
 ## Required Version
 
-Startup checks require PostgreSQL 18 or newer and `lightrag-hku>=1.5.6`.
+Startup checks require PostgreSQL 18 or newer and `lightrag-hku>=1.5.7`.
 DlightRAG carries no patches against LightRAG's PostgreSQL layer. Workspaces
 should not mix embedding models or dimensions after indexing; changing
 `models.embedding.dim` requires clearing/rebuilding vectors.
@@ -126,14 +126,16 @@ Concurrency knobs affect different bottlenecks:
 | Setting | Controls | First bottleneck |
 |---|---|---|
 | `storage.postgres.lightrag_pool_max_size` | LightRAG PostgreSQL connections | PostgreSQL `max_connections` |
-| `storage.postgres.pool_max_size` | DlightRAG metadata/BM25/job connections | PostgreSQL `max_connections` |
+| `storage.postgres.pool_max_size` | DlightRAG metadata/BM25/Run connections | PostgreSQL `max_connections` |
 | `corpus.ingestion.pipeline.max_parallel_insert` | staged insert/vector/KG write workers | PostgreSQL writes and vector indexes |
 | `corpus.ingestion.pipeline.max_parallel_parse_native` | native parser workers | CPU and file I/O |
 | `corpus.ingestion.pipeline.max_parallel_parse_mineru` | External parser workers for the MinerU-compatible route | Parser service, CPU/GPU, OCR latency |
 | `corpus.ingestion.pipeline.max_parallel_parse_docling` | External parser workers for the Docling route | Parser service, CPU/GPU, OCR latency |
 | `corpus.ingestion.pipeline.max_parallel_analyze` | visual/multimodal analysis workers | VLM endpoint limits |
 | `models.max_concurrency` | Process-wide AI provider request concurrency | model endpoint throughput |
-| `answer.runtime.answer_worker_concurrency` | Durable Answer runs executed per process | run throughput, CPU, and memory |
+| `runtime.query.worker_concurrency` | Query-lane runs executed per process | run throughput, CPU, and memory |
+| `runtime.query.max_active_runs` | Atomic deployment-wide Query-lane claim ceiling | database and worker pressure |
+| `runtime.query.max_nonterminal_runs` | Atomic deployment-wide Query-lane admission fuse | durable backlog growth |
 | `corpus.ingestion.pipeline.max_concurrency` | LightRAG pipeline LLM request concurrency | LLM endpoint limits |
 | `models.embedding.max_concurrency` | embedding request concurrency | embedding endpoint and vector writes |
 
@@ -154,7 +156,11 @@ profile. The checked-in retrieval defaults are:
 - `corpus.retrieval.direct_visual_top_k: 20` for the independent visual leg.
 
 The BM25 query filters by workspace and may additionally filter by language and
-metadata scope before returning those 20 candidates. pg_textsearch v1.4.0 uses
+metadata scope before returning those 20 candidates. Publication is an
+independent predicate: `_dlightrag_finalization_complete IS TRUE`. Without a
+user filter, BM25 ranks a bounded over-fetch window and uses a correlated
+metadata `EXISTS`; it never materializes the set of all visible document IDs.
+pg_textsearch v1.4.0 uses
 planner selectivity to seed the internal scan limit for this query shape,
 avoiding repeated score-and-filter passes for selective filters. Compose makes
 the upstream defaults explicit:
@@ -185,8 +191,13 @@ DlightRAG-owned partial index
 `LIGHTRAG_DOC_STATUS` table. It covers the bounded Files presentation order
 `(workspace, updated_at DESC NULLS FIRST, id ASC) WHERE status = 'processed'`.
 A writer creates it only after LightRAG has established that table; readers
-issue no DDL. During a rolling upgrade, start an upgraded writer before readers
-serve file pages that rely on this index.
+issue no DDL. The metadata migration normalizes legacy NULL publication markers
+to false (never true), makes the marker non-null with a false default, installs
+a partial visible-document index, and recomputes planner field statistics from
+true rows only. Its trigger handles false-to-true, true-to-false, ordinary
+updates, and deletes exactly. Reader startup requires the new migration,
+constraint, and index. During a rolling upgrade, start an upgraded writer before
+readers serve file pages that rely on these objects.
 
 DlightRAG ensures the current idempotent DDL baseline on writer startup and
 records its versions in the ledger; readers validate the same versions without
@@ -198,16 +209,16 @@ to perform that reset; it also recreates the required PostgreSQL extensions
 and verifies the empty database. See
 [operations.md](operations.md#full-development-reset).
 
-## Durable Answer Run State
+## Durable Run State
 
-Every answer is one durable run. DlightRAG-owned tables under the `answer_runs`
-migration scope separate lifecycle, routing, session, controls, children, and
-blob references:
+Every top-level Retrieval and Answer is one durable Run. DlightRAG-owned tables
+under the `runs` migration scope separate common lifecycle from Answer-owned
+routing, Session, control, child, and blob-reference state:
 
 | Table | Key | Holds |
 | --- | --- | --- |
-| `dlightrag_answer_runs` | `(owner_id, run_id)` | status, phase, durable progress, stop reason, cancellation, lease, fencing epoch, reclaim-without-progress count, event sequence, event-trim timestamp, Prepared Input, canonical result or terminal error |
-| `dlightrag_answer_run_events` | `(owner_id, run_id, event_sequence)` | gap-free `progress` / `token` / `reset` / `tool_start` / `tool_progress` / `tool_end` / `done` / `error` events |
+| `dlightrag_runs` | `(owner_id, run_id)` plus globally unique `run_id` | kind, lane, submitter/access scope, submission key, status, retry/permit/checkpoint, retention, cancellation, fenced lease, Prepared Input, Corpus Mutation handoff/repair state, result or terminal error |
+| `dlightrag_run_events` | `(owner_id, run_id, event_sequence)` | gap-free executor-owned events, including Answer `progress` / `token` / `reset` / tool / terminal events |
 | `dlightrag_blobs` | `(owner_id, digest)` | immutable content-addressed blob metadata within one owner |
 | `dlightrag_answer_run_artifacts` | `(owner_id, run_id, resource_id)` | ordered request attachments and Published Artifact bytes |
 | `dlightrag_answer_artifact_attachments` | `(owner_id, run_id, relative_path)` | settled Root Artifact Attachment authority: label, raw digest/size, presentation, Effect provenance, and settlement order |
@@ -225,6 +236,14 @@ run-artifact join carries `ON DELETE CASCADE` to the run and `ON DELETE RESTRICT
 to the blob, so linking a digest takes the key-share lock that serializes
 against cleanup. Deleting a run removes its events and references, never shared
 bytes; a blob is deleted only once no reference for that owner survives.
+The Query and Corpus Mutation claim paths share the bounded
+`idx_dlightrag_runs_claim` index; Workspace mutation eligibility also uses
+`idx_dlightrag_runs_mutation_fifo`, and event reconnect uses the event primary
+key. The [Slice 6 validation report](validation/run-runtime-slice-6.md) records
+`EXPLAIN (ANALYZE, BUFFERS)` evidence at representative bounded backlogs. A
+compact sequential scan chosen for a 1,000-row fuse is not by itself an index
+regression; the structural integration test separately proves the ordered
+indexes remain usable.
 
 Web conversation turns link to a run with `(principal_id, answer_run_id)` and
 `ON DELETE CASCADE`. The turn carries conversation order and the run link only:
@@ -238,8 +257,10 @@ exist.
 Every run-owning process sweeps hourly in bounded `SKIP LOCKED` batches, so no
 leader or cron job is required. Row locks, cascades, Session reference checks,
 and the run-artifact/blob foreign key serialize pruning against new references.
-Conversation deletion follows the same run-first lock order. Lifecycle and HTTP
-410 semantics are defined in [Durable Answer Runs](durable-answer-runs.md); the
+Conversation deletion follows the same Run-first lock order. Answer uses the
+configured retention floor; top-level Retrieval and Corpus Mutation select seven days. Lifecycle
+and HTTP 410 semantics are defined in
+[RunRuntime and durable query execution](durable-answer-runs.md); the
 field/default is in [Configuration](configuration.md).
 
 ## Graph Storage
@@ -299,8 +320,8 @@ connections or exception classes to RAG, reset, Web, API, or MCP code.
 
 `deployment.service_role: reader` (or `DLIGHTRAG_DEPLOYMENT__SERVICE_ROLE=reader`) means
 **corpus-read-only, not process-read-only**. A reader may create and execute
-answer runs and may write DlightRAG operational state: runs, events, artifacts,
-and Web conversations. Web is enabled on readers.
+Retrieval and Answer Runs and may write DlightRAG operational state: Runs,
+events, Artifacts, and Web conversations. Web is enabled on readers.
 
 A reader:
 
@@ -309,10 +330,9 @@ A reader:
 - **validates** the migrated domain and LightRAG schemas at startup and issues no
   DDL; a missing or incompatible schema fails startup with a diagnostic and
   serves no traffic, and a runtime schema mismatch answers HTTP 503;
-- keeps the LightRAG LLM response cache disabled and skips ingest-job recovery;
-  and
-- still rejects ingestion, workspace creation/reset, metadata mutation,
-  failed-document retry, and deletion through `CorpusAdmin` (HTTP 403).
+- keeps the LightRAG LLM response cache disabled; and
+- may accept authorized Corpus Mutation Runs into the shared durable runtime,
+  but never claims or executes them. Writer services claim those Runs.
 
 DlightRAG makes no physical-standby or read-endpoint promise: both roles use the
 same primary endpoint. Read-replica routing would need a separate corpus endpoint

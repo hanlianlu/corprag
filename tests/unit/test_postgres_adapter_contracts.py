@@ -50,11 +50,13 @@ def test_file_panel_page_queries_match_the_exact_partial_index_contract() -> Non
 
     assert "(workspace, updated_at DESC NULLS FIRST, id ASC)" in index
     assert "WHERE status = 'processed'" in index
-    assert "ORDER BY updated_at DESC NULLS FIRST, id ASC LIMIT $2" in first
-    assert "(updated_at IS NULL AND id > $2) OR updated_at IS NOT NULL" in after_null
-    assert "updated_at < $2::timestamp" in after_timestamp
-    assert "updated_at = $2::timestamp AND id > $3" in after_timestamp
-    assert "ORDER BY updated_at DESC NULLS FIRST, id ASC" in after_timestamp
+    assert "INNER JOIN dlightrag_doc_metadata m" in first
+    assert "m._dlightrag_finalization_complete IS TRUE" in first
+    assert "ORDER BY s.updated_at DESC NULLS FIRST, s.id ASC LIMIT $2" in first
+    assert "(s.updated_at IS NULL AND s.id > $2) OR s.updated_at IS NOT NULL" in after_null
+    assert "s.updated_at < $2::timestamp" in after_timestamp
+    assert "s.updated_at = $2::timestamp AND s.id > $3" in after_timestamp
+    assert "ORDER BY s.updated_at DESC NULLS FIRST, s.id ASC" in after_timestamp
     assert all("OFFSET" not in query.upper() for query in (first, after_null, after_timestamp))
 
 
@@ -97,13 +99,13 @@ def test_metadata_search_page_sql_matches_the_doc_id_keyset_contract() -> None:
 
 
 def test_child_roster_page_queries_match_the_exact_roster_index_contract() -> None:
-    from dlightrag.adapters.postgres.answer import answer_runs
+    from dlightrag.adapters.postgres.runtime import run_store
 
-    first = " ".join(answer_runs._SELECT_CHILD_SESSIONS_FIRST_PAGE.split())
-    after = " ".join(answer_runs._SELECT_CHILD_SESSIONS_AFTER.split())
+    first = " ".join(run_store._SELECT_CHILD_SESSIONS_FIRST_PAGE.split())
+    after = " ".join(run_store._SELECT_CHILD_SESSIONS_AFTER.split())
     index_statements = [
         " ".join(statement.split())
-        for statement in answer_runs._CREATE_INDEXES
+        for statement in run_store._CREATE_INDEXES
         if "idx_answer_child_sessions_roster" in statement
     ]
 
@@ -125,11 +127,11 @@ def test_web_turn_pages_select_limit_plus_one_identities_before_run_joins() -> N
     history = " ".join(web_conversations._GET_TURNS_PAGE.split()).upper()
     oldest = " ".join(web_conversations._GET_RECOVERY_OLDEST.split()).upper()
     assert "WITH SELECTED_TURNS AS" in history
-    assert history.index("LIMIT $4") < history.index("JOIN DLIGHTRAG_ANSWER_RUNS")
+    assert history.index("LIMIT $4") < history.index("JOIN DLIGHTRAG_RUNS")
     assert "T.TURN_NUMBER < $3" in history
     assert "ORDER BY T.TURN_NUMBER DESC" in history
     assert "LIMIT $5" in oldest
-    assert oldest.index("LIMIT $5") < oldest.index("JOIN DLIGHTRAG_ANSWER_RUNS")
+    assert oldest.index("LIMIT $5") < oldest.index("JOIN DLIGHTRAG_RUNS")
     assert "ORDER BY T.TURN_NUMBER ASC" in oldest
     assert "OFFSET" not in history and "OFFSET" not in oldest
 

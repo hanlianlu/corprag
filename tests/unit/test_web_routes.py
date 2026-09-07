@@ -102,13 +102,9 @@ def mock_application():
     corpora.workspace_catalog_cursor_codec = WorkspaceCatalogCursorCodec(
         b"web-workspace-catalog-test-secret"
     )
-    corpora.get_pipeline_status = AsyncMock(
-        return_value={"busy": False, "pending_enqueues": 0, "latest_message": ""}
-    )
     corpora.file_panel_snapshot = AsyncMock(
         return_value={
             "files": [{"filename": "test.pdf", "file_path": "/tmp/test.pdf"}],
-            "pipeline_status": {"busy": False, "pending_enqueues": 0, "latest_message": ""},
             "next_cursor": None,
             "fetched_rows": 1,
         }
@@ -117,23 +113,32 @@ def mock_application():
     corpora.failed_file_snapshot = AsyncMock(
         return_value={"failed": [], "next_cursor": None, "fetched_rows": 0}
     )
-    corpora.get_active_retry_failed_docs = AsyncMock(return_value=None)
-    corpora.start_retry_failed_docs = AsyncMock(
-        return_value={
-            "job_id": "retry-1",
-            "workspace": "default",
-            "source_type": "retry_failed",
-            "status": "queued",
-            "result": {},
-        }
-    )
-    corpora.get_ingest_job = AsyncMock(return_value=None)
-    corpora.start_ingest_job = AsyncMock(return_value={"job_id": "job-1", "status": "queued"})
     corpora.prepare_source_download = AsyncMock()
     corpora.get_visual_asset = AsyncMock()
     corpora.create_workspace = AsyncMock()
     corpora.reset = AsyncMock(return_value={"workspaces": {}, "total_errors": 0})
     application_double.corpora = corpora
+    corpus_run = SimpleNamespace(
+        run_id="0199a0a0-0000-7000-8000-0000000000bb",
+        run_kind="corpus_mutation",
+        lane="corpus_mutation",
+        status="queued",
+    )
+    application_double.corpus_mutations = SimpleNamespace(
+        create_retry=AsyncMock(return_value=SimpleNamespace(run=corpus_run)),
+        create_staged_batch=AsyncMock(return_value=SimpleNamespace(run=corpus_run)),
+        create_delete=AsyncMock(return_value=SimpleNamespace(run=corpus_run)),
+        create_reset=AsyncMock(return_value=SimpleNamespace(run=corpus_run)),
+        stage_upload=AsyncMock(),
+        discard_staged_run=AsyncMock(),
+    )
+    application_double.runs = SimpleNamespace(
+        get=AsyncMock(return_value=None),
+        get_global=AsyncMock(return_value=None),
+        cancel=AsyncMock(),
+        resume_repair=AsyncMock(return_value=True),
+        subscribe=MagicMock(),
+    )
     return application_double
 
 
@@ -315,9 +320,6 @@ async def test_vendored_assets_allow_revalidation_caching(client):
 
 def _configure_web_application(application_double, cfg: DlightragConfig):
     application_double.config = cfg
-    application_double.corpora.get_pipeline_status = AsyncMock(
-        return_value={"busy": False, "pending_enqueues": 0, "latest_message": ""}
-    )
     return application_double
 
 
@@ -757,7 +759,6 @@ class TestWebFiles:
         assert resp.headers["content-type"].startswith("application/json")
         assert resp.json()["workspace"] == "default"
         assert resp.json()["files"] == [{"file_name": "test.pdf", "file_path": "/tmp/test.pdf"}]
-        assert resp.json()["ingest"]["busy"] is False
         assert resp.json()["next_cursor"] is None
         mock_application.corpora.file_panel_snapshot.assert_awaited_once_with(
             "default", page=FilePanelPageRequest()
@@ -803,7 +804,6 @@ class TestWebFiles:
         )
         mock_application.corpora.file_panel_snapshot.return_value = {
             "files": [],
-            "pipeline_status": {"busy": False},
             "next_cursor": continuation,
             "fetched_rows": 51,
         }
@@ -881,7 +881,6 @@ class TestWebFiles:
                 "files": [
                     {"doc_id": "d1", "file_path": "/tmp/reports/q4.pdf", "status": "processed"}
                 ],
-                "pipeline_status": {"busy": False, "pending_enqueues": 0},
             }
         )
 
@@ -899,10 +898,8 @@ class TestWebFiles:
                 "files": [
                     {"doc_id": "d1", "file_path": "/tmp/cold/report.pdf", "status": "processed"}
                 ],
-                "pipeline_status": {"busy": False, "pending_enqueues": 0},
             }
         )
-        mock_application.corpora.get_pipeline_status = AsyncMock(return_value={"busy": False})
 
         resp = await client.get("/web/api/files", params={"workspace": "cold-ws"})
 
@@ -913,7 +910,6 @@ class TestWebFiles:
         mock_application.corpora.file_panel_snapshot.assert_awaited_once_with(
             "cold_ws", page=FilePanelPageRequest()
         )
-        mock_application.corpora.get_pipeline_status.assert_not_awaited()
 
     async def test_file_list_rejects_stale_workspace(
         self, client: AsyncClient, test_config: DlightragConfig, mock_application
@@ -925,7 +921,6 @@ class TestWebFiles:
         assert resp.status_code == 409
         assert "Workspace no longer exists" in resp.text
         mock_application.corpora.file_panel_snapshot.assert_not_awaited()
-        mock_application.corpora.get_pipeline_status.assert_not_awaited()
 
     async def test_file_list_rejects_stale_workspace_even_with_registered_cookie(
         self, client: AsyncClient, test_config: DlightragConfig, mock_application
@@ -938,7 +933,6 @@ class TestWebFiles:
         assert resp.status_code == 409
         assert "Workspace no longer exists" in resp.text
         mock_application.corpora.file_panel_snapshot.assert_not_awaited()
-        mock_application.corpora.get_pipeline_status.assert_not_awaited()
 
     async def test_file_list_canonicalizes_requested_workspace(
         self, client: AsyncClient, test_config: DlightragConfig, mock_application
@@ -963,7 +957,7 @@ class TestWebFiles:
         assert "Workspace no longer exists" in resp.text
         mock_application.corpora.file_panel_snapshot.assert_not_awaited()
 
-    async def test_failed_files_page_projects_bounded_rows_and_active_recovery(
+    async def test_failed_files_page_projects_bounded_rows(
         self, client: AsyncClient, mock_application
     ) -> None:
         timestamp = datetime.datetime(2026, 8, 31, 21, 36, 15)
@@ -985,14 +979,6 @@ class TestWebFiles:
             "next_cursor": continuation,
             "fetched_rows": 2,
         }
-        mock_application.corpora.get_active_retry_failed_docs.return_value = {
-            "job_id": "retry-1",
-            "workspace": "default",
-            "source_type": "retry_failed",
-            "status": "running",
-            "result": {},
-        }
-
         response = await client.get("/web/api/files/failed")
 
         assert response.status_code == 200
@@ -1012,17 +998,108 @@ class TestWebFiles:
         assert "/srv/private" not in diagnostic
         assert len(diagnostic) <= 512
         assert isinstance(payload["next_cursor"], str)
-        assert payload["active_recovery"] == {
-            "job_id": "retry-1",
-            "workspace": "default",
-            "status": "running",
-            "retried": 0,
-            "succeeded": 0,
-            "failed": 0,
-        }
+        assert "active_recovery" not in payload
         mock_application.corpora.failed_file_snapshot.assert_awaited_once_with(
             "default",
             page=FilePanelPageRequest(limit=5),
+        )
+
+    async def test_failed_file_retry_accepts_a_durable_run(
+        self, client: AsyncClient, mock_application
+    ) -> None:
+        response = await client.post("/web/api/files/retry")
+
+        assert response.status_code == 202
+        assert response.json()["run_kind"] == "corpus_mutation"
+        mock_application.corpus_mutations.create_retry.assert_awaited_once_with(
+            workspace="default",
+            document_ids=None,
+            selector="all_retryable",
+            submitted_by=DEPLOYMENT_OWNER_ID,
+        )
+
+    async def test_corpus_receipt_uses_same_origin_browser_run_urls(
+        self, client: AsyncClient
+    ) -> None:
+        response = await client.post("/web/api/files/retry")
+
+        assert response.status_code == 202
+        run_id = response.json()["run_id"]
+        assert response.json()["status_url"] == f"/web/api/corpus-runs/{run_id}"
+        assert response.json()["events_url"] == f"/web/api/corpus-runs/{run_id}/events"
+        assert response.json()["cancel_url"] == f"/web/api/corpus-runs/{run_id}"
+
+    async def test_browser_reads_authorized_corpus_status_with_repair_guidance(
+        self, client: AsyncClient, mock_application
+    ) -> None:
+        now = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
+        record = SimpleNamespace(
+            run_id="0199a0a0-0000-7000-8000-0000000000bb",
+            run_kind="corpus_mutation",
+            lane="corpus_mutation",
+            status="running",
+            phase="waiting_for_repair",
+            durable_progress_version=3,
+            cancel_requested=False,
+            result=None,
+            error_kind=None,
+            error_message=None,
+            repair_reason="Upstream outcome is uncertain.",
+            repair_remedy="Inspect and repair, then resume.",
+            created_at=now,
+            started_at=now,
+            finished_at=None,
+            access_scope_kind="workspace",
+            access_scope_id="default",
+            events_trimmed_at=None,
+            request_input=lambda: {"action": "delete"},
+        )
+        mock_application.runs.get_global.return_value = record
+
+        response = await client.get(f"/web/api/corpus-runs/{record.run_id}")
+
+        assert response.status_code == 200
+        assert response.json()["phase"] == "waiting_for_repair"
+        assert response.json()["repair_reason"] == "Upstream outcome is uncertain."
+        assert response.json()["repair_remedy"] == "Inspect and repair, then resume."
+        assert response.json()["resume_url"] == f"/web/api/corpus-runs/{record.run_id}/resume"
+
+    async def test_browser_resumes_the_same_authorized_corpus_run(
+        self, client: AsyncClient, mock_application
+    ) -> None:
+        now = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
+        waiting = SimpleNamespace(
+            run_id="0199a0a0-0000-7000-8000-0000000000bb",
+            run_kind="corpus_mutation",
+            lane="corpus_mutation",
+            status="running",
+            phase="waiting_for_repair",
+            durable_progress_version=3,
+            cancel_requested=False,
+            result=None,
+            error_kind=None,
+            error_message=None,
+            repair_reason="Inspect upstream state.",
+            repair_remedy="Repair it, then resume.",
+            created_at=now,
+            started_at=now,
+            finished_at=None,
+            access_scope_kind="workspace",
+            access_scope_id="default",
+            events_trimmed_at=None,
+            request_input=lambda: {"action": "delete"},
+        )
+        queued = SimpleNamespace(**{**waiting.__dict__, "status": "queued", "phase": None})
+        mock_application.runs.get_global.return_value = waiting
+        mock_application.runs.get.return_value = queued
+
+        response = await client.post(f"/web/api/corpus-runs/{waiting.run_id}/resume")
+
+        assert response.status_code == 202
+        assert response.json()["run_id"] == waiting.run_id
+        assert response.json()["status"] == "queued"
+        mock_application.runs.resume_repair.assert_awaited_once_with(
+            owner_id="default", run_id=waiting.run_id
         )
 
     async def test_failed_files_rejects_processed_view_cursor(
@@ -1038,190 +1115,93 @@ class TestWebFiles:
         assert response.status_code == 422
         mock_application.corpora.failed_file_snapshot.assert_not_awaited()
 
-    async def test_failed_file_retry_starts_durable_job_and_projects_terminal_status(
-        self, client: AsyncClient, mock_application
+    async def test_upload_accepts_one_durable_batch_run(
+        self, client: AsyncClient, mock_application, tmp_path: Path
     ) -> None:
-        started = await client.post("/web/api/files/retry")
-
-        assert started.status_code == 202
-        assert started.json()["job_id"] == "retry-1"
-        mock_application.corpora.start_retry_failed_docs.assert_awaited_once_with("default")
-
-        mock_application.corpora.get_ingest_job.return_value = {
-            "job_id": "retry-1",
-            "workspace": "default",
-            "source_type": "retry_failed",
-            "status": "partial",
-            "result": {"retried": 2, "succeeded": 1, "failed": 1},
-        }
-        status = await client.get("/web/api/files/retry/retry-1")
-
-        assert status.status_code == 200
-        assert status.json() == {
-            "job_id": "retry-1",
-            "workspace": "default",
-            "status": "partial",
-            "retried": 2,
-            "succeeded": 1,
-            "failed": 1,
-        }
-
-    async def test_failed_file_retry_projects_cancelled_ledger_totals(
-        self, client: AsyncClient, mock_application
-    ) -> None:
-        mock_application.corpora.get_ingest_job.return_value = {
-            "job_id": "retry-cancelled",
-            "workspace": "default",
-            "source_type": "retry_failed",
-            "status": "failed",
-            "result": {
-                "retried": 3,
-                "succeeded": 1,
-                "failed": 2,
-                "cancelled": True,
-            },
-        }
-
-        response = await client.get("/web/api/files/retry/retry-cancelled")
-
-        assert response.status_code == 200
-        assert response.json() == {
-            "job_id": "retry-cancelled",
-            "workspace": "default",
-            "status": "failed",
-            "retried": 3,
-            "succeeded": 1,
-            "failed": 2,
-        }
-
-    async def test_failed_file_retry_preserves_reader_role_forbidden_response(
-        self, client: AsyncClient, mock_application
-    ) -> None:
-        mock_application.corpora.start_retry_failed_docs.side_effect = PermissionError(
-            "failed document retry requires the writer service role"
+        source = tmp_path / "report.pdf"
+        source.write_bytes(b"%PDF-fake")
+        mock_application.corpus_mutations.stage_upload.return_value = SimpleNamespace(
+            path=source, filename="report.pdf", size_bytes=9, content_sha256="a" * 64
         )
 
-        response = await client.post("/web/api/files/retry")
-
-        assert response.status_code == 403
-        assert response.json()["error_type"] == "auth"
-
-    async def test_failed_file_retry_status_hides_other_job_kinds(
-        self, client: AsyncClient, mock_application
-    ) -> None:
-        mock_application.corpora.get_ingest_job.return_value = {
-            "job_id": "upload-1",
-            "workspace": "default",
-            "source_type": "local",
-            "status": "running",
-        }
-
-        response = await client.get("/web/api/files/retry/upload-1")
-
-        assert response.status_code == 404
-
-    async def test_ingest_status_rejects_stale_workspace(
-        self, client: AsyncClient, test_config: DlightragConfig, mock_application
-    ) -> None:
-        mock_application.corpora.workspace_exists = AsyncMock(return_value=False)
-
-        resp = await client.get("/web/api/ingest-status", params={"workspace": "deleted_ws"})
-
-        assert resp.status_code == 409
-        assert "Workspace no longer exists" in resp.text
-        mock_application.corpora.get_pipeline_status.assert_not_awaited()
-
-    async def test_ingest_status_returns_typed_idle_state(
-        self,
-        client: AsyncClient,
-        test_config: DlightragConfig,
-        mock_application,
-    ) -> None:
-        resp = await client.get("/web/api/ingest-status", params={"workspace": "default"})
-
-        assert resp.status_code == 200
-        assert resp.json() == {
-            "busy": False,
-            "message": "",
-            "progress_percent": None,
-            "current_batch": None,
-            "total_batches": None,
-            "documents": None,
-            "pending_enqueues": 0,
-        }
-        assert "hx-retarget" not in resp.headers
-        assert "hx-reswap" not in resp.headers
-        mock_application.corpora.workspace_exists.assert_awaited_once_with("default")
-        mock_application.corpora.list_workspaces.assert_not_awaited()
-
-    async def test_ingest_status_normalizes_progress_and_queue(
-        self, client: AsyncClient, mock_application
-    ) -> None:
-        mock_application.corpora.get_pipeline_status = AsyncMock(
-            return_value={
-                "busy": True,
-                "latest_message": "Embedding",
-                "docs": 9,
-                "batchs": 4,
-                "cur_batch": 2,
-                "pending_enqueues": 3,
-            }
-        )
-
-        response = await client.get("/web/api/ingest-status", params={"workspace": "default"})
-
-        assert response.status_code == 200
-        assert response.json() == {
-            "busy": True,
-            "message": "Embedding",
-            "progress_percent": 50,
-            "current_batch": 2,
-            "total_batches": 4,
-            "documents": 9,
-            "pending_enqueues": 3,
-        }
-
-    async def test_upload_preserves_filename_for_directory_ingest(
-        self, client: AsyncClient, test_config: DlightragConfig, mock_application, tmp_path: Path
-    ) -> None:
-        upload_dir = tmp_path / "uploads"
-        upload_dir.mkdir()
-        saved = upload_dir / "report.pdf"
-        saved.write_bytes(b"%PDF-fake")
-
-        async def fake_stage_batch(workspace, files, *, per_file_max_bytes, batch_max_bytes):
-            del workspace, files, per_file_max_bytes, batch_max_bytes
-            return upload_dir, [saved]
-
-        mock_application.corpora.stage_upload_batch = fake_stage_batch
-        resp = await client.post(
+        response = await client.post(
             "/web/api/files/upload",
             files=[("files", ("report.pdf", b"%PDF-fake", "application/pdf"))],
         )
 
-        assert resp.status_code == 200
-        assert resp.json()["workspace"] == "default"
-        assert resp.json()["file_count"] == 1
-        assert resp.json()["queued"] is False
-        assert resp.json()["ingest"] == {
-            "busy": True,
-            "message": "Starting ingest...",
-            "progress_percent": None,
-            "current_batch": None,
-            "total_batches": None,
-            "documents": None,
-            "pending_enqueues": 0,
-        }
-        mock_application.corpora.start_ingest_job.assert_awaited_once()
-        call = mock_application.corpora.start_ingest_job.await_args
-        assert call.args[0] == "default"
-        ingest_spec = call.args[1]
-        assert ingest_spec.source_type == "local"
-        upload_dir = Path(ingest_spec.path)
-        assert upload_dir.is_dir()
-        assert (upload_dir / "report.pdf").read_bytes() == b"%PDF-fake"
-        mock_application.corpora.workspace_exists.assert_awaited_once_with("default")
-        mock_application.corpora.list_workspaces.assert_not_awaited()
+        assert response.status_code == 202
+        body = response.json()
+        assert body["run_kind"] == "corpus_mutation"
+        assert body["file_count"] == 1
+        mock_application.corpus_mutations.stage_upload.assert_awaited_once()
+        mock_application.corpus_mutations.create_staged_batch.assert_awaited_once()
+        mock_application.corpus_mutations.discard_staged_run.assert_not_awaited()
+
+    async def test_single_upload_forwards_digest_verification_to_the_shared_stager(
+        self, client: AsyncClient, mock_application, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "report.pdf"
+        source.write_bytes(b"content")
+        digest = "a" * 64
+        mock_application.corpus_mutations.stage_upload.return_value = SimpleNamespace(
+            path=source, filename="report.pdf", size_bytes=7, content_sha256=digest
+        )
+
+        response = await client.post(
+            "/web/api/files/upload",
+            data={"content_sha256": digest},
+            files=[("files", ("report.pdf", b"content", "application/pdf"))],
+        )
+
+        assert response.status_code == 202
+        assert (
+            mock_application.corpus_mutations.stage_upload.await_args.kwargs["content_sha256"]
+            == digest
+        )
+
+    async def test_upload_discards_the_whole_stage_after_mid_loop_batch_cap_failure(
+        self, client: AsyncClient, mock_application, test_config: DlightragConfig, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "first.pdf"
+        source.write_bytes(b"first")
+        mock_application.corpus_mutations.stage_upload.return_value = SimpleNamespace(
+            path=source,
+            filename="first.pdf",
+            size_bytes=test_config.max_upload_batch_bytes,
+            content_sha256="a" * 64,
+        )
+
+        response = await client.post(
+            "/web/api/files/upload",
+            files=[
+                ("files", ("first.pdf", b"first", "application/pdf")),
+                ("files", ("second.pdf", b"second", "application/pdf")),
+            ],
+        )
+
+        assert response.status_code == 413
+        mock_application.corpus_mutations.create_staged_batch.assert_not_awaited()
+        mock_application.corpus_mutations.discard_staged_run.assert_awaited_once()
+
+    async def test_upload_discards_the_stage_when_run_acceptance_fails(
+        self, client: AsyncClient, mock_application, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "report.pdf"
+        source.write_bytes(b"content")
+        mock_application.corpus_mutations.stage_upload.return_value = SimpleNamespace(
+            path=source, filename="report.pdf", size_bytes=7, content_sha256="a" * 64
+        )
+        mock_application.corpus_mutations.create_staged_batch.side_effect = RuntimeError(
+            "admission unavailable"
+        )
+
+        response = await client.post(
+            "/web/api/files/upload",
+            files=[("files", ("report.pdf", b"content", "application/pdf"))],
+        )
+
+        assert response.status_code == 503
+        mock_application.corpus_mutations.discard_staged_run.assert_awaited_once()
 
     async def test_upload_rejects_stale_workspace(
         self, client: AsyncClient, test_config: DlightragConfig, mock_application
@@ -1236,7 +1216,7 @@ class TestWebFiles:
 
         assert resp.status_code == 409
         assert "Workspace no longer exists" in resp.text
-        mock_application.corpora.start_ingest_job.assert_not_awaited()
+        mock_application.corpus_mutations.stage_upload.assert_not_awaited()
 
     @pytest.mark.parametrize(
         "filename",
@@ -1254,24 +1234,21 @@ class TestWebFiles:
         with pytest.raises(ValueError):
             safe_upload_relative_path(filename)
 
-    async def test_delete_files(
-        self, client: AsyncClient, test_config: DlightragConfig, mock_application
+    async def test_delete_files_accepts_a_durable_run(
+        self, client: AsyncClient, mock_application
     ) -> None:
-        resp = await client.request(
+        response = await client.request(
             "DELETE",
             "/web/api/files",
             params={"file_path": "/tmp/test.pdf"},
         )
-        assert resp.status_code == 200
-        assert resp.json()["workspace"] == "default"
-        assert resp.json()["files"] == [{"file_name": "test.pdf", "file_path": "/tmp/test.pdf"}]
-        assert resp.json()["next_cursor"] is None
-        mock_application.corpora.delete_files.assert_awaited_once()
-        mock_application.corpora.file_panel_snapshot.assert_awaited_once_with(
-            "default", page=FilePanelPageRequest()
+        assert response.status_code == 202
+        assert response.json()["run_kind"] == "corpus_mutation"
+        mock_application.corpus_mutations.create_delete.assert_awaited_once_with(
+            workspace="default",
+            file_paths=["/tmp/test.pdf"],
+            submitted_by=DEPLOYMENT_OWNER_ID,
         )
-        mock_application.corpora.workspace_exists.assert_awaited_once_with("default")
-        mock_application.corpora.list_workspaces.assert_not_awaited()
 
     async def test_delete_files_rejects_stale_workspace(
         self, client: AsyncClient, test_config: DlightragConfig, mock_application
@@ -1286,7 +1263,7 @@ class TestWebFiles:
 
         assert resp.status_code == 409
         assert "Workspace no longer exists" in resp.text
-        mock_application.corpora.delete_files.assert_not_awaited()
+        mock_application.corpus_mutations.create_delete.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -1355,80 +1332,22 @@ class TestWebWorkspaceCreate:
         assert resp.json()["error"]
 
 
-class TestWebWorkspaceDelete:
-    """Tests for POST /web/api/workspaces/delete."""
-
-    async def test_delete_workspace(
-        self, client: AsyncClient, test_config: DlightragConfig, mock_application
-    ) -> None:
-        mock_application.corpora.reset = AsyncMock(
-            return_value={"workspaces": {}, "total_errors": 0}
-        )
-        mock_application.corpora.list_workspaces = AsyncMock(return_value=["default"])
-        resp = await client.post(
-            "/web/api/workspaces/delete",
-            data={"workspace_name": "test-ws", "confirm_name": "test-ws"},
-        )
-        assert resp.status_code == 200
-        assert resp.json() == {"workspace": "test_ws", "next_workspace": "default"}
-        assert "dlightrag_workspace=default" in resp.headers["set-cookie"]
-        mock_application.corpora.reset.assert_awaited_once_with(workspace_ids=("test_ws",))
-
-    async def test_delete_default_workspace_selects_first_remaining_workspace(
-        self, client: AsyncClient, test_config: DlightragConfig, mock_application
-    ) -> None:
-        mock_application.corpora.reset = AsyncMock(
-            return_value={"workspaces": {}, "total_errors": 0}
-        )
-        mock_application.corpora.list_workspaces = AsyncMock(return_value=["research"])
-
-        resp = await client.post(
-            "/web/api/workspaces/delete",
-            data={"workspace_name": "default", "confirm_name": "default"},
-        )
-
-        assert resp.status_code == 200
-        assert resp.json() == {"workspace": "default", "next_workspace": "research"}
-        set_cookies = resp.headers.get_list("set-cookie")
-        assert any(cookie.startswith("dlightrag_workspace=research;") for cookie in set_cookies)
-        assert any(cookie.startswith("dlightrag_workspace_ids=research;") for cookie in set_cookies)
-
-    async def test_delete_hyphen_workspace_emits_canonical_workspace(
-        self, client: AsyncClient, test_config: DlightragConfig, mock_application
-    ) -> None:
-        mock_application.corpora.reset = AsyncMock(
-            return_value={"workspaces": {}, "total_errors": 0}
-        )
-        mock_application.corpora.list_workspaces = AsyncMock(return_value=["default"])
-
-        resp = await client.post(
-            "/web/api/workspaces/delete",
-            data={"workspace_name": "test-fallback-ws", "confirm_name": "test-fallback-ws"},
-        )
-
-        assert resp.status_code == 200
-        assert resp.json() == {"workspace": "test_fallback_ws", "next_workspace": "default"}
-        mock_application.corpora.reset.assert_awaited_once_with(workspace_ids=("test_fallback_ws",))
-
-    @pytest.mark.parametrize(
-        ("workspace_name", "confirm_name"),
-        [
-            pytest.param("test-ws", "wrong", id="confirm_mismatch"),
-            pytest.param("", "", id="empty_name"),
-        ],
+async def test_reset_workspace_accepts_a_durable_corpus_run(
+    client: AsyncClient, mock_application
+) -> None:
+    response = await client.post(
+        "/web/api/workspaces/reset",
+        data={"workspace_name": "test-ws", "confirm_name": "test-ws"},
     )
-    async def test_delete_workspace_invalid(
-        self,
-        client: AsyncClient,
-        test_config: DlightragConfig,
-        workspace_name: str,
-        confirm_name: str,
-    ) -> None:
-        resp = await client.post(
-            "/web/api/workspaces/delete",
-            data={"workspace_name": workspace_name, "confirm_name": confirm_name},
-        )
-        assert resp.status_code == 400
+
+    assert response.status_code == 202
+    assert response.json()["run_kind"] == "corpus_mutation"
+    assert response.json()["workspace"] == "test_ws"
+    mock_application.corpus_mutations.create_reset.assert_awaited_once_with(
+        workspace="test_ws",
+        submitted_by=DEPLOYMENT_OWNER_ID,
+    )
+    mock_application.corpora.reset.assert_not_awaited()
 
 
 class TestSourcePresentation:

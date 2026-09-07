@@ -19,15 +19,19 @@ from starlette.requests import Request
 
 import dlightrag.adapters.http.browser.answer_events as web_events
 import dlightrag.adapters.http.browser.routes.chat as web_routes
-import dlightrag.adapters.http.rest.routes.answer_runs as rest_routes
+import dlightrag.adapters.http.rest.routes.runs as rest_routes
 from dlightrag.adapters.http.streaming import answer_stream
 from dlightrag.adapters.http.streaming.answer_stream import follow_run_frames, resume_cursor
-from dlightrag.engine.runtime import AnswerRunEvent
+from dlightrag.application.runs import RunEvent
 from tests.unit.web.answer_run_fixtures import stored_result
 
 _RENDERERS = {
     "rest": partial(
-        rest_routes.answer_run_frame, downloadable_workspaces=None, visual_workspaces=None
+        rest_routes.run_frame,
+        downloadable_workspaces=None,
+        visual_workspaces=None,
+        run_id="019893f4-0000-7000-8000-000000000001",
+        run_kind="answer",
     ),
     "web": partial(web_events.browser_frame, downloadable_workspaces=None, visual_workspaces=None),
 }
@@ -45,10 +49,10 @@ def _request(*, header: str | None = None, query: str | None = None) -> Request:
     )
 
 
-def _event(sequence: int, event_type: str, payload: dict[str, Any]) -> AnswerRunEvent:
+def _event(sequence: int, event_type: str, payload: dict[str, Any]) -> RunEvent:
     import datetime
 
-    return AnswerRunEvent(
+    return RunEvent(
         sequence=sequence,
         event_type=event_type,  # type: ignore[arg-type]
         payload=payload,
@@ -63,7 +67,7 @@ class _QuietSubscription:
         self.closed = False
         self._release = release
 
-    async def events(self) -> AsyncIterator[AnswerRunEvent]:
+    async def events(self) -> AsyncIterator[RunEvent]:
         try:
             if self._release is None:
                 await asyncio.Event().wait()
@@ -173,7 +177,7 @@ async def test_cancelling_a_waiting_subscriber_propagates_and_still_detaches(
 
 @pytest.mark.parametrize("render", list(_RENDERERS.values()), ids=list(_RENDERERS))
 async def test_the_stream_ends_when_the_run_committed_its_terminal_event(render: Any) -> None:
-    async def _events() -> AsyncIterator[AnswerRunEvent]:
+    async def _events() -> AsyncIterator[RunEvent]:
         yield _event(1, "progress", {"phase": "planning"})
         yield _event(2, "done", {"status": "cancelled"})
 

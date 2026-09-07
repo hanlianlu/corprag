@@ -432,7 +432,7 @@ async def test_unified_retriever_traces_kg_chunks_dropped_by_scope() -> None:
     class _ScopedReader:
         async def read_scoped(
             self,
-            scope: MetadataScope,
+            scope: MetadataScope | None,
             chunk_ids: list[str],
         ) -> list[dict[str, Any] | None]:
             rows: list[dict[str, Any] | None] = [
@@ -450,6 +450,7 @@ async def test_unified_retriever_traces_kg_chunks_dropped_by_scope() -> None:
                 ]
             )
         ),
+        visibility_lookup=AsyncMock(),
         scoped_reader=_ScopedReader(),
     )
 

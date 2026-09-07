@@ -5,9 +5,10 @@ import asyncio
 import contextlib
 import datetime
 from collections.abc import Iterator
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 
 import jwt
 import pytest
@@ -17,7 +18,12 @@ from httpx import ASGITransport, AsyncClient, Response
 from dlightrag.adapters.http.rest.auth import get_current_user
 from dlightrag.adapters.http.server import create_app
 from dlightrag.application import ApplicationClosedError
-from dlightrag.application.access import AuthenticationError, UserContext, authenticate_bearer_token
+from dlightrag.application.access import (
+    AuthenticationError,
+    UserContext,
+    authenticate_bearer_token,
+    owner_id_from_principal,
+)
 from dlightrag.application.access import authentication as authentication_module
 from dlightrag.application.answer_runs import (
     AnswerRuntimeUnavailableError,
@@ -37,7 +43,6 @@ from dlightrag.application.config import (
 from dlightrag.application.corpus_admin import (
     FilePanelCursor,
     FilePanelCursorCodec,
-    IngestSpec,
     MetadataSearchCursor,
     MetadataSearchCursorCodec,
     MetadataSearchPage,
@@ -47,11 +52,21 @@ from dlightrag.application.corpus_admin import (
     WorkspaceCatalogPage,
 )
 from dlightrag.application.health import ApplicationHealth
-from dlightrag.application.retrieval import CorpusUnavailableError, RetrievalTimeoutError
-from dlightrag.application.retrieval import RetrieveResponse as ServiceResponse
+from dlightrag.application.retrieval import (
+    CorpusUnavailableError,
+    RetrieveProjection,
+    RetrieveResponse,
+    restore_retrieval_result,
+)
+from dlightrag.application.retrieval._answer_projection import project_answer_retrieval
+from dlightrag.application.runs import IdempotencyKeyConflict, RunCapacityExceededError, RunView
 from dlightrag.application.settings import authentication_settings
 from dlightrag.engine.rag.retrieval import RetrievalResult
-from dlightrag.engine.runtime import AnswerRunRecord, RunCreation
+from dlightrag.engine.runtime import (
+    RunAccessScope,
+    RunCreation,
+    RunRecord,
+)
 from tests.config_helpers import clone_config, mutate_config, replace_config
 
 # ---------------------------------------------------------------------------
@@ -60,6 +75,19 @@ from tests.config_helpers import clone_config, mutate_config, replace_config
 
 _ANON = UserContext(user_id="anonymous", auth_mode="none")
 app: FastAPI
+
+
+def _project_stored_retrieval(
+    stored: dict[str, Any], projection: RetrieveProjection
+) -> RetrieveResponse:
+    result = restore_retrieval_result(stored)
+    projected = project_answer_retrieval(result, projection=projection)
+    return RetrieveResponse(
+        contexts=projected.contexts,
+        sources=projected.sources,
+        trace=result.trace,
+        image_descriptions=tuple(result.image_descriptions),
+    )
 
 
 def _finance_source() -> SourceReference:
@@ -89,14 +117,36 @@ def _finance_source_context() -> dict[str, object]:
     }
 
 
-def _queued_run_record() -> AnswerRunRecord:
+def _queued_run_record(
+    *,
+    run_kind: str = "answer",
+    status: str = "queued",
+    result: dict[str, Any] | None = None,
+    workspaces: tuple[str, ...] = ("default",),
+) -> RunRecord:
     now = datetime.datetime(2026, 8, 13, tzinfo=datetime.UTC)
-    return AnswerRunRecord(
-        owner_id="owner",
+    terminal = status in {"succeeded", "failed", "cancelled"}
+    return RunRecord(
         run_id="0199a0a0-0000-7000-8000-0000000000aa",
-        idempotency_key=None,
-        prepared_input={"query": "hi", "workspaces": ["default"]},
-        status="queued",
+        run_kind=run_kind,  # type: ignore[arg-type]
+        lane="corpus_mutation" if run_kind == "corpus_mutation" else "query",
+        submitted_by=owner_id_from_principal(auth_mode="none", user_id="anonymous"),
+        access_scope=(
+            RunAccessScope(kind="workspace", scope_id="default")
+            if run_kind == "corpus_mutation"
+            else RunAccessScope(
+                kind="owner",
+                scope_id=owner_id_from_principal(auth_mode="none", user_id="anonymous"),
+            )
+        ),
+        submission_key=None or "0199a0a0-0000-7000-8000-0000000000aa",
+        request_fingerprint="test-fingerprint",
+        prepared_input=(
+            {"action": "ingest", "workspace": "default"}
+            if run_kind == "corpus_mutation"
+            else {"query": "hi", "workspaces": ["default"]}
+        ),
+        status=status,  # type: ignore[arg-type]
         phase=None,
         stop_reason=None,
         cancel_requested_at=None,
@@ -108,13 +158,14 @@ def _queued_run_record() -> AnswerRunRecord:
         reclaims_without_progress=0,
         next_event_sequence=1,
         events_trimmed_at=None,
-        result=None,
+        result=result,
         error_kind=None,
         error_message=None,
         created_at=now,
         updated_at=now,
         started_at=None,
-        finished_at=None,
+        finished_at=now if terminal else None,
+        accepted_input={"query": "hi", "workspaces": list(workspaces)},
     )
 
 
@@ -164,36 +215,26 @@ def mock_application(_api_app: FastAPI, mock_service, test_config):
     application = AsyncMock()
     application.config = test_config
     corpora = SimpleNamespace()
-    corpora.start_ingest_job = AsyncMock(
-        return_value={
-            "job_id": "job-1",
-            "workspace": "default",
-            "source_type": "s3",
-            "status": "queued",
-            "lease_owner": None,
-            "lease_expires_at": None,
-        }
-    )
-    corpora.get_ingest_job = AsyncMock(
-        return_value={
-            "job_id": "job-1",
-            "workspace": "default",
-            "source_type": "s3",
-            "status": "running",
-            "processed_items": 64,
-            "lease_owner": "worker-7",
-            "lease_expires_at": "2026-08-05T00:00:00+00:00",
-        }
+    application.corpus_mutations = SimpleNamespace(
+        create_ingest=AsyncMock(
+            return_value=RunCreation(
+                run=_queued_run_record(run_kind="corpus_mutation"),
+                replayed=False,
+            )
+        ),
+        create_delete=AsyncMock(),
+        create_retry=AsyncMock(),
+        create_reset=AsyncMock(),
+        stage_upload=AsyncMock(),
+        discard_staged_run=AsyncMock(),
+        create_staged_ingest=AsyncMock(),
+        create_staged_batch=AsyncMock(),
     )
     application.retrieval = SimpleNamespace(
-        retrieve=AsyncMock(
-            return_value=ServiceResponse(
-                contexts={"chunks": [], "entities": [], "relationships": []},
-                sources=(),
-                trace={},
-                image_descriptions=(),
-            )
-        )
+        create=AsyncMock(
+            return_value=RunCreation(run=_queued_run_record(run_kind="retrieval"), replayed=False)
+        ),
+        project_stored=MagicMock(side_effect=_project_stored_retrieval),
     )
     corpora.workspace_catalog_cursor_codec = WorkspaceCatalogCursorCodec(b"api-test")
     corpora.list_workspace_records_page = AsyncMock(
@@ -211,17 +252,28 @@ def mock_application(_api_app: FastAPI, mock_service, test_config):
             fetched_rows=1,
         )
     )
-    application.answers = SimpleNamespace(
-        create=AsyncMock(return_value=RunCreation(run=_queued_run_record(), replayed=False)),
-        get=AsyncMock(return_value=_queued_run_record()),
+    run_get = AsyncMock(return_value=_queued_run_record())
+    application.runs = SimpleNamespace(
+        get=run_get,
+        get_global=AsyncMock(
+            side_effect=lambda **_kwargs: (
+                RunView.from_runtime(run_get.return_value)
+                if run_get.return_value is not None
+                else None
+            )
+        ),
+        list=AsyncMock(return_value=(_queued_run_record(),)),
         cancel=AsyncMock(),
         subscribe=MagicMock(),
+    )
+    application.answers = SimpleNamespace(
+        create=AsyncMock(return_value=RunCreation(run=_queued_run_record(), replayed=False)),
+        list_artifacts=AsyncMock(return_value=()),
         children=AsyncMock(
             return_value=ChildRosterPage(children=(), next_cursor=None, fetched_rows=0)
         ),
         child_roster_cursor_codec=ChildRosterCursorCodec(b"api-server-children"),
     )
-    corpora.cancel_ingest_job = AsyncMock()
     corpora.delete_files = mock_service.adelete_files
     corpora.list_workspaces = AsyncMock(return_value=["default"])
     corpora.alist_workspace_records = AsyncMock(
@@ -264,12 +316,10 @@ def mock_application(_api_app: FastAPI, mock_service, test_config):
     corpora.file_panel_snapshot = AsyncMock(
         return_value={
             "files": [],
-            "pipeline_status": {"busy": False},
             "next_cursor": None,
             "fetched_rows": 0,
         }
     )
-    corpora.get_pipeline_status = AsyncMock(return_value={"busy": False})
     application.corpora = corpora
     application.get_error_info = lambda: {
         "last_error": None,
@@ -517,23 +567,6 @@ class TestWorkspaceLifecycleAPI:
         assert resp.status_code == 409
         mock_application.corpora.create_workspace.assert_not_awaited()
 
-    async def test_delete_workspace_resets_and_removes_registry_row(
-        self, client: AsyncClient, mock_config: DlightragConfig, mock_application
-    ) -> None:
-        app.state.application = mock_application
-
-        resp = await client.delete("/workspaces/Old Workspace?keep_files=true&dry_run=true")
-
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["workspace"] == "old_workspace"
-        assert body["deleted"] is False
-        mock_application.corpora.reset.assert_awaited_once_with(
-            workspace_ids=("old_workspace",),
-            keep_files=True,
-            dry_run=True,
-        )
-
     @pytest.mark.usefixtures("_patch_application")
     async def test_simple_wrong_scheme_401(
         self, client: AsyncClient, mock_config_no_auth_override: DlightragConfig
@@ -563,10 +596,14 @@ class TestWorkspaceLifecycleAPI:
     @pytest.mark.parametrize(
         "method,path,body",
         [
-            ("POST", "/ingest", {"source_type": "local", "path": "/tmp/f.pdf"}),
+            (
+                "POST",
+                "/runs/corpus/ingest",
+                {"source_type": "local", "path": "/tmp/f.pdf"},
+            ),
             ("POST", "/retrieve", {"query": "hello"}),
             ("POST", "/answer", {"query": "hello"}),
-            ("DELETE", "/files", {"filenames": ["f.pdf"]}),
+            ("POST", "/runs/corpus/delete", {"filenames": ["f.pdf"]}),
         ],
     )
     @pytest.mark.usefixtures("_patch_application")
@@ -675,7 +712,7 @@ class TestJWTAuth:
         )
 
         assert resp.status_code == 403
-        mock_application.retrieval.retrieve.assert_not_awaited()
+        mock_application.retrieval.create.assert_not_awaited()
 
     @pytest.mark.usefixtures("_patch_application")
     async def test_jwt_claims_access_control_allows_mapped_workspace(
@@ -716,8 +753,8 @@ class TestJWTAuth:
             headers={"Authorization": f"Bearer {token}"},
         )
 
-        assert resp.status_code == 200
-        mock_application.retrieval.retrieve.assert_awaited_once()
+        assert resp.status_code == 202
+        mock_application.retrieval.create.assert_awaited_once()
 
     @pytest.mark.usefixtures("_patch_application")
     @pytest.mark.parametrize(
@@ -1001,257 +1038,88 @@ class TestAuthenticateBearerToken:
 # ---------------------------------------------------------------------------
 
 
-class TestIngestEndpoint:
-    """Test /ingest validation and routing."""
+class TestCorpusMutationEndpoints:
+    """Run-native Corpus Mutation validation and acceptance."""
 
     @pytest.mark.parametrize("source_type", ["local", "azure_blob", "s3", "url"])
     @pytest.mark.usefixtures("_patch_application")
-    async def test_source_requires_identity(
-        self,
-        client: AsyncClient,
-        mock_config: DlightragConfig,
-        source_type: str,
+    async def test_ingest_source_requires_identity(
+        self, client: AsyncClient, source_type: str
     ) -> None:
-        resp = await client.post("/ingest", json={"source_type": source_type})
-        assert resp.status_code == 422
-
-    @pytest.mark.usefixtures("_patch_application")
-    async def test_url_rejects_both_url_and_urls(
-        self, client: AsyncClient, mock_config: DlightragConfig
-    ) -> None:
-        resp = await client.post(
-            "/ingest",
-            json={
-                "source_type": "url",
-                "url": "https://api.bynder.com/docs/getting-started",
-                "urls": ["https://api.bynder.com/docs/other"],
-            },
+        response = await client.post(
+            "/runs/corpus/ingest",
+            headers={"Idempotency-Key": "missing-source"},
+            json={"source_type": source_type},
         )
-        assert resp.status_code == 422
+        assert response.status_code == 422
 
-    async def test_local_defaults_to_background_job(
+    async def test_ingest_accepts_common_run_descriptor(
         self, client: AsyncClient, mock_config: DlightragConfig, mock_application
     ) -> None:
-        path = mock_config.input_dir_path / "default" / "file.pdf"
         app.state.application = mock_application
-        resp = await client.post(
-            "/ingest",
+        response = await client.post(
+            "/runs/corpus/ingest",
+            headers={"Idempotency-Key": "ingest-file-1"},
             json={"source_type": "local", "path": "file.pdf"},
         )
-        assert resp.status_code == 202
-        assert resp.json()["job_id"] == "job-1"
-        mock_application.corpora.start_ingest_job.assert_awaited_once_with(
-            "default",
-            IngestSpec(source_type="local", path=str(path)),
-        )
+        assert response.status_code == 202
+        assert response.json()["run_kind"] == "corpus_mutation"
+        spec = mock_application.corpus_mutations.create_ingest.await_args.kwargs["spec"]
+        assert spec.path == str(mock_config.input_dir_path / "default" / "file.pdf")
 
-    async def test_local_path_must_be_under_input_dir(
-        self, client: AsyncClient, mock_config: DlightragConfig, mock_application
+    async def test_rest_upload_discards_unaccepted_stage_through_mutation_service(
+        self, client: AsyncClient, mock_application, tmp_path: Path
     ) -> None:
         app.state.application = mock_application
-        resp = await client.post(
-            "/ingest",
-            json={"source_type": "local", "path": "/data/file.pdf"},
+        source = tmp_path / "report.pdf"
+        source.write_bytes(b"content")
+        mock_application.corpus_mutations.stage_upload.return_value = SimpleNamespace(
+            path=source,
+            filename="report.pdf",
+            size_bytes=7,
+            content_sha256="a" * 64,
         )
-        assert resp.status_code == 400
-        assert "relative to input_dir" in resp.json()["detail"]
-        mock_application.corpora.start_ingest_job.assert_not_awaited()
+        mock_application.corpus_mutations.create_staged_ingest.side_effect = ValueError(
+            "acceptance rejected"
+        )
 
-    async def test_local_path_rejects_traversal(
+        response = await client.post(
+            "/runs/corpus/ingest/upload",
+            headers={"Idempotency-Key": "upload-1"},
+            files={"file": ("report.pdf", b"content", "application/pdf")},
+        )
+
+        assert response.status_code == 400
+        cleanup = mock_application.corpus_mutations.discard_staged_run.await_args.kwargs
+        assert cleanup["workspace"] == "default"
+        assert cleanup["run_id"]
+
+    async def test_ingest_requires_idempotency_key(
         self, client: AsyncClient, mock_application
     ) -> None:
         app.state.application = mock_application
-        resp = await client.post(
-            "/ingest",
-            json={
-                "source_type": "local",
-                "path": "../default/file.pdf",
-                "workspace": "project-x",
-            },
-        )
-
-        assert resp.status_code == 400
-        assert "relative to input_dir" in resp.json()["detail"]
-        mock_application.corpora.start_ingest_job.assert_not_awaited()
-
-    async def test_blob_upload_stages_file_for_local_ingest(
-        self, client: AsyncClient, mock_config: DlightragConfig, mock_application
-    ) -> None:
-        mock_application.config = mock_config
-        mock_application.corpora.start_ingest_job.return_value = {
-            "job_id": "job-1",
-            "workspace": "default",
-            "source_type": "local",
-            "status": "queued",
-            "lease_owner": None,
-            "lease_expires_at": None,
-        }
-
-        async def fake_stage_upload(workspace, *, filename, reader, max_bytes):
-            del reader
-            path = mock_config.input_dir_path / workspace / filename
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(b"%PDF-fake")
-            return path, filename
-
-        mock_application.corpora.stage_upload_stream = fake_stage_upload
-        app.state.application = mock_application
-
-        resp = await client.post(
-            "/ingest/blob",
-            files={"file": ("report.pdf", b"%PDF-fake", "application/pdf")},
-        )
-
-        assert resp.status_code == 202
-        body = resp.json()
-        assert body["job_id"] == "job-1"
-        assert body["filename"] == "report.pdf"
-        assert "lease_owner" not in body
-        call_args = mock_application.corpora.start_ingest_job.call_args
-        assert call_args.args[0] == "default"
-        ingest_spec = call_args.args[1]
-        assert ingest_spec.source_type == "local"
-        assert ingest_spec.path.startswith(str(mock_config.input_dir_path / "default"))
-
-    async def test_get_get_ingest_job(
-        self, client: AsyncClient, mock_config: DlightragConfig, mock_application
-    ) -> None:
-        app.state.application = mock_application
-
-        resp = await client.get("/ingest/jobs/job-1")
-
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["processed_items"] == 64
-        # Queue bookkeeping stays server-side.
-        assert "lease_owner" not in body
-        assert "lease_expires_at" not in body
-        mock_application.corpora.get_ingest_job.assert_awaited_once_with("job-1")
-
-    async def test_cancel_ingest_job(
-        self, client: AsyncClient, mock_config: DlightragConfig, mock_application
-    ) -> None:
-        app.state.application = mock_application
-        mock_application.corpora.cancel_ingest_job = AsyncMock(
-            return_value={
-                "job_id": "job-1",
-                "workspace": "default",
-                "source_type": "s3",
-                "status": "failed",
-                "processed_items": 64,
-            }
-        )
-
-        resp = await client.post("/ingest/jobs/job-1/cancel")
-
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["status"] == "failed"
-        # Cancelling stops further work; it never unwinds what already landed.
-        assert body["processed_items"] == 64
-        mock_application.corpora.cancel_ingest_job.assert_awaited_once_with("job-1")
-
-    async def test_ingest_job_routes_canonicalize_stored_workspace_before_access(
-        self,
-        client: AsyncClient,
-        mock_config: DlightragConfig,
-        mock_application,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        from dlightrag.adapters.http.rest.routes import rag as rag_routes
-
-        app.state.application = mock_application
-        job = {
-            "job_id": "job-1",
-            "workspace": "Finance Reports",
-            "source_type": "s3",
-            "status": "running",
-        }
-        mock_application.corpora.get_ingest_job.return_value = job
-        mock_application.corpora.cancel_ingest_job.return_value = job
-        enforce = AsyncMock()
-        monkeypatch.setattr(rag_routes, "enforce_access", enforce)
-
-        await client.get("/ingest/jobs/job-1")
-        await client.post("/ingest/jobs/job-1/cancel")
-
-        assert [call.kwargs["workspace"] for call in enforce.await_args_list] == [
-            "finance_reports",
-            "finance_reports",
-        ]
-
-    async def test_cancel_unknown_ingest_job_is_404(
-        self, client: AsyncClient, mock_config: DlightragConfig, mock_application
-    ) -> None:
-        app.state.application = mock_application
-        mock_application.corpora.get_ingest_job = AsyncMock(return_value=None)
-        mock_application.corpora.cancel_ingest_job = AsyncMock()
-
-        resp = await client.post("/ingest/jobs/nope/cancel")
-
-        assert resp.status_code == 404
-        mock_application.corpora.cancel_ingest_job.assert_not_awaited()
-
-    @pytest.mark.usefixtures("_patch_application")
-    async def test_s3_key_and_prefix_mutually_exclusive(
-        self, client: AsyncClient, mock_config: DlightragConfig
-    ) -> None:
-        resp = await client.post(
-            "/ingest",
-            json={
-                "source_type": "s3",
-                "bucket": "my-bucket",
-                "key": "docs/file.pdf",
-                "prefix": "docs/",
-            },
-        )
-        assert resp.status_code == 422
-
-    @pytest.mark.usefixtures("_patch_application")
-    async def test_azure_blob_path_and_prefix_mutually_exclusive(
-        self, client: AsyncClient, mock_config: DlightragConfig
-    ) -> None:
-        resp = await client.post(
-            "/ingest",
-            json={
-                "source_type": "azure_blob",
-                "container_name": "c",
-                "blob_path": "docs/file.pdf",
-                "prefix": "docs/",
-            },
-        )
-        assert resp.status_code == 422
-
-    async def test_ingest_with_workspace(
-        self, client: AsyncClient, mock_config: DlightragConfig, mock_application
-    ) -> None:
-        path = mock_config.input_dir_path / "project_x" / "file.pdf"
-        app.state.application = mock_application
-        resp = await client.post(
-            "/ingest",
-            json={
-                "source_type": "local",
-                "path": "file.pdf",
-                "workspace": "project-x",
-            },
-        )
-        assert resp.status_code == 202
-        call_kwargs = mock_application.corpora.start_ingest_job.call_args
-        assert call_kwargs[0][0] == "project_x"  # normalized: hyphens → underscores
-        assert call_kwargs.args[1].path == str(path)
-
-    async def test_ingest_service_unavailable_503(
-        self, client: AsyncClient, mock_config: DlightragConfig, mock_application
-    ) -> None:
-        mock_application.corpora.start_ingest_job = AsyncMock(
-            side_effect=CorpusUnavailableError("RAG not ready")
-        )
-        app.state.application = mock_application
-        resp = await client.post(
-            "/ingest",
+        response = await client.post(
+            "/runs/corpus/ingest",
             json={"source_type": "local", "path": "file.pdf"},
         )
-        assert resp.status_code == 503
+        assert response.status_code == 400
+        mock_application.corpus_mutations.create_ingest.assert_not_awaited()
+
+    @pytest.mark.usefixtures("_patch_application")
+    async def test_legacy_ingest_and_job_routes_are_absent(self, client: AsyncClient) -> None:
+        assert (await client.post("/ingest", json={})).status_code == 404
+        assert (await client.get("/ingest/jobs/old-job")).status_code == 404
+
+    async def test_list_runs_maps_an_empty_workspace_selector_to_bounded_400(
+        self, client: AsyncClient, mock_application
+    ) -> None:
+        app.state.application = mock_application
+
+        response = await client.get("/runs?workspace=")
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "Invalid workspace"
+        mock_application.runs.list.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -1260,43 +1128,52 @@ class TestIngestEndpoint:
 
 
 class TestRetrieveEndpoint:
-    """Test /retrieve endpoint."""
+    """Test durable ``POST /retrieve`` and common result observation."""
 
-    async def test_retrieve_success(
+    async def test_retrieve_accepts_with_common_descriptor(
         self, client: AsyncClient, mock_config: DlightragConfig, mock_application
     ) -> None:
-        mock_application.retrieval.retrieve.return_value = ServiceResponse(
-            contexts={"chunks": [], "entities": [], "relationships": []},
-            sources=(),
-            trace={"lightrag_mix_chunk_count": 2},
-            image_descriptions=(),
-        )
         app.state.application = mock_application
-        resp = await client.post("/retrieve", json={"query": "What is RAG?"})
-        assert resp.status_code == 200
-        body = resp.json()
-        assert "answer" not in body
-        assert "contexts" in body
-        assert "sources" in body
-        assert body["trace"] == {"lightrag_mix_chunk_count": 2}
-        assert "semantic_chunk_count" not in body["trace"]
-        request = mock_application.retrieval.retrieve.await_args.args[0]
-        assert request.chunk_top_k is None
 
-    async def test_retrieve_timeout_is_504(
+        response = await client.post(
+            "/retrieve",
+            json={"query": "What is RAG?"},
+            headers={"Idempotency-Key": "retrieve-1"},
+        )
+
+        assert response.status_code == 202
+        assert response.json() == {
+            "run_id": "0199a0a0-0000-7000-8000-0000000000aa",
+            "run_kind": "retrieval",
+            "lane": "query",
+            "status": "queued",
+            "status_url": "/runs/0199a0a0-0000-7000-8000-0000000000aa",
+            "events_url": "/runs/0199a0a0-0000-7000-8000-0000000000aa/events",
+            "cancel_url": "/runs/0199a0a0-0000-7000-8000-0000000000aa",
+            "parent_run_id": None,
+            "continuation_kind": None,
+        }
+        call = mock_application.retrieval.create.await_args
+        assert call is not None
+        assert call.kwargs["idempotency_key"] == "retrieve-1"
+        assert call.kwargs["request"].workspaces == ("default",)
+        assert call.kwargs["request"].chunk_top_k is None
+        assert "projection" not in call.kwargs["request"].__dataclass_fields__
+
+    async def test_retrieve_returns_before_execution_timeout(
         self, client: AsyncClient, mock_config: DlightragConfig, mock_application
     ) -> None:
-        mock_application.retrieval.retrieve.side_effect = RetrievalTimeoutError("timed out")
         app.state.application = mock_application
 
         response = await client.post("/retrieve", json={"query": "slow"})
 
-        assert response.status_code == 504
+        assert response.status_code == 202
+        mock_application.retrieval.create.assert_awaited_once()
 
     async def test_retrieve_closed_service_is_503(
         self, client: AsyncClient, mock_config: DlightragConfig, mock_application
     ) -> None:
-        mock_application.retrieval.retrieve.side_effect = CorpusUnavailableError(
+        mock_application.retrieval.create.side_effect = CorpusUnavailableError(
             "Retrieval service is closed"
         )
         app.state.application = mock_application
@@ -1306,37 +1183,40 @@ class TestRetrieveEndpoint:
         assert response.status_code == 503
         assert response.json()["error_type"] == "unavailable"
 
-    async def test_retrieve_projects_source_workspace_without_internal_fields(
+    async def test_retrieve_changed_idempotent_input_is_409(
         self, client: AsyncClient, mock_config: DlightragConfig, mock_application
     ) -> None:
-        mock_application.retrieval.retrieve.return_value = ServiceResponse(
-            contexts={"chunks": [_finance_source_context()]},
-            sources=(
-                {
-                    "id": "1",
-                    "title": "report.pdf",
-                    "type": "document",
-                    "source_uri": "s3://bucket/report.pdf",
-                    "download_url": "/files/raw/doc-report?workspace=finance",
-                    "cited_chunk_ids": None,
-                    "chunks": [],
-                },
-            ),
-            trace={},
-            image_descriptions=(),
-        )
+        mock_application.retrieval.create.side_effect = IdempotencyKeyConflict("changed")
         app.state.application = mock_application
 
         response = await client.post(
             "/retrieve",
-            json={"query": "report", "workspaces": ["finance"]},
+            json={"query": "changed"},
+            headers={"Idempotency-Key": "retrieve-1"},
         )
 
+        assert response.status_code == 409
+
+    async def test_retrieve_projects_terminal_result_with_current_permissions(
+        self, client: AsyncClient, mock_config: DlightragConfig, mock_application
+    ) -> None:
+        stored = {
+            "contexts": {"chunks": [_finance_source_context()]},
+            "trace": {"lightrag_mix_chunk_count": 2},
+            "image_descriptions": [],
+        }
+        mock_application.runs.get.return_value = _queued_run_record(
+            run_kind="retrieval", status="succeeded", result=stored, workspaces=("finance",)
+        )
+        app.state.application = mock_application
+
+        response = await client.get("/runs/0199a0a0-0000-7000-8000-0000000000aa")
+
         assert response.status_code == 200
-        source = response.json()["sources"][0]
-        assert source["source_uri"] == "s3://bucket/report.pdf"
-        assert source["download_url"] == "/files/raw/doc-report?workspace=finance"
-        assert {"workspace", "download_locator", "path", "url"}.isdisjoint(source)
+        result = response.json()["result"]
+        assert result["trace"] == {"lightrag_mix_chunk_count": 2}
+        assert result["sources"][0]["download_url"] == ("/files/raw/doc-report?workspace=finance")
+        assert {"workspace", "download_locator", "path", "url"}.isdisjoint(result["sources"][0])
 
     async def test_retrieve_omits_download_and_visual_links_without_permissions(
         self, client: AsyncClient, mock_config: DlightragConfig, mock_application
@@ -1350,42 +1230,31 @@ class TestRetrieveEndpoint:
                     return []
                 return list(workspaces)
 
-        mock_application.retrieval.retrieve.return_value = ServiceResponse(
-            contexts={"chunks": [{**_finance_source_context(), "image_data": "bytes"}]},
-            sources=(
-                {
-                    "id": "1",
-                    "title": "report.pdf",
-                    "type": "document",
-                    "source_uri": "s3://bucket/report.pdf",
-                    "download_url": None,
-                    "cited_chunk_ids": None,
-                    "chunks": [],
-                },
-            ),
-            trace={},
-            image_descriptions=(),
+        chunk = {**_finance_source_context(), "_has_visual_asset": True}
+        mock_application.runs.get.return_value = _queued_run_record(
+            run_kind="retrieval",
+            status="succeeded",
+            result={
+                "contexts": {"chunks": [chunk]},
+                "trace": {},
+                "image_descriptions": [],
+            },
+            workspaces=("finance",),
         )
         app.state.application = mock_application
         app.state.access_control = QueryOnlyAccess()
-
         try:
-            response = await client.post(
-                "/retrieve",
-                json={"query": "report", "workspaces": ["finance"]},
-            )
+            response = await client.get("/runs/0199a0a0-0000-7000-8000-0000000000aa")
         finally:
             del app.state.access_control
 
-        assert response.status_code == 200
-        assert response.json()["sources"][0]["download_url"] is None
-        assert "image_url" not in response.json()["contexts"]["chunks"][0]
+        result = response.json()["result"]
+        assert result["sources"][0]["download_url"] is None
+        assert "image_url" not in result["contexts"]["chunks"][0]
+        assert "_has_visual_asset" not in result["contexts"]["chunks"][0]
 
-    async def test_retrieve_all_workspaces_uses_all_visible_records(
-        self,
-        client: AsyncClient,
-        mock_config: DlightragConfig,
-        mock_application,
+    async def test_retrieve_all_workspaces_pins_visible_records(
+        self, client: AsyncClient, mock_config: DlightragConfig, mock_application
     ) -> None:
         mock_application.corpora.alist_workspace_records.return_value = [
             {"workspace": "default"},
@@ -1393,53 +1262,43 @@ class TestRetrieveEndpoint:
         ]
         app.state.application = mock_application
 
-        response = await client.post(
-            "/retrieve",
-            json={"query": "hello", "all_workspaces": True},
-        )
+        response = await client.post("/retrieve", json={"query": "hello", "all_workspaces": True})
 
-        assert response.status_code == 200
-        request = mock_application.retrieval.retrieve.await_args.args[0]
+        assert response.status_code == 202
+        request = mock_application.retrieval.create.await_args.kwargs["request"]
         assert request.workspaces == ("default", "research_notes")
 
     async def test_retrieve_rejects_mode_field(
         self, client: AsyncClient, mock_config: DlightragConfig, mock_application
     ) -> None:
         app.state.application = mock_application
-        resp = await client.post(
-            "/retrieve",
-            json={"query": "hello", "mode": "local"},
-        )
-        assert resp.status_code == 422
-        mock_application.retrieval.retrieve.assert_not_called()
+        response = await client.post("/retrieve", json={"query": "hello", "mode": "local"})
 
-    async def test_retrieve_forwards_chunk_top_k_field(
+        assert response.status_code == 422
+        mock_application.retrieval.create.assert_not_awaited()
+
+    async def test_retrieve_forwards_chunk_top_k_and_query_images(
         self, client: AsyncClient, mock_config: DlightragConfig, mock_application
     ) -> None:
         app.state.application = mock_application
-        resp = await client.post(
+        response = await client.post(
             "/retrieve",
-            json={"query": "hello", "chunk_top_k": 5},
+            json={
+                "query": "hello",
+                "chunk_top_k": 5,
+                "query_images": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,AA=="},
+                    }
+                ],
+            },
         )
-        assert resp.status_code == 200
-        request = mock_application.retrieval.retrieve.await_args.args[0]
+
+        assert response.status_code == 202
+        request = mock_application.retrieval.create.await_args.kwargs["request"]
         assert request.chunk_top_k == 5
-
-    async def test_retrieve_passes_reader_scope_to_service(
-        self,
-        client: AsyncClient,
-        mock_config: DlightragConfig,
-        mock_application,
-    ) -> None:
-        app.state.application = mock_application
-
-        resp = await client.post("/retrieve", json={"query": "hello"})
-
-        assert resp.status_code == 200
-        request = mock_application.retrieval.retrieve.await_args.args[0]
-        assert request.projection.include_download_links is True
-        assert request.projection.downloadable_workspaces == frozenset({"default"})
-        assert request.projection.visual_workspaces == frozenset({"default"})
+        assert len(request.query_images) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1467,7 +1326,16 @@ class TestHealthEndpoint:
         body = resp.json()
         assert body["status"] == "healthy"
         assert "rag_initialized" in body
-        assert "storage" in body
+        assert body["storage"]["doc_status"] == "PGDocStatusStorage"
+        assert set(body["components"]) == {
+            "process",
+            "operational_state",
+            "run_coordinator",
+            "cancellation_listener",
+            "corpus_storage",
+            "parser",
+            "providers",
+        }
         assert "postgres" not in body
         probe.assert_not_awaited()
         cap = body["answer_image_capability"]
@@ -1488,12 +1356,13 @@ class TestHealthEndpointEnhanced:
     async def test_health_shows_degraded(
         self, client: AsyncClient, mock_config: DlightragConfig, mock_application
     ) -> None:
-        mock_application.health.mark_degraded("Embedding unreachable")
+        mock_application.health.mark_component_degraded("providers")
         app.state.application = mock_application
         resp = await client.get("/health")
         body = resp.json()
         assert body["status"] == "degraded"
-        assert "Embedding unreachable" in body["warnings"]
+        assert "Model providers unavailable" in body["warnings"]
+        assert body["components"]["providers"]["status"] == "degraded"
 
     async def test_health_healthy_no_warnings(
         self,
@@ -1604,63 +1473,54 @@ class TestReadinessEndpoint:
             "detail": "DlightRAG domain database session is not writable",
         }
 
-    async def test_reader_requires_read_only_corpus_session(
+    async def test_reader_corpus_outage_does_not_change_control_plane_readiness(
         self,
         client: AsyncClient,
         mock_config: DlightragConfig,
         mock_application,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        import dlightrag.adapters.postgres.corpus.corpus as corpus_module
+        import dlightrag.adapters.postgres.corpus.lightrag_readonly as readonly_module
         from dlightrag.adapters.postgres.core._pool import pg_pool
         from dlightrag.adapters.postgres.corpus.corpus import PGReadinessProbe
 
         mutate_config(mock_config, "deployment.service_role", "reader")
         mock_application.health = ApplicationHealth(readiness_probe=PGReadinessProbe(mock_config))
         mock_application.health.mark_ready()
+        mock_application.health.mark_component_degraded("corpus_storage")
         app.state.health = mock_application.health
         monkeypatch.setattr(pg_pool, "run_once", AsyncMock(return_value="off"))
-        monkeypatch.setattr(
-            corpus_module,
-            "verify_reader_corpus_session",
-            AsyncMock(side_effect=RuntimeError("corpus pool is not read-only")),
-        )
-        app.state.application = mock_application
-
-        response = await client.get("/ready")
-
-        assert response.status_code == 503
-        assert response.json() == {
-            "status": "not_ready",
-            "service_role": "reader",
-            "detail": "Reader corpus database session is not read-only or is unavailable",
-        }
-
-    async def test_reader_is_ready_with_writable_domain_and_read_only_corpus(
-        self,
-        client: AsyncClient,
-        mock_config: DlightragConfig,
-        mock_application,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        import dlightrag.adapters.postgres.corpus.corpus as corpus_module
-        from dlightrag.adapters.postgres.core._pool import pg_pool
-        from dlightrag.adapters.postgres.corpus.corpus import PGReadinessProbe
-
-        mutate_config(mock_config, "deployment.service_role", "reader")
-        mock_application.health = ApplicationHealth(readiness_probe=PGReadinessProbe(mock_config))
-        mock_application.health.mark_ready()
-        app.state.health = mock_application.health
-        monkeypatch.setattr(pg_pool, "run_once", AsyncMock(return_value="off"))
-        corpus_probe = AsyncMock()
-        monkeypatch.setattr(corpus_module, "verify_reader_corpus_session", corpus_probe)
+        corpus_probe = AsyncMock(side_effect=RuntimeError("corpus pool unavailable"))
+        monkeypatch.setattr(readonly_module, "verify_reader_corpus_session", corpus_probe)
         app.state.application = mock_application
 
         response = await client.get("/ready")
 
         assert response.status_code == 200
         assert response.json() == {"status": "ready", "service_role": "reader"}
-        corpus_probe.assert_awaited_once_with()
+        corpus_probe.assert_not_awaited()
+
+    async def test_reader_is_ready_with_writable_operational_state(
+        self,
+        client: AsyncClient,
+        mock_config: DlightragConfig,
+        mock_application,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from dlightrag.adapters.postgres.core._pool import pg_pool
+        from dlightrag.adapters.postgres.corpus.corpus import PGReadinessProbe
+
+        mutate_config(mock_config, "deployment.service_role", "reader")
+        mock_application.health = ApplicationHealth(readiness_probe=PGReadinessProbe(mock_config))
+        mock_application.health.mark_ready()
+        app.state.health = mock_application.health
+        monkeypatch.setattr(pg_pool, "run_once", AsyncMock(return_value="off"))
+        app.state.application = mock_application
+
+        response = await client.get("/ready")
+
+        assert response.status_code == 200
+        assert response.json() == {"status": "ready", "service_role": "reader"}
 
     async def test_repeated_polls_reuse_one_cached_probe(
         self,
@@ -1752,6 +1612,7 @@ class TestReadinessEndpoint:
         probe = AsyncMock(return_value=None)
         health = ApplicationHealth(readiness_probe=probe, readiness_cache_seconds=0.0)
         health.mark_ready()
+        mock_application.health = health
         app.state.health = health
         app.state.application = mock_application
 
@@ -1760,7 +1621,7 @@ class TestReadinessEndpoint:
 
         assert probe.await_count == 2
 
-    async def test_a_not_ready_transition_invalidates_the_cached_verdict(
+    async def test_only_operational_not_ready_transition_invalidates_cached_verdict(
         self,
         client: AsyncClient,
         mock_application,
@@ -1774,7 +1635,9 @@ class TestReadinessEndpoint:
         app.state.application = mock_application
 
         assert (await client.get("/ready")).status_code == 200
-        mock_application.health.mark_degraded("temporary startup failure")
+        mock_application.health.mark_component_degraded("corpus_storage")
+        assert (await client.get("/ready")).status_code == 200
+        mock_application.health.mark_not_ready()
         assert (await client.get("/ready")).status_code == 503
         mock_application.health.mark_ready()
         assert (await client.get("/ready")).status_code == 200
@@ -1788,55 +1651,43 @@ class TestReadinessEndpoint:
 
 
 class TestDeleteEndpoint:
-    """Test DELETE /files endpoint."""
-
-    async def test_delete_by_filenames(
-        self, client: AsyncClient, mock_config: DlightragConfig, mock_application
+    async def test_delete_accepts_exact_identifiers_as_a_run(
+        self, client: AsyncClient, mock_application
     ) -> None:
+        mock_application.corpus_mutations.create_delete.return_value = RunCreation(
+            run=_queued_run_record(run_kind="corpus_mutation"), replayed=False
+        )
         app.state.application = mock_application
-        resp = await client.request(
-            "DELETE",
-            "/files",
+        response = await client.post(
+            "/runs/corpus/delete",
+            headers={"Idempotency-Key": "delete-report"},
             json={"filenames": ["report.pdf"]},
         )
-        assert resp.status_code == 200
-        mock_application.corpora.delete_files.assert_awaited_once()
+        assert response.status_code == 202
+        assert response.json()["run_kind"] == "corpus_mutation"
+        mock_application.corpus_mutations.create_delete.assert_awaited_once_with(
+            workspace="default",
+            submitted_by=ANY,
+            file_paths=(),
+            filenames=["report.pdf"],
+            document_ids=(),
+            idempotency_key="delete-report",
+        )
 
-    async def test_delete_by_file_paths(
-        self, client: AsyncClient, mock_config: DlightragConfig, mock_application
+    async def test_delete_requires_an_identifier(
+        self, client: AsyncClient, mock_application
     ) -> None:
         app.state.application = mock_application
-        resp = await client.request(
-            "DELETE",
-            "/files",
-            json={"file_paths": ["/storage/report.pdf"]},
+        response = await client.post(
+            "/runs/corpus/delete",
+            headers={"Idempotency-Key": "delete-empty"},
+            json={},
         )
-        assert resp.status_code == 200
+        assert response.status_code == 400
 
-    async def test_delete_with_workspace(
-        self, client: AsyncClient, mock_config: DlightragConfig, mock_application
-    ) -> None:
-        app.state.application = mock_application
-        resp = await client.request(
-            "DELETE",
-            "/files",
-            json={"filenames": ["report.pdf"], "workspace": "project-y"},
-        )
-        assert resp.status_code == 200
-        call_kwargs = mock_application.corpora.delete_files.call_args
-        assert call_kwargs[0][0] == "project_y"  # normalized: hyphens → underscores
-
-    async def test_delete_forwards_dry_run(
-        self, client: AsyncClient, mock_config: DlightragConfig, mock_application
-    ) -> None:
-        app.state.application = mock_application
-        resp = await client.request(
-            "DELETE",
-            "/files",
-            json={"filenames": ["report.pdf"], "dry_run": True},
-        )
-        assert resp.status_code == 200
-        assert mock_application.corpora.delete_files.call_args.kwargs["dry_run"] is True
+    @pytest.mark.usefixtures("_patch_application")
+    async def test_legacy_delete_route_is_not_a_mutator(self, client: AsyncClient) -> None:
+        assert (await client.request("DELETE", "/files", json={})).status_code == 405
 
 
 # ---------------------------------------------------------------------------
@@ -1967,6 +1818,19 @@ class TestAnswerEndpoint:
         app.state.application = mock_application
         resp = await client.post("/answer", json={"query": "hello"})
         assert resp.status_code == 503
+
+    async def test_answer_admission_capacity_is_rejected_before_acceptance(
+        self, client: AsyncClient, mock_config: DlightragConfig, mock_application
+    ) -> None:
+        mock_application.answers.create = AsyncMock(
+            side_effect=RunCapacityExceededError("query lane is full")
+        )
+        app.state.application = mock_application
+
+        response = await client.post("/answer", json={"query": "hello"})
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == "Run admission capacity is full"
 
     async def test_answer_runtime_unavailable_503(
         self, client: AsyncClient, mock_config: DlightragConfig, mock_application
@@ -2194,7 +2058,6 @@ class TestFilesEndpoint:
     ) -> None:
         mock_application.corpora.file_panel_snapshot.return_value = {
             "files": [{"doc_id": value} for value in ("a", "b", "c")],
-            "pipeline_status": {},
             "next_cursor": None,
             "fetched_rows": 3,
         }
@@ -2225,7 +2088,6 @@ class TestFilesEndpoint:
         )
         mock_application.corpora.file_panel_snapshot.return_value = {
             "files": [{"doc_id": "doc-1"}],
-            "pipeline_status": {},
             "next_cursor": next_cursor,
             "fetched_rows": 2,
         }
@@ -2303,32 +2165,28 @@ class TestAPIContracts:
         assert resp.status_code == 200
         spec = resp.json()
         schemas = spec["components"]["schemas"]
-        assert "RetrievalResponse" in schemas
         assert "AnswerResponse" in schemas
-        assert "AnswerRunDescriptor" in schemas
-        assert "AnswerRunStatusResponse" in schemas
-        assert "AnswerRunStatus" not in schemas
-        assert "AnswerRunPhase" not in schemas
-        assert schemas["AnswerRunDescriptor"]["properties"]["status"] == {
+        assert "RunDescriptor" in schemas
+        assert "RunStatusResponse" in schemas
+        assert "RunStatus" not in schemas
+        assert "RunPhase" not in schemas
+        assert schemas["RunDescriptor"]["properties"]["status"] == {
             "type": "string",
             "enum": ["queued", "running", "succeeded", "failed", "cancelled"],
             "title": "Status",
         }
-        phase_schema = schemas["AnswerRunStatusResponse"]["properties"]["phase"]
-        assert phase_schema["anyOf"][0] == {
-            "type": "string",
-            "enum": ["routing", "planning", "searching", "researching", "generating"],
-        }
+        phase_schema = schemas["RunStatusResponse"]["properties"]["phase"]
+        assert phase_schema["anyOf"][0] == {"type": "string"}
         ingest_properties = schemas["IngestRequest"]["properties"]
         assert "download_uri" in ingest_properties
         assert "download_uris" in ingest_properties
         assert "download_url" not in ingest_properties
         assert "download_urls" not in ingest_properties
         assert (
-            spec["paths"]["/retrieve"]["post"]["responses"]["200"]["content"]["application/json"][
+            spec["paths"]["/retrieve"]["post"]["responses"]["202"]["content"]["application/json"][
                 "schema"
             ]["$ref"]
-            == "#/components/schemas/RetrievalResponse"
+            == "#/components/schemas/RunDescriptor"
         )
         assert (
             spec["paths"]["/workspaces"]["get"]["responses"]["200"]["content"]["application/json"][
@@ -2733,14 +2591,6 @@ async def test_real_app_returns_413_for_chunked_answer_multipart_overflow(
     application = create_app(include_web_app=False)
     application_double = AsyncMock()
     application_double.config = mock_config
-    application_double.corpora.start_ingest_job.return_value = {
-        "job_id": "job-overflow",
-        "workspace": "default",
-        "source_type": "local",
-        "status": "queued",
-        "lease_owner": None,
-        "lease_expires_at": None,
-    }
     application.state.application = application_double
     response = await _post(
         application,
@@ -2780,18 +2630,10 @@ async def test_real_app_caps_chunked_ingest_multipart_before_parsing(
     application = create_app(include_web_app=False)
     application_double = AsyncMock()
     application_double.config = mock_config
-    application_double.corpora.start_ingest_job.return_value = {
-        "job_id": "job-overflow",
-        "workspace": "default",
-        "source_type": "local",
-        "status": "queued",
-        "lease_owner": None,
-        "lease_expires_at": None,
-    }
     application.state.application = application_double
     response = await _post(
         application,
-        "/ingest/blob",
+        "/runs/corpus/ingest/upload",
         content=chunks(),
         headers={"content-type": "multipart/form-data; boundary=test"},
     )
@@ -2799,11 +2641,10 @@ async def test_real_app_caps_chunked_ingest_multipart_before_parsing(
     assert response.status_code == 413, response.text
     assert response.json()["error_type"] == "validation"
     assert response.json()["detail"] == "Request body is too large"
-    application_double.corpora.start_ingest_job.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_ingest_blob_authenticates_before_parsing_multipart(
+async def test_corpus_upload_authenticates_before_parsing_multipart(
     mock_config: DlightragConfig,
 ) -> None:
     mutate_config(mock_config, "access.auth_mode", "simple")
@@ -2814,7 +2655,7 @@ async def test_ingest_blob_authenticates_before_parsing_multipart(
 
     response = await _post(
         application,
-        "/ingest/blob",
+        "/runs/corpus/ingest/upload",
         content=b"malformed multipart body",
         headers={"content-type": "multipart/form-data; boundary=missing"},
     )

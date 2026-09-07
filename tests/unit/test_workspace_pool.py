@@ -73,6 +73,36 @@ async def test_retryable_failure_backs_off_then_success_clears_it() -> None:
     assert calls == 2
 
 
+async def test_retry_callback_clears_bounded_workspace_degradation() -> None:
+    now = 0.0
+    runtime = cast(WorkspaceRag, AsyncMock())
+    outcomes = [ConnectionError("down"), runtime]
+    unavailable: list[str] = []
+    available: list[str] = []
+
+    async def build(*_args: Any) -> WorkspaceRag:
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    pool = WorkspacePool(
+        build=build,
+        clock=lambda: now,
+        initial_backoff_seconds=1,
+        max_backoff_seconds=1,
+        on_workspace_unavailable=unavailable.append,
+        on_workspace_available=available.append,
+    )
+    with pytest.raises(WorkspaceUnavailableError):
+        await pool.acquire("default")
+    now = 1.0
+
+    assert await pool.acquire("default") is runtime
+    assert unavailable == ["default"]
+    assert available == ["default"]
+
+
 async def test_retryable_failure_backoff_grows_and_caps_at_five_minutes() -> None:
     now = 0.0
     calls = 0
@@ -541,31 +571,3 @@ async def test_warm_waits_for_eviction_and_replaces_the_closing_runtime() -> Non
     await eviction
     await warmup
     assert await pool.acquire("research") is second
-
-
-async def test_pipeline_status_waits_for_eviction_and_does_not_use_closing_runtime() -> None:
-    runtime = cast(WorkspaceRag, AsyncMock())
-    close_started = asyncio.Event()
-    release_close = asyncio.Event()
-
-    async def build(*_args: Any) -> WorkspaceRag:
-        return runtime
-
-    async def close_runtime() -> None:
-        close_started.set()
-        await release_close.wait()
-
-    runtime.aclose = AsyncMock(side_effect=close_runtime)  # type: ignore[method-assign]
-    pool = _pool(build)
-    await pool.acquire("research")
-    eviction = asyncio.create_task(pool.evict("research"))
-    await asyncio.wait_for(close_started.wait(), timeout=1)
-    status = asyncio.create_task(pool.get_pipeline_status("research"))
-    await asyncio.sleep(0)
-
-    assert not status.done()
-
-    release_close.set()
-    await eviction
-    assert await status is None
-    cast(AsyncMock, runtime.aget_pipeline_status).assert_not_awaited()

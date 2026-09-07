@@ -1,8 +1,8 @@
 // Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
 
 import {
-  cancelAnswerRun,
-  getAnswerRun,
+  cancelRun,
+  getRun,
   type ConversationTurn,
 } from '../api/conversations.ts';
 import {createSSEParser, parseData} from './sse.ts';
@@ -73,8 +73,8 @@ export type FollowResult =
 
 export interface RunControllerOptions {
   fetch?: typeof fetch;
-  getRun?: typeof getAnswerRun;
-  cancelRun?: typeof cancelAnswerRun;
+  getRun?: typeof getRun;
+  cancelRun?: typeof cancelRun;
   maxReconnectAttempts?: number;
   reconnectDelayMs?: number;
   onStateChange?: () => void;
@@ -86,8 +86,8 @@ export interface RunControllerOptions {
 /** Owns the transport and lifecycle resources for this tab's one followed run. */
 export class RunController {
   readonly #fetch: typeof fetch;
-  readonly #getRun: typeof getAnswerRun;
-  readonly #cancelRun: typeof cancelAnswerRun;
+  readonly #getRun: typeof getRun;
+  readonly #cancelRun: typeof cancelRun;
   readonly #maxReconnectAttempts: number;
   readonly #reconnectDelayMs: number;
   readonly #onStateChange: () => void;
@@ -106,8 +106,8 @@ export class RunController {
 
   constructor(options: RunControllerOptions = {}) {
     this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
-    this.#getRun = options.getRun ?? getAnswerRun;
-    this.#cancelRun = options.cancelRun ?? cancelAnswerRun;
+    this.#getRun = options.getRun ?? getRun;
+    this.#cancelRun = options.cancelRun ?? cancelRun;
     this.#maxReconnectAttempts = options.maxReconnectAttempts ?? DEFAULT_MAX_RECONNECT_ATTEMPTS;
     this.#reconnectDelayMs = options.reconnectDelayMs ?? DEFAULT_RECONNECT_DELAY_MS;
     this.#onStateChange = options.onStateChange ?? (() => {});
@@ -222,7 +222,7 @@ export class RunController {
         const after = this.#cursors.lastSequence(conversationId, runId);
         let response: Response;
         try {
-          response = await this.#fetch(`/web/api/answer/${encodeURIComponent(runId)}/events`, {
+          response = await this.#fetch(`/web/api/runs/${encodeURIComponent(runId)}/events`, {
             signal,
             headers: after > 0 ? {'Last-Event-ID': String(after)} : undefined,
           });

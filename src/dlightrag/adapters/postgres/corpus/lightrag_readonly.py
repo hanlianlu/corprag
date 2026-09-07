@@ -126,10 +126,24 @@ class ReadOnlyPostgreSQLDB(PostgreSQLDB):
                     await asyncio.sleep(sleep_for)
 
 
-def _active_lightrag_storages(lightrag: Any) -> list[Any]:
+_VECTOR_STORAGE_ATTRS = frozenset({"entities_vdb", "relationships_vdb", "chunks_vdb"})
+
+
+def _active_lightrag_storages(
+    lightrag: Any,
+    *,
+    vector_storage: str = "PGVectorStorage",
+) -> list[Any]:
+    """Return only storages owned by the shared PostgreSQL client.
+
+    External vector adapters must never receive ``ReadOnlyPostgreSQLDB``.  The
+    public reader contract currently cannot initialize them without mutation,
+    so deployment validation rejects reader+Milvus before this attach path.
+    """
     return [
         storage
         for name in READ_ONLY_STORAGE_ATTRS
+        if not (name in _VECTOR_STORAGE_ATTRS and vector_storage != "PGVectorStorage")
         if (storage := getattr(lightrag, name, None)) is not None
     ]
 
@@ -300,12 +314,19 @@ async def attach_lightrag_storages_read_only(
     vector_storage: str | None = None,
 ) -> None:
     """Attach LightRAG PostgreSQL storages to a read-only pool without DDL."""
-    active_storages = _active_lightrag_storages(lightrag)
-    db_config, signature = _read_only_vector_signature(
-        vector_storage=config.storage.lightrag.vector_storage
-        if vector_storage is None
-        else vector_storage
+    selected_vector = (
+        config.storage.lightrag.vector_storage if vector_storage is None else vector_storage
     )
+    if selected_vector != "PGVectorStorage":
+        raise ValueError(
+            "reader storage attach supports PGVectorStorage only; "
+            "MilvusVectorDBStorage has no public nonmutating reader lifecycle"
+        )
+    active_storages = _active_lightrag_storages(
+        lightrag,
+        vector_storage=selected_vector,
+    )
+    db_config, signature = _read_only_vector_signature(vector_storage=selected_vector)
     db = await _acquire_read_only_db(
         db_config=db_config,
         signature=signature,

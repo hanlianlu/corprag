@@ -26,10 +26,10 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
-from dlightrag.adapters.postgres.answer._blobs import BlobSizeConflict, write_complete_blob
-from dlightrag.adapters.postgres.answer._terminal import finish_fenced_run
 from dlightrag.adapters.postgres.core._operations import ConnectionPool
 from dlightrag.adapters.postgres.core._pool import pg_pool
+from dlightrag.adapters.postgres.runtime._terminal import finish_fenced_run
+from dlightrag.adapters.postgres.runtime.run_blob_store import BlobSizeConflict, write_complete_blob
 from dlightrag.engine.agent.session.effects import JsonValue
 from dlightrag.engine.agent.session.entries import (
     SessionEntry,
@@ -83,7 +83,7 @@ from dlightrag.engine.runtime.settlements import (
 
 _LEASE_PREDICATE = """
 SELECT 1
-FROM dlightrag_answer_runs
+FROM dlightrag_runs
 WHERE owner_id = $1 AND run_id = $2
   AND lease_owner = $3 AND fencing_epoch = $4
   AND status = 'running' AND lease_expires_at > NOW()
@@ -93,7 +93,7 @@ FOR UPDATE
 _LOCK_PROGRESS_RUN = """
 SELECT durable_progress_version,
        cancel_requested_at IS NOT NULL AS cancel_requested
-FROM dlightrag_answer_runs
+FROM dlightrag_runs
 WHERE owner_id = $1 AND run_id = $2
   AND lease_owner = $3 AND fencing_epoch = $4
   AND status = 'running' AND lease_expires_at > NOW()
@@ -126,7 +126,7 @@ ON CONFLICT (owner_id, session_id) DO NOTHING
 
 _ACTIVE_SESSION_RUN = """
 SELECT 1
-FROM dlightrag_answer_runs
+FROM dlightrag_runs
 WHERE owner_id = $1 AND run_id = $2
   AND status = 'running' AND lease_expires_at > NOW()
 """
@@ -159,7 +159,7 @@ RETURNING commit_sequence
 """
 
 _ADVANCE_PROGRESS = """
-UPDATE dlightrag_answer_runs
+UPDATE dlightrag_runs
 SET durable_progress_version = durable_progress_version + 1,
     updated_at = NOW()
 WHERE owner_id = $1 AND run_id = $2
@@ -167,7 +167,7 @@ WHERE owner_id = $1 AND run_id = $2
 
 _INSERT_MEMORY_OPERATION_EVENT = """
 WITH bumped AS (
-    UPDATE dlightrag_answer_runs
+    UPDATE dlightrag_runs
     SET next_event_sequence = next_event_sequence + 1,
         updated_at = NOW()
     WHERE owner_id = $1 AND run_id = $2
@@ -175,7 +175,7 @@ WITH bumped AS (
       AND status = 'running' AND lease_expires_at > NOW()
     RETURNING next_event_sequence - 1 AS event_sequence
 )
-INSERT INTO dlightrag_answer_run_events (
+INSERT INTO dlightrag_run_events (
     owner_id, run_id, event_sequence, event_type, payload
 )
 SELECT $1, $2, event_sequence, 'memory_operation_settled', $5::jsonb
@@ -1299,7 +1299,7 @@ class PGProgressStore:
                 ):
                     return StageLeaseLost()
                 await conn.execute(
-                    "UPDATE dlightrag_answer_runs SET"
+                    "UPDATE dlightrag_runs SET"
                     " durable_progress_version = durable_progress_version + 1"
                     " WHERE owner_id = $1 AND run_id = $2",
                     self._owner_id,

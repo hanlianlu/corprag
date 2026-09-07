@@ -3,7 +3,12 @@
 import {msg, str, updateWhenLocaleChanges } from '@lit/localize';
 import {html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {repeat} from 'lit/directives/repeat.js';
-import {deleteWorkspaceRequest, WorkspaceApiError } from '../api/workspaces.ts';
+import {
+  corpusRunActive,
+  getCorpusRunStatus,
+  type WebCorpusRunReceipt,
+} from '../api/corpus-runs.ts';
+import {resetWorkspaceRequest, WorkspaceApiError } from '../api/workspaces.ts';
 import {icon} from '../design-system/index.ts';
 import {rovingArrowKeydown} from '../lib/listbox.ts';
 import {LightElement, StoreController} from '../lib/lit-host.ts';
@@ -12,28 +17,28 @@ import {type AppHandles, productionHandles } from '../stores/app-handles.ts';
 import type {WorkspaceRecord} from '../stores/workspace-store.ts';
 import workspaceStyles from '../styles/workspaces.module.css';
 import {publishModalState, showOwnedModal} from './modal.ts';
-import type {ToastRequestDetail} from './toast.ts';
 import {requestToast} from './toast-request.ts';
 import './workspace-create.ts';
 
-/** Search-scope selection, workspace deletion, popover, and Dialog lifecycle. */
+/** Search-scope selection, Corpus reset, popover, and Dialog lifecycle. */
 export class DlWorkspaceScope extends LightElement {
   static properties = {
     handles: {attribute: false},
     open: {state: true},
-    deleteWorkspace: {state: true},
-    deletePending: {state: true},
-    deleteConfirmed: {state: true},
+    resetWorkspace: {state: true},
+    resetPending: {state: true},
+    resetConfirmed: {state: true},
   };
 
   declare handles: AppHandles;
   declare open: boolean;
-  declare deleteWorkspace: string | null;
-  declare deletePending: boolean;
-  declare deleteConfirmed: boolean;
+  declare resetWorkspace: string | null;
+  declare resetPending: boolean;
+  declare resetConfirmed: boolean;
 
-  #deleteOperation: AbortController | null = null;
-  #deleteReturnFocus: HTMLElement | null = null;
+  #resetOperation: AbortController | null = null;
+  #resetPoll: AbortController | null = null;
+  #resetReturnFocus: HTMLElement | null = null;
   #restoreLoadMoreFocus = false;
   #settledFocusRestore = false;
   #loadMoreAnnouncement = '';
@@ -49,23 +54,25 @@ export class DlWorkspaceScope extends LightElement {
     updateWhenLocaleChanges(this);
     this.handles = productionHandles();
     this.open = false;
-    this.deleteWorkspace = null;
-    this.deletePending = false;
-    this.deleteConfirmed = false;
+    this.resetWorkspace = null;
+    this.resetPending = false;
+    this.resetConfirmed = false;
     /** Store reads: records, active, primary. */
     new StoreController(this, this.handles.workspaces);
   }
 
   override disconnectedCallback(): void {
-    const dialog = this.querySelector<HTMLDialogElement>('#delete-workspace-dialog');
+    const dialog = this.querySelector<HTMLDialogElement>('#reset-workspace-dialog');
     if (dialog?.open) dialog.close();
-    this.#deleteOperation?.abort();
-    this.#deleteOperation = null;
-    this.#deleteReturnFocus = null;
+    this.#resetOperation?.abort();
+    this.#resetOperation = null;
+    this.#resetPoll?.abort();
+    this.#resetPoll = null;
+    this.#resetReturnFocus = null;
     this.open = false;
-    this.deleteWorkspace = null;
-    this.deletePending = false;
-    this.deleteConfirmed = false;
+    this.resetWorkspace = null;
+    this.resetPending = false;
+    this.resetConfirmed = false;
     this.#dismiss.deactivate();
     publishModalState(this);
     super.disconnectedCallback();
@@ -117,7 +124,7 @@ export class DlWorkspaceScope extends LightElement {
         ${icon('chevron-down', {size: 'xs', className: 'workspace-caret'})}
       </button>
       ${this.#popover()}
-      ${this.#deleteDialog()}
+      ${this.#resetDialog()}
     `;
   }
 
@@ -244,11 +251,11 @@ export class DlWorkspaceScope extends LightElement {
           <span class=${workspaceStyles.workspacePopoverName}>${record.displayName}</span>
         </button>
         <button type="button" class=${workspaceStyles.workspacePopoverDelete}
-                title=${msg('Delete workspace', {id: 'workspaceScope.deleteTitle'})}
-                aria-label=${msg(str`Delete workspace ${record.displayName}`, {id: 'workspaceScope.deleteWorkspaceAria'})}
+                title=${msg('Reset Corpus', {id: 'workspaceScope.resetTitle'})}
+                aria-label=${msg(str`Reset Corpus ${record.displayName}`, {id: 'workspaceScope.resetWorkspaceAria'})}
                 @click=${(event: MouseEvent) => {
                   event.stopPropagation();
-                  void this.#requestDelete(record.workspace, event.currentTarget as HTMLElement);
+                  void this.#requestReset(record.workspace, event.currentTarget as HTMLElement);
                 }}>${icon('close', {size: 'xs'})}</button>
       </div>
     `;
@@ -263,49 +270,49 @@ export class DlWorkspaceScope extends LightElement {
     }
   };
 
-  async #requestDelete(workspace: string, trigger: HTMLElement): Promise<void> {
-    this.#deleteReturnFocus = trigger;
+  async #requestReset(workspace: string, trigger: HTMLElement): Promise<void> {
+    this.#resetReturnFocus = trigger;
     this.open = false;
-    this.deleteWorkspace = workspace;
-    this.deleteConfirmed = false;
+    this.resetWorkspace = workspace;
+    this.resetConfirmed = false;
     await this.updateComplete;
-    const dialog = this.querySelector<HTMLDialogElement>('#delete-workspace-dialog');
+    const dialog = this.querySelector<HTMLDialogElement>('#reset-workspace-dialog');
     if (!dialog) return;
     dialog.returnValue = '';
     showOwnedModal(this, dialog);
     window.requestAnimationFrame(() => {
-      this.querySelector<HTMLInputElement>('#delete-workspace-confirm-input')?.focus();
+      this.querySelector<HTMLInputElement>('#reset-workspace-confirm-input')?.focus();
     });
   }
 
-  #deleteDialog(): TemplateResult {
-    const workspace = this.deleteWorkspace ?? '';
+  #resetDialog(): TemplateResult {
+    const workspace = this.resetWorkspace ?? '';
     const displayName = this.handles.workspaces.records.find((record) => record.workspace === workspace)
       ?.displayName ?? workspace;
     return html`
-      <dialog id="delete-workspace-dialog" class="workspace-dialog"
-              aria-labelledby="delete-workspace-title" @cancel=${this.#deleteCancelled}
-              @close=${this.#deleteClosed}>
-        <form @submit=${this.#submitDelete}>
-          <h3 class="workspace-dialog-title" id="delete-workspace-title">${msg('Delete workspace', {id: 'workspaceScope.deleteTitle'})}</h3>
-          <p class="workspace-dialog-text">${msg('This will permanently delete all data for', {id: 'workspaceScope.deleteWarning'})} <strong>${displayName}</strong>.</p>
+      <dialog id="reset-workspace-dialog" class="workspace-dialog"
+              aria-labelledby="reset-workspace-title" @cancel=${this.#resetCancelled}
+              @close=${this.#resetClosed}>
+        <form @submit=${this.#submitReset}>
+          <h3 class="workspace-dialog-title" id="reset-workspace-title">${msg('Reset Corpus', {id: 'workspaceScope.resetTitle'})}</h3>
+          <p class="workspace-dialog-text">${msg('This will permanently remove all Corpus data while preserving workspace', {id: 'workspaceScope.resetWarning'})} <strong>${displayName}</strong>.</p>
           <p class="workspace-dialog-text">${msg('Type the workspace name to confirm', {id: 'workspaceScope.typeToConfirm'})}</p>
-          <input type="text" id="delete-workspace-confirm-input" class="dl-dialog-input"
+          <input type="text" id="reset-workspace-confirm-input" class="dl-dialog-input"
                  autocomplete="off"
                  placeholder=${msg('Type workspace name...', {id: 'workspaceScope.confirmPlaceholder'})}
                  aria-label=${msg(str`Type ${displayName} to confirm`, {id: 'workspaceScope.typeNameToConfirmAria'})}
-                 .readOnly=${this.deletePending}
-                 @input=${this.#deleteInput}>
+                 .readOnly=${this.resetPending}
+                 @input=${this.#resetInput}>
           <div class="dl-dialog-actions">
-            <button type="button" ?disabled=${this.deletePending}
+            <button type="button" ?disabled=${this.resetPending}
                     @click=${() => this.querySelector<HTMLDialogElement>(
-                      '#delete-workspace-dialog',
+                      '#reset-workspace-dialog',
                     )?.close()}>${msg('Cancel', {id: 'workspaceScope.cancel'})}</button>
             <button type="submit" class="dl-dialog-danger"
-                    ?disabled=${this.deletePending || !this.deleteConfirmed}>
-              ${this.deletePending
-                ? msg('Deleting…', {id: 'workspaceScope.deleting'})
-                : msg('Delete', {id: 'workspaceScope.delete'})}
+                    ?disabled=${this.resetPending || !this.resetConfirmed}>
+              ${this.resetPending
+                ? msg('Accepting reset…', {id: 'workspaceScope.resetting'})
+                : msg('Reset Corpus', {id: 'workspaceScope.reset'})}
             </button>
           </div>
         </form>
@@ -313,67 +320,96 @@ export class DlWorkspaceScope extends LightElement {
     `;
   }
 
-  #deleteInput = (event: Event): void => {
+  #resetInput = (event: Event): void => {
     const input = event.currentTarget as HTMLInputElement;
-    const workspace = this.deleteWorkspace ?? '';
+    const workspace = this.resetWorkspace ?? '';
     const displayName = this.handles.workspaces.records.find((record) => record.workspace === workspace)
       ?.displayName ?? workspace;
-    this.deleteConfirmed = input.value.trim() === displayName || input.value.trim() === workspace;
+    this.resetConfirmed = input.value.trim() === displayName || input.value.trim() === workspace;
   };
 
-  #submitDelete = async (event: SubmitEvent): Promise<void> => {
+  #submitReset = async (event: SubmitEvent): Promise<void> => {
     event.preventDefault();
-    const workspace = this.deleteWorkspace;
-    if (!workspace || this.deletePending || !this.deleteConfirmed) return;
+    const workspace = this.resetWorkspace;
+    if (!workspace || this.resetPending || !this.resetConfirmed) return;
     const operation = new AbortController();
-    this.#deleteOperation = operation;
-    this.deletePending = true;
+    this.#resetOperation = operation;
+    this.resetPending = true;
     try {
-      const deleted = await deleteWorkspaceRequest(workspace, operation.signal);
+      const receipt = await resetWorkspaceRequest(workspace, operation.signal);
       if (
-        operation.signal.aborted || this.#deleteOperation !== operation
-        || this.deleteWorkspace !== workspace
+        operation.signal.aborted || this.#resetOperation !== operation
+        || this.resetWorkspace !== workspace
       ) return;
-      this.handles.workspaces.remove(deleted.workspace, deleted.nextWorkspace);
-      this.handles.ingest.set(deleted.nextWorkspace || this.handles.workspaces.primary);
-      this.querySelector<HTMLDialogElement>('#delete-workspace-dialog')?.close();
+      this.querySelector<HTMLDialogElement>('#reset-workspace-dialog')?.close();
       requestToast(this, {
-        message: msg(str`Workspace ${workspace} deleted.`, {id: 'workspaceScope.deleted'}),
+        message: msg(str`Corpus reset accepted for ${workspace}.`, {id: 'workspaceScope.resetAccepted'}),
       });
+      void this.#watchReset(receipt);
     } catch (error) {
-      if (!operation.signal.aborted && this.#deleteOperation === operation) {
+      if (!operation.signal.aborted && this.#resetOperation === operation) {
         requestToast(this, {
           message: error instanceof WorkspaceApiError
             ? error.message
-            : msg('Could not delete workspace.', {id: 'workspaceScope.deleteFailed'}),
+            : msg('Could not accept Corpus reset.', {id: 'workspaceScope.resetFailed'}),
           duration: 3000,
         });
       }
     } finally {
-      if (this.#deleteOperation === operation) {
-        this.#deleteOperation = null;
-        this.deletePending = false;
+      if (this.#resetOperation === operation) {
+        this.#resetOperation = null;
+        this.resetPending = false;
         await this.updateComplete;
-        if (this.querySelector<HTMLDialogElement>('#delete-workspace-dialog')?.open) {
-          this.querySelector<HTMLInputElement>('#delete-workspace-confirm-input')?.focus();
+        if (this.querySelector<HTMLDialogElement>('#reset-workspace-dialog')?.open) {
+          this.querySelector<HTMLInputElement>('#reset-workspace-confirm-input')?.focus();
         }
       }
     }
   };
 
-  #deleteCancelled = (event: Event): void => {
-    if (this.deletePending) event.preventDefault();
+  async #watchReset(receipt: WebCorpusRunReceipt): Promise<void> {
+    this.#resetPoll?.abort();
+    const controller = new AbortController();
+    this.#resetPoll = controller;
+    let current: {status: string} = receipt;
+    try {
+      while (corpusRunActive(current) && !controller.signal.aborted) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+        if (controller.signal.aborted) return;
+        current = await getCorpusRunStatus(receipt.statusUrl, controller.signal);
+      }
+      if (controller.signal.aborted) return;
+      requestToast(this, {
+        message: current.status === 'succeeded'
+          ? msg(str`Corpus reset finished for ${receipt.workspace}.`, {id: 'workspaceScope.resetFinished'})
+          : msg(str`Corpus reset did not finish for ${receipt.workspace}.`, {id: 'workspaceScope.resetDidNotFinish'}),
+        duration: 4000,
+      });
+    } catch {
+      if (!controller.signal.aborted) {
+        requestToast(this, {
+          message: msg('Corpus reset status is temporarily unavailable.', {id: 'workspaceScope.resetStatusUnavailable'}),
+          duration: 3000,
+        });
+      }
+    } finally {
+      if (this.#resetPoll === controller) this.#resetPoll = null;
+    }
+  }
+
+  #resetCancelled = (event: Event): void => {
+    if (this.resetPending) event.preventDefault();
   };
 
-  #deleteClosed = (): void => {
+  #resetClosed = (): void => {
     publishModalState(this);
-    this.#deleteOperation?.abort();
-    this.#deleteOperation = null;
-    this.deleteWorkspace = null;
-    this.deletePending = false;
-    this.deleteConfirmed = false;
-    const returnFocus = this.#deleteReturnFocus;
-    this.#deleteReturnFocus = null;
+    this.#resetOperation?.abort();
+    this.#resetOperation = null;
+    this.resetWorkspace = null;
+    this.resetPending = false;
+    this.resetConfirmed = false;
+    const returnFocus = this.#resetReturnFocus;
+    this.#resetReturnFocus = null;
     const target = returnFocus?.isConnected && !returnFocus.inert
       && !returnFocus.closest('[hidden]')
       ? returnFocus

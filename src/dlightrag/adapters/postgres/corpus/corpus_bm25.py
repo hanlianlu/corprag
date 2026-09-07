@@ -18,6 +18,7 @@ from dlightrag.adapters.postgres.corpus.corpus_languages import update_chunk_bm2
 from dlightrag.adapters.postgres.corpus.pg_metadata_index import (
     METADATA_TABLE,
     metadata_match_conditions,
+    metadata_visibility_condition,
 )
 from dlightrag.engine.rag.retrieval import ContextRow, MetadataScope
 from dlightrag.engine.rag.retrieval.bm25 import (
@@ -32,6 +33,7 @@ from dlightrag.engine.rag.retrieval.language import (
     BM25LanguageClassifier,
     normalize_language_code,
 )
+from dlightrag.engine.rag.retrieval.visibility import bounded_visibility_candidate_limit
 
 BM25_INDEX_PREFIX = pg_identifier("idx_lightrag_doc_chunks_bm25")
 BM25_LANGUAGE_INDEX = pg_identifier("idx_lightrag_doc_chunks_dlightrag_bm25_language")
@@ -138,29 +140,54 @@ def build_bm25_sql(
         raise ValueError("BM25 limit must be positive")
     if scoped and not metadata_conditions:
         raise ValueError("scoped BM25 requires metadata conditions")
-    # The scoped candidate clause is one database-side semi-join over the
-    # metadata predicate (conditions already carry their shifted placeholders
-    # starting at $3); the ranked BM25 stream remains the index source and the
-    # final LIMIT stays outside the join/filter.
-    candidate_clause = (
-        f"AND full_doc_id IN (SELECT doc_id FROM {METADATA_TABLE} "  # noqa: S608
-        f"WHERE {' AND '.join(metadata_conditions)})"
-        if scoped
-        else ""
-    )
     language_clause = (
         f"AND {BM25_LANGUAGE_COLUMN} = '{_validated_language_code(language)}'" if language else ""
     )
-    limit_placeholder = f"${3 + len(metadata_conditions)}" if scoped else "$3"
+    if scoped:
+        # One selective user-filter semi-join. The shared conditions also carry
+        # the publication marker without adding a bound parameter.
+        candidate_clause = (
+            f"AND full_doc_id IN (SELECT doc_id FROM {METADATA_TABLE} "  # noqa: S608
+            f"WHERE {' AND '.join(metadata_conditions)})"
+        )
+        highest_placeholder = max(
+            (
+                int(slot)
+                for condition in metadata_conditions
+                for slot in re.findall(r"\$(\d+)", condition)
+            ),
+            default=2,
+        )
+        limit_placeholder = f"${highest_placeholder + 1}"
+        return (
+            f"SELECT id, content, file_path, full_doc_id, "  # noqa: S608
+            f"-(content <@> to_bm25query($1, '{safe_index}')) AS score "
+            f"FROM {BM25_TABLE} "
+            "WHERE workspace = $2 "
+            f"{candidate_clause} "
+            f"{language_clause} "
+            f"ORDER BY content <@> to_bm25query($1, '{safe_index}') "
+            f"LIMIT {limit_placeholder}"
+        )
+
+    # With no user filter, never form the all-visible document-id set. Rank a
+    # bounded lexical window first and correlate only those rows to metadata.
     return (
-        f"SELECT id, content, file_path, full_doc_id, "  # noqa: S608
-        f"-(content <@> to_bm25query($1, '{safe_index}')) AS score "
+        f"WITH ranked AS MATERIALIZED ("  # noqa: S608
+        f"SELECT id, workspace, content, file_path, full_doc_id, "
+        f"-(content <@> to_bm25query($1, '{safe_index}')) AS score, "
+        f"content <@> to_bm25query($1, '{safe_index}') AS rank_distance "
         f"FROM {BM25_TABLE} "
         "WHERE workspace = $2 "
-        f"{candidate_clause} "
         f"{language_clause} "
-        f"ORDER BY content <@> to_bm25query($1, '{safe_index}') "
-        f"LIMIT {limit_placeholder}"
+        f"ORDER BY content <@> to_bm25query($1, '{safe_index}') LIMIT $3"
+        ") "
+        "SELECT r.id, r.content, r.file_path, r.full_doc_id, r.score "
+        "FROM ranked r WHERE EXISTS ("
+        f"SELECT 1 FROM {METADATA_TABLE} m "
+        "WHERE m.workspace = r.workspace AND m.doc_id = r.full_doc_id "
+        f"AND {metadata_visibility_condition('m')}"
+        ") ORDER BY r.rank_distance LIMIT $4"
     )
 
 
@@ -256,7 +283,13 @@ class PGBM25ProfileSearch(PostgresOperationRunner):
             )
 
             async def operation(conn: Any) -> list[Any]:
-                return await conn.fetch(sql, query, self._workspace, int(limit))
+                return await conn.fetch(
+                    sql,
+                    query,
+                    self._workspace,
+                    bounded_visibility_candidate_limit(limit),
+                    int(limit),
+                )
 
         rows = await self._run(operation)
         return [self._row_to_chunk(row, profile_name=profile_name) for row in rows]

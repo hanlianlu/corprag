@@ -14,6 +14,7 @@ from dlightrag.engine.rag.corpus.sources.aws_s3 import (
 )
 from dlightrag.engine.rag.corpus.sources.azure_blob import generate_azure_sas_url
 from dlightrag.engine.rag.corpus.sources.source_contract import validate_download_uri
+from dlightrag.engine.rag.retrieval.visibility import ingest_finalization_complete
 from dlightrag.engine.rag.workspace.settings import RagSettings
 from dlightrag.engine.rag.workspace.workspaces import require_canonical_workspace_id
 
@@ -74,7 +75,7 @@ class SourceDownloadService:
             raise SourceDownloadInvalidError("Invalid document ID")
 
         metadata = await self._metadata_index.get(document_id)
-        if metadata is None:
+        if not ingest_finalization_complete(metadata):
             raise SourceDownloadNotFoundError("Source not found")
         locator = metadata.get("download_locator")
         if not isinstance(locator, str) or not locator:

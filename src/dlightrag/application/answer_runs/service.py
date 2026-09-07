@@ -5,10 +5,11 @@ from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, 
 from contextlib import AbstractAsyncContextManager, aclosing
 from dataclasses import asdict, dataclass
 from typing import Any, Protocol, cast
-from uuid import UUID
+from uuid import UUID, uuid7
 
 from dlightrag.application.answer_runs.capabilities import AnswerCapabilities, RequestModelContext
 from dlightrag.application.answer_runs.capability import AnswerImageCapability
+from dlightrag.application.answer_runs.envelope import accepted_input_envelope
 from dlightrag.application.answer_runs.errors import (
     AnswerInputOverflowError,
     InvalidToolConfigurationError,
@@ -33,10 +34,17 @@ from dlightrag.application.answer_runs.mode import (
     resource_role,
     valid_modes,
 )
-from dlightrag.application.answer_runs.prepared_input import require_prepared_input_bounds
 from dlightrag.application.answer_runs.results import AnswerResult, restore_answer_result
 from dlightrag.application.answer_runs.routing import RoutingAcceptance
-from dlightrag.application.retrieval import RetrievalOptions
+from dlightrag.application.runs import (
+    IdempotencyKeyConflict,
+    RunCancelledError,
+    RunCapacityExceededError,
+    RunCreation,
+    RunEvent,
+    RunFailedError,
+    RunRuntimeUnavailableError,
+)
 from dlightrag.engine.agent.session.fold import PriorTurns
 from dlightrag.engine.agent.session.ids import LaneId, SessionId
 from dlightrag.engine.agent.session.plan import AgentRunPlan
@@ -67,22 +75,33 @@ from dlightrag.engine.answer.resources.models import ResourceInput, TextWindowBu
 from dlightrag.engine.answer.synthesizer import AnswerSynthesizer
 from dlightrag.engine.answer.tools import compose_research_tools
 from dlightrag.engine.rag.corpus.sources.source_contract import safe_source_filename
-from dlightrag.engine.rag.retrieval import MetadataFilter, RetrievalResult
+from dlightrag.engine.rag.retrieval import MetadataFilter, RetrievalOptions, RetrievalResult
 from dlightrag.engine.rag.retrieval.planner import RetrievalPlanner
 from dlightrag.engine.rag.workspace.workspaces import require_canonical_workspace_id
 from dlightrag.engine.runtime import (
-    AnswerRunCancelledError,
-    AnswerRunEvent,
-    AnswerRunFailedError,
-    AnswerRunRecord,
     ArtifactReferenceKind,
-    CancellationOutcome,
     PendingArtifact,
     PendingArtifactReference,
+    PreparedRunEnvelope,
+    RunAccessScope,
     RunArtifactReference,
-    RunCreation,
-    answer_run_request_fingerprint,
+    RunKind,
+    RunRecord,
     artifact_digest,
+    require_prepared_input_bounds,
+    run_request_fingerprint,
+)
+from dlightrag.engine.runtime import (
+    IdempotencyKeyConflict as RuntimeIdempotencyKeyConflict,
+)
+from dlightrag.engine.runtime import (
+    RunCapacityExceededError as RuntimeRunCapacityExceededError,
+)
+from dlightrag.engine.runtime import (
+    RunCreation as RuntimeRunCreation,
+)
+from dlightrag.engine.runtime import (
+    RunEvent as RuntimeRunEvent,
 )
 
 from .child_roster import (
@@ -177,8 +196,8 @@ class HistoryResolver(Protocol):
     def __call__(self, targets: Sequence[HistoryProjectionTarget]) -> Awaitable[PriorTurns]: ...
 
 
-class AnswerRuntimeUnavailableError(RuntimeError):
-    """Raised before acceptance when no local durable-run scheduler is active."""
+class AnswerRuntimeUnavailableError(RunRuntimeUnavailableError):
+    """Answer-specific compatibility name for common runtime unavailability."""
 
 
 class AnswerRunAcceptor[T](Protocol):
@@ -187,10 +206,8 @@ class AnswerRunAcceptor[T](Protocol):
     async def create_run(
         self,
         *,
-        owner_id: str,
-        prepared_input: Mapping[str, Any],
-        idempotency_fingerprint: str,
-        idempotency_key: str | None = None,
+        envelope: PreparedRunEnvelope,
+        run_id: str,
         resources: Sequence[Mapping[str, Any]] = (),
         artifacts: Sequence[PendingArtifact] = (),
         references: Sequence[PendingArtifactReference] = (),
@@ -203,19 +220,14 @@ class AnswerRunAcceptor[T](Protocol):
         owner_id: str,
         idempotency_key: str,
         idempotency_fingerprint: str,
+        run_kind: RunKind,
     ) -> T | None: ...
 
 
-class _AnswerRunRepository(AnswerRunAcceptor[RunCreation], Protocol):
+class _AnswerRunRepository(AnswerRunAcceptor[RuntimeRunCreation], Protocol):
     """The owner-scoped durable operations this service performs."""
 
-    async def get_run(self, *, owner_id: str, run_id: str) -> AnswerRunRecord | None: ...
-
-    async def list_runs(
-        self, *, owner_id: str, after_run_id: str | None = None, limit: int = 50
-    ) -> tuple[AnswerRunRecord, ...]: ...
-
-    async def request_cancellation(self, *, owner_id: str, run_id: str) -> CancellationOutcome: ...
+    async def get_run(self, *, owner_id: str, run_id: str) -> RunRecord | None: ...
 
     async def enqueue_agent_control(
         self, *, owner_id: str, run_id: str, kind: str, content: str
@@ -241,7 +253,11 @@ class _AnswerRunRepository(AnswerRunAcceptor[RunCreation], Protocol):
         self, *, owner_id: str, run_id: str
     ) -> tuple[RunArtifactReference, ...]: ...
 
-    def stream_artifact(
+
+class _RunBlobReader(Protocol):
+    """The opaque bytes seam; Answer metadata never owns blob persistence."""
+
+    def stream(
         self,
         *,
         owner_id: str,
@@ -250,7 +266,7 @@ class _AnswerRunRepository(AnswerRunAcceptor[RunCreation], Protocol):
         length: int | None = None,
     ) -> AsyncIterator[bytes]: ...
 
-    async def blob_size(self, *, owner_id: str, digest: str) -> int | None: ...
+    async def size(self, *, owner_id: str, digest: str) -> int | None: ...
 
 
 class _RunScheduler(Protocol):
@@ -267,7 +283,7 @@ class _RunScheduler(Protocol):
 
     def subscribe(
         self, *, owner_id: str, run_id: str, after_sequence: int = 0
-    ) -> AsyncGenerator[AnswerRunEvent]: ...
+    ) -> AsyncGenerator[RuntimeRunEvent]: ...
 
 
 class _RetrievalPlanning(Protocol):
@@ -475,6 +491,7 @@ class AnswerService:
         self,
         *,
         store: _AnswerRunRepository,
+        blob_store: _RunBlobReader,
         coordinator: _RunScheduler,
         retrieval: _RetrievalPlanning,
         capabilities: _AnswerCapabilityPlanner,
@@ -485,8 +502,10 @@ class AnswerService:
         child_roster_cursor_secret: bytes,
         research_tool_supplements: Callable[[], Sequence[AgentTool]] | None = None,
         memory_capability: Callable[..., Awaitable[tuple[bool, int]]] | None = None,
+        run_retention_seconds: int = 365 * 24 * 3600,
     ) -> None:
         self._store = store
+        self._blob_store = blob_store
         self._coordinator = coordinator
         self._retrieval = retrieval
         self._capabilities = capabilities
@@ -496,6 +515,7 @@ class AnswerService:
         self._model_fingerprint_for_role = model_fingerprint_for_role
         self._research_tool_supplements = research_tool_supplements or (lambda: ())
         self._memory_capability = memory_capability
+        self._run_retention_seconds = int(run_retention_seconds)
         self._child_roster_codec = ChildRosterCursorCodec(child_roster_cursor_secret)
 
     async def create(
@@ -513,17 +533,22 @@ class AnswerService:
         accepted run outlives this call and is read back through :meth:`get`,
         :meth:`subscribe`, and :meth:`cancel`.
         """
-        creation = await self._accept(
-            request=request,
-            owner_id=owner_id,
-            idempotency_key=idempotency_key,
-            idempotency_fingerprint=None,
-            acceptor=self._store,
-            auth_mode=auth_mode,
-        )
+        try:
+            creation = await self._accept(
+                request=request,
+                owner_id=owner_id,
+                idempotency_key=idempotency_key,
+                idempotency_fingerprint=None,
+                acceptor=self._store,
+                auth_mode=auth_mode,
+            )
+        except RuntimeIdempotencyKeyConflict as exc:
+            raise IdempotencyKeyConflict(str(exc)) from exc
+        except RuntimeRunCapacityExceededError as exc:
+            raise RunCapacityExceededError(str(exc)) from exc
         if creation is None:
             raise RuntimeError("Answer run acceptance returned no descriptor")
-        return creation
+        return RunCreation.from_runtime(creation)
 
     async def accept[T](
         self,
@@ -537,15 +562,20 @@ class AnswerService:
         history_resolver: HistoryResolver | None = None,
     ) -> T | None:
         """Accept through a typed atomic linker while preserving one run pipeline."""
-        return await self._accept(
-            request=request,
-            owner_id=owner_id,
-            idempotency_key=idempotency_key,
-            idempotency_fingerprint=idempotency_fingerprint,
-            acceptor=acceptor,
-            auth_mode=auth_mode,
-            history_resolver=history_resolver,
-        )
+        try:
+            return await self._accept(
+                request=request,
+                owner_id=owner_id,
+                idempotency_key=idempotency_key,
+                idempotency_fingerprint=idempotency_fingerprint,
+                acceptor=acceptor,
+                auth_mode=auth_mode,
+                history_resolver=history_resolver,
+            )
+        except RuntimeIdempotencyKeyConflict as exc:
+            raise IdempotencyKeyConflict(str(exc)) from exc
+        except RuntimeRunCapacityExceededError as exc:
+            raise RunCapacityExceededError(str(exc)) from exc
 
     async def _accept[T](
         self,
@@ -559,9 +589,7 @@ class AnswerService:
         history_resolver: HistoryResolver | None = None,
     ) -> T | None:
         run_request = _normalized_request(request)
-        fingerprint = idempotency_fingerprint or answer_run_request_fingerprint(
-            run_request.as_request()
-        )
+        fingerprint = idempotency_fingerprint or run_request_fingerprint(run_request.as_request())
         # Canonical mode syntax is capability-independent and may be checked
         # before replay. Live capability validation must wait until after the
         # answer/VLM refreshes below because an unknown probe can recover.
@@ -571,6 +599,7 @@ class AnswerService:
                 owner_id=owner_id,
                 idempotency_key=idempotency_key,
                 idempotency_fingerprint=fingerprint,
+                run_kind="answer",
             )
             if replay is not None:
                 return replay
@@ -627,11 +656,20 @@ class AnswerService:
         async with self._coordinator.admission() as runtime_available:
             if not runtime_available:
                 raise AnswerRuntimeUnavailableError("Answer runtime is unavailable")
+            run_id = str(uuid7())
             accepted = await acceptor.create_run(
-                owner_id=owner_id,
-                prepared_input=prepared_input,
-                idempotency_fingerprint=fingerprint,
-                idempotency_key=idempotency_key,
+                envelope=PreparedRunEnvelope(
+                    run_kind="answer",
+                    lane="query",
+                    submitted_by=owner_id,
+                    access_scope=RunAccessScope(kind="owner", scope_id=owner_id),
+                    submission_key=idempotency_key or run_id,
+                    request_fingerprint=fingerprint,
+                    payload=prepared_input,
+                    accepted_input=accepted_input_envelope(prepared_input),
+                    retention_seconds=self._run_retention_seconds,
+                ),
+                run_id=run_id,
                 resources=resources_payload,
                 artifacts=[PendingArtifact(content=content) for content in attachment_bytes],
                 references=_artifact_references(run_input),
@@ -707,16 +745,12 @@ class AnswerService:
             loader=load,
         )
 
-    async def list(
-        self, *, owner_id: str, after_run_id: str | None = None, limit: int = 50
-    ) -> tuple[AnswerRunRecord, ...]:
-        """List this owner's runs oldest-first after an optional cursor."""
-        return await self._store.list_runs(
-            owner_id=owner_id, after_run_id=after_run_id, limit=limit
-        )
-
-    async def list_artifacts(self, *, owner_id: str, run_id: str) -> tuple[Any, ...]:
-        """List artifact descriptors for one owned run."""
+    async def list_artifacts(
+        self, *, owner_id: str, run_id: str
+    ) -> tuple[RunArtifactReference, ...] | None:
+        """List artifacts for one owned Answer; every other id is unknown."""
+        if await self._get_answer_run(owner_id=owner_id, run_id=run_id) is None:
+            return None
         return await self._store.list_run_artifacts(owner_id=owner_id, run_id=run_id)
 
     async def read_artifact(
@@ -728,7 +762,7 @@ class AnswerService:
         offset: int = 0,
         length: int | None = None,
     ) -> bytes | None:
-        """Read a bounded artifact window; unknown artifacts return ``None``."""
+        """Read a bounded Answer artifact; every other id returns ``None``."""
         stream = await self.open_artifact(
             owner_id=owner_id,
             run_id=run_id,
@@ -750,16 +784,18 @@ class AnswerService:
         offset: int = 0,
         length: int | None = None,
     ) -> AsyncIterator[bytes] | None:
-        """Open one artifact as a chunk iterator; unknown artifacts return ``None``.
+        """Open an Answer artifact; every other id returns ``None``.
 
         Callers that serve large published artifacts stream these chunks; no
         complete-blob materialization happens on this path.
         """
-        refs = await self._store.list_run_artifacts(owner_id=owner_id, run_id=run_id)
+        refs = await self.list_artifacts(owner_id=owner_id, run_id=run_id)
+        if refs is None:
+            return None
         match = next((item for item in refs if item.resource_id == resource_id), None)
         if match is None:
             return None
-        return self._store.stream_artifact(
+        return self._blob_store.stream(
             owner_id=owner_id,
             digest=match.digest,
             offset=max(0, offset),
@@ -767,16 +803,19 @@ class AnswerService:
         )
 
     async def artifact_size(self, *, owner_id: str, run_id: str, resource_id: str) -> int | None:
-        """Return one artifact's byte size; unknown artifacts return ``None``."""
-        refs = await self._store.list_run_artifacts(owner_id=owner_id, run_id=run_id)
+        """Return an Answer artifact size; every other id returns ``None``."""
+        refs = await self.list_artifacts(owner_id=owner_id, run_id=run_id)
+        if refs is None:
+            return None
         match = next((item for item in refs if item.resource_id == resource_id), None)
         if match is None:
             return None
-        return await self._store.blob_size(owner_id=owner_id, digest=match.digest)
+        return await self._blob_store.size(owner_id=owner_id, digest=match.digest)
 
-    async def get(self, *, owner_id: str, run_id: str) -> AnswerRunRecord | None:
-        """Read one owned run; unknown and foreign identifiers both return ``None``."""
-        return await self._store.get_run(owner_id=owner_id, run_id=run_id)
+    async def _get_answer_run(self, *, owner_id: str, run_id: str) -> RunRecord | None:
+        """Return one owned Answer; unknown, foreign, and wrong-kind ids are identical."""
+        record = await self._store.get_run(owner_id=owner_id, run_id=run_id)
+        return record if record is not None and record.run_kind == "answer" else None
 
     async def steer(
         self, *, owner_id: str, run_id: str, instruction: str
@@ -787,6 +826,8 @@ class AnswerService:
             raise ValueError("steer instruction cannot be empty")
         if len(text) > _AGENT_CONTROL_CONTENT_LIMIT:
             raise ValueError("steer instruction exceeds 20000 characters")
+        if await self._get_answer_run(owner_id=owner_id, run_id=run_id) is None:
+            return None
         row = await self._store.enqueue_agent_control(
             owner_id=owner_id,
             run_id=run_id,
@@ -809,7 +850,7 @@ class AnswerService:
         page: ChildRosterPageRequest | None = None,
     ) -> ChildRosterPage | None:
         """Return one bounded newest-first child-roster page, or None if unknown."""
-        if await self.get(owner_id=owner_id, run_id=run_id) is None:
+        if await self._get_answer_run(owner_id=owner_id, run_id=run_id) is None:
             return None
         requested = page or ChildRosterPageRequest()
         if requested.cursor is not None and str(requested.cursor.run_id) != run_id:
@@ -844,7 +885,7 @@ class AnswerService:
         self, *, owner_id: str, run_id: str, limit: int = 20
     ) -> AgentTranscriptTail | None:
         """Return a bounded transport-neutral transcript projection."""
-        record = await self.get(owner_id=owner_id, run_id=run_id)
+        record = await self._get_answer_run(owner_id=owner_id, run_id=run_id)
         if record is None:
             return None
         request = record.request_input()
@@ -888,9 +929,14 @@ class AnswerService:
             messages=tuple(messages[-cap:]),
         )
 
-    async def resume(self, *, owner_id: str, run_id: str) -> AnswerRunRecord | None:
-        """Reattach to one durable run; event replay resumes by sequence separately."""
-        return await self.get(owner_id=owner_id, run_id=run_id)
+    async def continuation_workspaces(
+        self, *, owner_id: str, run_id: str
+    ) -> tuple[str, ...] | None:
+        """Return a terminal Answer's workspace set for current authorization."""
+        record = await self._get_answer_run(owner_id=owner_id, run_id=run_id)
+        if record is None or not record.terminal:
+            return None
+        return tuple(str(item) for item in record.request_input().get("workspaces") or ())
 
     async def follow_up(
         self,
@@ -966,7 +1012,7 @@ class AnswerService:
             raise ValueError("continuation query cannot be empty")
         if len(text) > _AGENT_CONTROL_CONTENT_LIMIT:
             raise ValueError("continuation query exceeds 20000 characters")
-        record = await self.get(owner_id=owner_id, run_id=run_id)
+        record = await self._get_answer_run(owner_id=owner_id, run_id=run_id)
         if record is None or not record.terminal:
             return None
         if authorized_workspaces is None:
@@ -1045,46 +1091,33 @@ class AnswerService:
             source_lane_id=(parent_lane_id if not include_answer else None),
         )
 
-    async def cancel(self, *, owner_id: str, run_id: str) -> CancellationOutcome:
-        """Request cancellation; only this mutates a run on a caller's behalf.
-
-        A pending running cancellation also signals this process's local task
-        immediately after the durable commit, so the owner observes the stop
-        before the next heartbeat (Task 5 same-process signal).
-        """
-        outcome = await self._store.request_cancellation(owner_id=owner_id, run_id=run_id)
-        if outcome.outcome == "pending":
-            self._coordinator.cancel_local(owner_id, run_id)
-        return outcome
-
-    def subscribe(
-        self, *, owner_id: str, run_id: str, after_sequence: int = 0
-    ) -> AsyncGenerator[AnswerRunEvent]:
-        """Follow one owned run's durable events; detaching never cancels it."""
-        return self._coordinator.subscribe(
-            owner_id=owner_id, run_id=run_id, after_sequence=after_sequence
-        )
-
     async def wait(self, *, owner_id: str, run_id: str) -> AnswerResult:
         """Follow one owned run to its terminal state and project its result.
 
-        Cancelling this wait detaches this observer only; use :meth:`cancel` to
-        stop the run itself.
+        Cancelling this wait detaches this observer only; use the common Run
+        service to stop the run itself.
         """
-        async with aclosing(self.subscribe(owner_id=owner_id, run_id=run_id)) as events:
+        if await self._get_answer_run(owner_id=owner_id, run_id=run_id) is None:
+            raise RunFailedError(
+                "answer_run_missing",
+                "Answer run disappeared before it finished.",
+            )
+        async with aclosing(
+            self._coordinator.subscribe(owner_id=owner_id, run_id=run_id)
+        ) as events:
             async for _event in events:
                 pass
         final = await self._store.get_run(owner_id=owner_id, run_id=run_id)
         if final is None:
-            raise AnswerRunFailedError(
+            raise RunFailedError(
                 "answer_run_missing",
                 "Answer run disappeared before it finished.",
             )
         if final.status == "succeeded":
             return restore_answer_result(final.result or {})
         if final.status == "cancelled":
-            raise AnswerRunCancelledError(final.run_id)
-        raise AnswerRunFailedError(
+            raise RunCancelledError(final.run_id)
+        raise RunFailedError(
             final.error_kind or "answer_stream_failed",
             final.error_message or "Answer run failed.",
         )
@@ -1102,7 +1135,7 @@ class AnswerService:
             owner_id=owner_id,
             idempotency_key=idempotency_key,
         )
-        return await self.wait(owner_id=creation.run.owner_id, run_id=creation.run.run_id)
+        return await self.wait(owner_id=owner_id, run_id=creation.run.run_id)
 
     async def answer_stream(
         self,
@@ -1110,7 +1143,7 @@ class AnswerService:
         *,
         owner_id: str,
         idempotency_key: str | None = None,
-    ) -> AsyncGenerator[AnswerRunEvent]:
+    ) -> AsyncGenerator[RunEvent]:
         """Create one durable answer run and follow its events until it ends."""
         creation = await self.create(
             request=request,
@@ -1118,9 +1151,11 @@ class AnswerService:
             idempotency_key=idempotency_key,
         )
         run = creation.run
-        async with aclosing(self.subscribe(owner_id=run.owner_id, run_id=run.run_id)) as events:
+        async with aclosing(
+            self._coordinator.subscribe(owner_id=owner_id, run_id=run.run_id)
+        ) as events:
             async for event in events:
-                yield event
+                yield RunEvent.from_runtime(event)
 
     async def capabilities(self) -> AnswerCapabilities:
         """Return the public image-capability snapshot after its allowed re-probe."""
@@ -1140,7 +1175,9 @@ class AnswerService:
         so they are not readable here; a current-turn upload takes precedence
         over a history upload sharing its ordinal.
         """
-        references = await self._store.list_run_artifacts(owner_id=owner_id, run_id=run_id)
+        references = await self.list_artifacts(owner_id=owner_id, run_id=run_id)
+        if references is None:
+            return None
         reference = next(
             (
                 item
@@ -1156,9 +1193,7 @@ class AnswerService:
             return None
         pieces = [
             piece
-            async for piece in self._store.stream_artifact(
-                owner_id=owner_id, digest=reference.digest
-            )
+            async for piece in self._blob_store.stream(owner_id=owner_id, digest=reference.digest)
         ]
         if not pieces:
             return None

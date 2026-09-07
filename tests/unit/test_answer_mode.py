@@ -17,7 +17,7 @@ from dlightrag.application.answer_runs.mode import (
     resource_role,
     valid_modes,
 )
-from dlightrag.engine.runtime import answer_run_request_fingerprint
+from dlightrag.engine.runtime import run_request_fingerprint
 
 
 def test_omitted_mode_canonicalizes_to_auto_and_matches_explicit_auto_fingerprint() -> None:
@@ -25,7 +25,7 @@ def test_omitted_mode_canonicalizes_to_auto_and_matches_explicit_auto_fingerprin
     explicit = AnswerRunRequest(query="q", workspaces=("ws",), mode="auto")
     assert canonical_answer_mode(None) == "auto"
     assert omitted.as_request()["mode"] == "auto"
-    assert answer_run_request_fingerprint(omitted.as_request()) == answer_run_request_fingerprint(
+    assert run_request_fingerprint(omitted.as_request()) == run_request_fingerprint(
         explicit.as_request()
     )
     assert AnswerRequestContract(query="q").mode is None

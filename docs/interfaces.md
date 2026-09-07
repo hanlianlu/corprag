@@ -3,17 +3,17 @@
 This document owns public REST, MCP, Web, and in-process request/response
 contracts. Configuration belongs in [Configuration](configuration.md), runtime
 behavior in [Retrieval and Answer](retrieval-answer.md), durable lifecycle rules
-in [Durable Answer Runs](durable-answer-runs.md), and authorization in
+in [RunRuntime and durable query execution](durable-answer-runs.md), and authorization in
 [Security](security.md).
 
 ## Choosing An Interface
 
 | Interface | Use when | Ingestion |
 |---|---|---|
-| REST | DlightRAG runs as a service | Durable jobs |
-| MCP | An agent connects over stdio or streamable HTTP | Durable jobs |
-| Web | A browser user uploads and chats | Durable jobs |
-| In-process Application | Your process owns DlightRAG and its dependencies | Foreground convenience or durable jobs |
+| REST | DlightRAG runs as a service | Durable Corpus Mutation Runs |
+| MCP | An agent connects over stdio or streamable HTTP | Durable Corpus Mutation Runs |
+| Web | A browser user uploads and chats | Durable Corpus Mutation Runs |
+| In-process Application | Your process owns DlightRAG and its dependencies | Durable Corpus Mutation Runs |
 
 Remote clients should not import `dlightrag`; use REST, MCP, or Web. Configure
 models, PostgreSQL, credentials, and the parser once, then reuse the service or
@@ -51,21 +51,27 @@ visual search.
 
 ### REST
 
-`POST /ingest` accepts JSON and returns `202 Accepted` with a durable ingest job.
-`POST /ingest/blob` accepts one multipart `file` plus optional `workspace`,
-`title`, `author`, and JSON-string `metadata` fields.
+`POST /runs/corpus/ingest` and `/runs/corpus/replace` accept JSON and
+return `202 Accepted` with a durable `corpus_mutation` Run descriptor.
+Single and batch multipart uploads use the corresponding `/upload` and
+`/uploads` suffixes. A single upload may provide a 64-character hexadecimal
+`content_sha256`; mismatch rejects acceptance and deletes the Run-exclusive
+staging directory. Every REST mutation requires `Idempotency-Key`.
 
 ```bash
-curl -X POST http://localhost:8100/ingest \
+curl -X POST http://localhost:8100/runs/corpus/ingest \
   -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: ingest-docs-1' \
   -d '{"source_type":"local","path":"docs"}'
 
-curl -X POST http://localhost:8100/ingest \
+curl -X POST http://localhost:8100/runs/corpus/ingest \
   -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: ingest-s3-1' \
   -d '{"source_type":"s3","bucket":"my-bucket","prefix":"docs/"}'
 
-curl -X POST http://localhost:8100/ingest \
+curl -X POST http://localhost:8100/runs/corpus/ingest \
   -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: ingest-url-1' \
   -d '{"source_type":"url","url":"https://cdn.example.com/report.pdf"}'
 ```
 
@@ -113,56 +119,47 @@ Per-document metadata uses a manifest:
 ```python
 from dlightrag.application.corpus_admin import IngestSpec
 
-result = await application.corpora.ingest(
-    "default", IngestSpec(source_type="local", path="./docs")
+creation = await application.corpus_mutations.create_ingest(
+    workspace="default",
+    spec=IngestSpec(source_type="s3", bucket="my-bucket", prefix="docs/"),
+    submitted_by="operator-1",
+    idempotency_key="ingest-s3-1",
 )
-job = await application.corpora.start_ingest_job(
-    "default", IngestSpec(source_type="s3", bucket="my-bucket", prefix="docs/")
-)
-status = await application.corpora.get_ingest_job(job["job_id"])
+run = await application.runs.get(owner_id="default", run_id=creation.run.run_id)
 ```
 
-MCP `ingest` exposes the REST arguments and returns the same job object. Use
-`get_ingest_job` to poll and `cancel_ingest_job` to stop unfinished work.
+MCP `ingest` exposes the REST source arguments and returns the common Run
+descriptor. MCP also exposes `retry_files`, `delete_files`, `reset_corpus`, and
+`resume_corpus_run`; use `get_run` and `cancel_run` for their shared lifecycle.
 
-### Jobs And Results
+### Runs And Results
 
-A job has `job_id`, `workspace`, `source_type`, `status`, item counters,
-`current_window`, bounded `errors`, `errors_truncated`, the accepted `request`,
-optional `result`, and `status_url`. Status is `queued`, `running`, `succeeded`,
-`partial`, or `failed`. `succeeded` and `partial` carry a result; `partial` means
-some items landed. At most 200 error messages are retained, while
-`failed_items` remains authoritative.
+Corpus Mutation actions are `ingest`, `replace`, `delete`, `retry`, and `reset`.
+They use the common `queued`, `running`, `succeeded`, `failed`, and `cancelled`
+states and the common `GET|DELETE /runs/{run_id}` plus
+`GET /runs/{run_id}/events` observation routes. Cancellation closes at the
+durable upstream handoff. A multi-document mutation with any failed document is
+`failed`, not partially successful. Acceptance is atomically bounded by the
+validated 1,000 nonterminal Corpus Mutation fuse; a full lane returns HTTP 503
+before inserting a Run. Accepted work remains durable and independently claims
+at no more than two mutations deployment-wide.
 
-`GET /ingest/jobs/{job_id}` returns the current row.
-`POST /ingest/jobs/{job_id}/cancel` requests cancellation and leaves completed
-documents intact. Recent queued/running rows recover at startup; remote-prefix
-jobs resume at `current_window`.
-
-`CorpusAdmin.ingest()` waits up to `corpus.ingestion.timeout` and returns either
-the completed result or the still-running job without cancelling it. REST, MCP,
-and Web never wait on that timeout.
-
-Single-file result:
+The terminal result carries the action, stable `track_id`, bounded per-document
+outcomes, `document_count`, and `details_truncated`. An ambiguous destructive
+outcome remains `running` with `phase=waiting_for_repair` and exposes bounded
+`repair_reason` and `repair_remedy` guidance. An authorized operator repairs the
+upstream state and explicitly uses `POST /runs/{run_id}/resume`; Corpus Reset is
+the only destructive supersession path.
 
 ```json
 {
-  "doc_id": "file-doc-abc123",
-  "source_kind": "document",
-  "chunks": ["chunk-a", "chunk-b"],
-  "parse_engine": "mineru",
-  "process_options": "iteP"
+  "action": "ingest",
+  "track_id": "dlightrag-corpus-0199a0a0-0000-7000-8000-000000000001",
+  "document_count": 1,
+  "details_truncated": false,
+  "documents": [{"document_id": "file-doc-abc123", "status": "ready", "phase": "finalized"}]
 }
 ```
-
-Batch result:
-
-```json
-{"processed": 2, "errors": [], "results": [{"doc_id": "file-doc-abc123"}]}
-```
-
-Unsupported files use `source_kind: "skipped"` with `status` and `reason`.
-Batch-level failures raise; per-file failures appear in `errors`.
 
 ### Metadata
 
@@ -172,6 +169,13 @@ or keys. Built-ins such as `filename`, `filename_stem`, `file_extension`,
 `title`, and `author` are reserved. Set title/author through their fields.
 `creation_date` is the one built-in accepted under `metadata`; it must be ISO
 8601 and is filtered with `creation_date_from`/`creation_date_to`.
+`_dlightrag_finalization_complete` is internal and is rejected from caller
+metadata.
+
+Metadata GET, update, search, planner schema, and search statistics expose only
+Product Documents whose internal finalization marker is exactly true. Pending,
+failed-finalization, legacy-unproven, and direct-LightRAG-bypass rows behave as
+not found on these surfaces.
 
 `POST /metadata/search` returns document IDs ordered by `doc_id`, with `limit`
 (1–100, default 50) and a signed opaque `cursor`. The cursor is bound to the
@@ -191,6 +195,7 @@ cursors return 422 before storage access.
 | `all_workspaces` | both | `false` | Every workspace visible to the caller; exclusive with explicit selection |
 | `top_k` | both | config | KG entity/relationship breadth |
 | `chunk_top_k` | both | config | Text/visual candidate breadth |
+| `federated_rerank` | retrieve | `false` | Rerank the merged multi-workspace candidate pool when a reranker is configured |
 | `bm25_query` | retrieve | query-derived | Optional lexical override; REST/MCP cap it at 1,024 characters |
 | `query_images` | retrieve | none | Up to three current images for visual search |
 | `attachments` | answer | none | Link descriptors or multipart files used only by this answer |
@@ -205,18 +210,21 @@ single-workspace.
 ### REST
 
 ```bash
-curl -X POST http://localhost:8100/retrieve \
+# Accept a durable Retrieval run.
+RETRIEVAL_RUN=$(curl -sS -X POST http://localhost:8100/retrieve \
   -H 'Content-Type: application/json' \
-  -d '{"query":"key findings","all_workspaces":true}'
+  -H 'Idempotency-Key: retrieval-example-1' \
+  -d '{"query":"key findings","all_workspaces":true}' | jq -r .run_id)
+curl http://localhost:8100/runs/$RETRIEVAL_RUN
 
-# Accept a durable answer run.
-curl -X POST http://localhost:8100/answer \
+# Accept a durable Answer run.
+ANSWER_RUN=$(curl -sS -X POST http://localhost:8100/answer \
   -H 'Content-Type: application/json' \
-  -d '{"query":"key findings","semantic_highlights":true}'
+  -d '{"query":"key findings","semantic_highlights":true}' | jq -r .run_id)
 
 # Read status/result and follow events.
-curl http://localhost:8100/answer/$RUN_ID
-curl -N -H 'Last-Event-ID: 12' http://localhost:8100/answer/$RUN_ID/events
+curl http://localhost:8100/runs/$ANSWER_RUN
+curl -N -H 'Last-Event-ID: 12' http://localhost:8100/runs/$ANSWER_RUN/events
 
 # Attach an HTTPS resource.
 curl -X POST http://localhost:8100/answer \
@@ -230,61 +238,80 @@ curl -X POST http://localhost:8100/answer \
   -F 'attachments=@figure.png'
 ```
 
-There is no public `/query` route and no ephemeral answer mode. `/retrieve`
-returns contexts immediately. `POST /answer` always persists a run and returns
-HTTP 202:
+There is no public `/query` route, inline remote Retrieval result, or ephemeral
+Answer mode. `POST /retrieve` and `POST /answer` persist a Run and return HTTP
+202. A Retrieval descriptor differs only in `run_kind: "retrieval"`:
 
 ```json
 {
   "run_id": "019…",
+  "run_kind": "answer",
+  "lane": "query",
   "status": "queued",
-  "status_url": "/answer/019…",
-  "events_url": "/answer/019…/events",
-  "cancel_url": "/answer/019…"
+  "status_url": "/runs/019…",
+  "events_url": "/runs/019…/events",
+  "cancel_url": "/runs/019…"
 }
 ```
 
-### Answer Run Endpoints
+### Run Lifecycle and Answer Endpoints
 
 | Operation | Contract |
 |---|---|
-| `POST /answer` | Accept a run. Optional `Idempotency-Key` replays the same normalized request; conflicting reuse returns 409. |
-| `GET /answer` | List this owner's runs oldest-first; `after` + `limit` (1–100, default 50). |
-| `GET /answer/{run_id}` | Return status, cancellation flag, phase, progress version, terminal error, and canonical result when succeeded. |
-| `GET /answer/{run_id}/events` | Reconnectable SSE; resume with `Last-Event-ID` or integer `after`. |
-| `GET /answer/{run_id}/artifacts` | List stored-result Artifact descriptors/outcome; 409 before a result exists. |
-| `GET /answer/{run_id}/artifacts/{resource_id}` | Stream Artifact bytes with Range support; `download=true` forces attachment. |
+| `POST /retrieve` | Accept a Retrieval Run and return its descriptor. Optional `Idempotency-Key` replays the same normalized request; conflicting reuse returns 409. |
+| `POST /answer` | Accept an Answer Run. Optional `Idempotency-Key` replays the same normalized request; conflicting reuse returns 409. |
+| `GET /runs` | List this owner's runs oldest-first; `after` + `limit` (1–100, default 50). |
+| `GET /runs/{run_id}` | Return common kind, lane, status, cancellation, phase, progress, error, and terminal result fields. |
+| `GET /runs/{run_id}/events` | Reconnectable SSE; resume with `Last-Event-ID` or integer `after`. |
+| `DELETE /runs/{run_id}` | Idempotent cancellation; 200 if terminal, otherwise 202. |
+| `POST /runs/{run_id}/resume` | Requeue an authorized Corpus Mutation Run from `phase=waiting_for_repair`; 409 for every other lifecycle state. |
+| `GET /answer/{run_id}/artifacts` | List Answer Artifact descriptors/outcome; 409 before a result exists. |
+| `GET /answer/{run_id}/artifacts/{resource_id}` | Stream Answer Artifact bytes with Range support; `download=true` forces attachment. |
 | `GET /answer/{run_id}/artifacts/{resource_id}/presentation` | Project an available Markdown Artifact as typed `AnswerResponse`, including that Artifact's validated citation sources. |
-| `DELETE /answer/{run_id}` | Idempotent cancellation; 200 if terminal, otherwise 202. |
 | `POST /answer/{run_id}/steer` | Queue an instruction for live Research. |
 | `POST /answer/{run_id}/follow-up` | Create a child run using the selected terminal answer as context. |
 | `POST /answer/{run_id}/fork` | Create a sibling branch from accepted context. |
-| `POST /answer/{run_id}/resume` | Return current state before event reattachment. |
 | `GET /answer/{run_id}/transcript` | Return bounded canonical ancestry. |
 | `GET /answer/{run_id}/children` | Newest-first keyset page (`limit` 1–100, default 50). |
 
-Run status is `queued`, `running`, `succeeded`, `failed`, or `cancelled`; phase is
-`routing`, `planning`, `searching`, `researching`, or `generating`. Unknown,
-pruned, foreign-owner runs all return 404. A retained run whose event log was
+Run status is `queued`, `running`, `succeeded`, `failed`, or `cancelled`. Phase is
+an executor-owned string. Retrieval uses `planning` and `searching`; Answer uses
+`routing`, `planning`, `searching`, `researching`, and `generating`. Unknown,
+pruned, and foreign-owner Runs all return 404. A retained Run whose event log was
 trimmed returns 410 from the event endpoint; status/result remains readable.
-Disconnecting a client never cancels a run.
+Disconnecting a client never cancels a Run.
 
-SSE event types are exactly:
+The common SSE terminal and progress events are:
 
 | Event | Payload |
 |---|---|
-| `progress` | Current `phase` |
-| `token` | Coalesced answer text |
-| `reset` | Invalidate all previously streamed draft text before continuation, replacement, or terminal projection |
-| `tool_start`, `tool_progress`, `tool_end` | Safe metadata only; no raw stdout/stderr |
-| `done` | Terminal success with full `result`, or cancellation without one |
+| `progress` | Current executor-owned `phase` |
+| `done` | Terminal success with full kind-specific `result`, or cancellation without one |
 | `error` | Terminal `{kind, message}` failure |
+
+Answer may additionally emit `token`, `reset`, `tool_start`, `tool_progress`,
+and `tool_end`. Retrieval emits only `progress` and one terminal event.
 
 Each durable sequence is the SSE `id`. Supplying conflicting header/query
 cursors returns 400. Without a cursor, replay starts at sequence 1. Ten-second
 comment keepalives consume no sequence. Exactly one terminal event is committed.
 
-Canonical successful result:
+Canonical successful Retrieval result after reader projection:
+
+```json
+{
+  "contexts": {"chunks": [], "entities": [], "relationships": []},
+  "sources": [],
+  "trace": {},
+  "image_descriptions": []
+}
+```
+
+Runtime storage omits authorization-dependent download/image URLs and query-image
+bytes. `GET /runs/{run_id}` and terminal SSE reads project source and visual URLs
+against the caller's current permissions.
+
+Canonical successful Answer result:
 
 ```json
 {
@@ -313,10 +340,20 @@ LightRAG count.
 ```python
 from dlightrag.application.access import DEPLOYMENT_OWNER_ID
 from dlightrag.application.answer_runs import AnswerRequest
-from dlightrag.application.retrieval import RetrieveRequest
+from dlightrag.application.retrieval import RetrieveProjection, RetrieveRequest
 
-retrieved = await application.retrieval.retrieve(
-    RetrieveRequest(query="What changed?", workspaces=("default",))
+retrieval_run = await application.retrieval.create(
+    request=RetrieveRequest(query="What changed?", workspaces=("default",)),
+    owner_id=DEPLOYMENT_OWNER_ID,
+    idempotency_key="retrieval-example-1",
+)
+retrieved = await application.retrieval.wait(
+    owner_id=DEPLOYMENT_OWNER_ID,
+    run_id=retrieval_run.run.run_id,
+    projection=RetrieveProjection(
+        downloadable_workspaces=None,
+        visual_workspaces=None,
+    ),
 )
 
 answer = await application.answers.answer(
@@ -335,29 +372,33 @@ async for event in application.answers.answer_stream(
     print(event.event_type, event.payload)
 ```
 
+`RetrievalService.retrieve()` is the create-and-wait convenience; cancelling that
+await only detaches and does not cancel its accepted Run. `RunService` exposes
+common status, listing, subscription, and cancellation.
+
 Files/URLs become `ResourceInput` values through
 `AnswerAttachment.from_path/from_bytes/from_url` and
-`resource_inputs_from_attachments`. `AnswerService` also exposes status,
-subscription, cancellation, steering, continuation, transcript, and roster
-methods. There is no separate public Python SDK for remote callers.
+`resource_inputs_from_attachments`. `AnswerService` owns Answer-specific
+steering, continuation, transcript, and roster methods. There is no separate
+public Python SDK for remote callers.
 
 ### MCP Server
 
-MCP `answer` returns only the durable descriptor; poll `get_answer_run` for the
-canonical result. A tool result puts typed JSON in `structuredContent` and
+MCP `retrieve` and `answer` return only durable descriptors; poll `get_run` for
+the canonical result. A tool result puts typed JSON in `structuredContent` and
 formatted equivalent JSON in its first text block. Expected validation or
 authorization failures set `isError: true`; protocol failures remain JSON-RPC
 errors.
 
 Registered public tool names are:
 
-- query/run: `retrieve`, `answer`, `get_answer_run`, `cancel_answer_run`,
+- query/run: `retrieve`, `answer`, `get_run`, `cancel_run`, `list_runs`,
   `steer_answer_run`, `follow_up_answer_run`, `fork_answer_run`,
-  `resume_answer_run`, `get_answer_transcript`, `list_answer_children`,
-  `list_answer_runs`, `list_answer_artifacts`, `read_answer_artifact`
+  `get_answer_transcript`, `list_answer_children`, `list_answer_artifacts`,
+  `read_answer_artifact`
 - corpus: `list_workspaces`, `get_capabilities`,
-  `get_workspace_storage_status`, `create_workspace`, `delete_workspace`,
-  `ingest`, `get_ingest_job`, `cancel_ingest_job`, `list_files`, `delete_files`
+  `get_workspace_storage_status`, `create_workspace`, `ingest`, `retry_files`,
+  `list_files`, `delete_files`, `reset_corpus`, `resume_corpus_run`
 - model catalogue: `get_model_catalogue`, `upsert_model_catalogue_entry`,
   `remove_model_catalogue_entry`
 - memory: `list_memories`, `remember_memory`, `forget_memory`,
@@ -375,7 +416,8 @@ Route families cover:
   `/runs/{run_id}/attachments/{ordinal}` (plus `/thumbnail`);
 - `/answer`, submission reconciliation, status/resume/steer/children,
   follow-up/fork/cancel, Artifacts/presentation, and events; and
-- Files/upload/ingest status, workspaces, images, Memory, and model catalogue.
+- Files/upload and same-origin `/corpus-runs/{run_id}`
+  status/events/cancel/resume, workspaces, images, Memory, and model catalogue.
 
 `/web/` is unpersisted New Chat;
 `/web/conversations/{conversation_id}` selects a durable owner-scoped
@@ -399,7 +441,7 @@ up to 100. Attachments are owner-scoped, content-addressed run blobs and are
 re-registered lazily for follow-ups. Count, per-file, and total-byte limits are
 validated before acceptance; read failures after acceptance produce a terminal
 error rather than silent omission. Lifecycle details are centralized in
-[Durable Answer Runs](durable-answer-runs.md).
+[RunRuntime and durable query execution](durable-answer-runs.md).
 
 ## Contexts
 
@@ -470,7 +512,9 @@ A source groups one document's chunks in citation-index order:
 (`/files/raw/{document_id}` for REST,
 `/web/api/files/raw/{document_id}` for Web); MCP transport-neutral payloads
 leave it null. `retrieve` returns all retrieved sources. `answer` returns cited
-sources only and sets `cited_chunk_ids`.
+sources only and sets `cited_chunk_ids`. Projecting a historical result does not
+re-authorize its source: the live download and visual routes return 404 after a
+document is hidden.
 
 ## Citations
 
@@ -485,7 +529,9 @@ Inline citations accept:
 Resolve `[1-2]` by finding source `id: "1"`, then chunk `chunk_idx: 2`.
 `page_number` helps navigation but does not affect citation validity.
 
-Visual bytes are read through authenticated routes:
+Visual bytes are read through authenticated routes. Both full and thumbnail
+reads return 404 when the chunk has no attributable, currently finalized
+Product Document; cached thumbnails do not bypass that check:
 
 | Interface | Reference |
 |---|---|
@@ -527,13 +573,12 @@ fails closed with `CURRENT_IMAGES_UNSUPPORTED` or
 |---|---|
 | `GET /workspaces` | Page the authorized workspace catalogue. |
 | `POST /workspaces` | Create an empty workspace (201; duplicate 409). |
-| `DELETE /workspaces/{workspace}` | Reset/delete one workspace; supports `keep_files` and `dry_run`. |
 | `GET /workspaces/{workspace}/storage` | Read operator storage/promotion state. |
-| `POST /reset` | Reset one workspace while retaining its registry identity. |
+| `POST /runs/corpus/reset` | Accept Corpus Reset while retaining Workspace identity and history. |
 | `GET /files` | Page processed files for one workspace. |
-| `DELETE /files` | Delete by paths/names; supports `dry_run`. |
+| `POST /runs/corpus/delete` | Accept durable deletion by exact path, name, or document ID. |
 | `GET /files/failed` | Page failed documents. |
-| `POST /files/retry` | Re-ingest failed documents from stored source metadata. |
+| `POST /runs/corpus/retry` | Accept retry for exact document IDs or `all_retryable`. |
 | `GET /files/raw/{document_id:path}` | Stream or redirect one authorized source. |
 | `POST /metadata/search` | Page matching document IDs. |
 | `GET /metadata/{doc_id}` | Read one document's metadata. |
@@ -546,7 +591,10 @@ curl -X POST http://localhost:8100/workspaces \
   -H 'Content-Type: application/json' \
   -d '{"workspace":"Research Notes"}'
 
-curl -X DELETE 'http://localhost:8100/workspaces/research_notes?keep_files=false'
+curl -X POST http://localhost:8100/runs/corpus/reset \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: reset-research-notes-1' \
+  -d '{"workspace":"research_notes"}'
 ```
 
 `GET /workspaces` orders by workspace ID and pages with `limit` (default 50,
@@ -554,10 +602,12 @@ maximum 100) plus a signed cursor. Access filtering happens after catalog
 paging. The response contains `workspaces`, `records`, and `next_cursor`. MCP
 `list_workspaces` returns only the first 50 plus `has_more`.
 
-`DELETE /files` supports `dry_run: true`. Workspace reset reports
-`ingest_jobs_cancelled` and `ingest_jobs_deleted`; dry-run reports zero and does
-not mutate jobs. Web Files uses a workspace-bound signed keyset cursor, defaults
-to 50 files (maximum 100), and orders by `updated_at DESC, id ASC`.
+Corpus deletion and reset are durable Run actions rather than direct mutation
+routes. Reset preserves the Workspace registry, access scope, and history. Web
+Files uses a workspace-bound signed keyset cursor, defaults
+to 50 files (maximum 100), and orders by `updated_at DESC, id ASC`; processed
+rows appear only after Product Document finalization. The failed-files view
+remains administrative and available for repair regardless of publication.
 
 ## Model Catalogue And Profile Memory
 
@@ -580,11 +630,19 @@ reading/changing the setting.
 
 ## Health And Errors
 
-`GET /health` is liveness: it returns in-process health, startup warnings,
-storage backend names, and `answer_image_capability` without touching
-PostgreSQL. Degraded state remains HTTP 200. `GET /ready` checks traffic
-readiness and the injected database adapter, returning only fixed-detail 503
-errors. Readiness checks are single-flighted and memoized for two seconds.
+`GET /health` is liveness: it returns in-process state without model, parser,
+corpus, or database I/O. Its bounded `components` map distinguishes `process`,
+`operational_state`, `run_coordinator`, `cancellation_listener`,
+`corpus_storage`, `parser`, and `providers`; details and warnings use fixed
+sanitized text. The four LightRAG storage class names and
+`answer_image_capability` are also reported. Degraded state remains HTTP 200.
+
+`GET /ready` checks only the authority required to durably admit and coordinate
+Runs: Application Operational State plus the injected writable Operational
+State database probe. It does not probe the reader corpus or external vector,
+parser, or model providers. The endpoint returns fixed-detail HTTP 503 when
+that authority is unavailable. Readiness checks are single-flighted and
+memoized for two seconds.
 
 General errors are `{detail, error_type, error_kind?}` where `error_type` is
 `validation`, `auth`, `unavailable`, `configuration`, or `internal`. Stable
@@ -598,9 +656,27 @@ answer error kinds are:
   `tool_contract_changed`, `run_abandoned`, and `run_execution_failed`; and
 - `ANSWER_STREAM_FAILED`.
 
+Stable top-level Retrieval terminal error kinds are `retrieval_timeout`,
+`retrieval_failed`, `retrieval_model_changed`,
+`retrieval_context_policy_changed`, `retrieval_input_incompatible`, and
+`retrieval_input_missing`. `run_abandoned` is common to both durable Query kinds.
+
 Internal exception text and schema detail are not public.
 
-Accepted answer runs queue when saturated; there is no application queue timeout
-or capacity rejection. Attachment total-byte overflow returns HTTP 413 before
-buffering. Generic rate, connection, and volumetric controls belong at ingress;
+Accepted Retrieval and Answer Runs queue under worker saturation while the Query
+Lane has fewer than 30,000 nonterminal Runs; the deployment-wide fuse rejects
+later admission with HTTP 503. Corpus Mutation admission uses its independent
+validated 1,000-Run fuse and the same pre-insert 503 behavior. The controlled
+failure and full-fuse evidence is linked from the
+[Slice 6 validation report](validation/run-runtime-slice-6.md). Queue residence
+has no application timeout. Top-level Retrieval applies
+`corpus.retrieval.timeout` only during claimed
+execution and reports `retrieval_timeout` terminally. Explicit transient corpus
+or provider interruptions defer Retrieval and Answer with a durable bounded
+retry checkpoint, release Query compute capacity, and later resume the same
+Run. Authentication, unsupported configuration/schema, invalid input,
+deterministic model rejection, context overflow, and unknown exceptions remain
+terminal. Attachment total-byte
+overflow returns HTTP 413 before buffering. Generic rate, connection, and
+volumetric controls belong at ingress;
 see [Security](security.md#ingress-responsibilities).

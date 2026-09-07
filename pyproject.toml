@@ -65,6 +65,11 @@ dependencies = [
     "openpyxl>=3.1.5",
 ]
 
+[project.optional-dependencies]
+# LightRAG's Milvus module attempts a runtime install when this client is
+# absent. DlightRAG preflights instead; deployments opt in deterministically.
+milvus = ["pymilvus>=2.6.2"]
+
 [dependency-groups]
 eval = [
     "lightrag-hku[evaluation]>=1.5.7",
@@ -126,6 +131,7 @@ markers = [
     "e2e: Playwright-driven end-to-end UI tests",
     "integration: requires running PostgreSQL",
     "e2e_pg18: opt-in PostgreSQL 18 + LightRAG smoke tests",
+    "load_runtime: opt-in deterministic 10k-client RunRuntime load evidence",
 ]
 
 [tool.importlinter]

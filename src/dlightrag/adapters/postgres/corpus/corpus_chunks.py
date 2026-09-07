@@ -16,6 +16,7 @@ from dlightrag.adapters.postgres.corpus.corpus_vectors import EXACT_FILTER_THRES
 from dlightrag.adapters.postgres.corpus.pg_metadata_index import (
     METADATA_TABLE,
     metadata_match_conditions,
+    metadata_visibility_condition,
 )
 from dlightrag.adapters.postgres.corpus.pg_metadata_scope import build_bounded_scope_probe
 from dlightrag.engine.rag.retrieval import MetadataFilter, MetadataScope
@@ -109,7 +110,7 @@ class PGCorpusChunkStore:
 
     async def read_scoped(
         self,
-        scope: MetadataScope,
+        scope: MetadataScope | None,
         chunk_ids: list[str],
     ) -> list[dict[str, Any] | None]:
         """Read graph-referenced chunks under one active metadata scope.
@@ -123,14 +124,20 @@ class PGCorpusChunkStore:
         """
         if not chunk_ids:
             return []
+        if scope is not None and not scope:
+            return [None] * len(chunk_ids)
         db, workspace = self._text_db_and_workspace()
-        conditions, params = metadata_match_conditions(
-            workspace,
-            scope.filters,
-            filename_mode=scope.filename_mode,
-            start_index=3,
-            alias="m",
-        )
+        if scope is None:
+            conditions = [metadata_visibility_condition("m")]
+            params: list[Any] = []
+        else:
+            conditions, params = metadata_match_conditions(
+                workspace,
+                scope.filters,
+                filename_mode=scope.filename_mode,
+                start_index=3,
+                alias="m",
+            )
         sql = (
             f"SELECT c.id, c.tokens, COALESCE(c.content, '') AS content, "  # noqa: S608
             f"c.chunk_order_index, c.full_doc_id, c.file_path, "

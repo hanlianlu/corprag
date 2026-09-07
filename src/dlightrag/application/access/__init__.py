@@ -19,6 +19,7 @@ from dlightrag.application.access.control import (
     JwtClaimsAccessControl,
     Principal,
     access_control_from_settings,
+    corpus_mutation_access_action,
 )
 from dlightrag.application.access.principal import (
     DEPLOYMENT_OWNER_ID,
@@ -69,6 +70,7 @@ __all__ = [
     "access_control_from_settings",
     "authenticate_bearer_token",
     "auth_mode_for_owner",
+    "corpus_mutation_access_action",
     "current_request_scope",
     "owner_id_from_principal",
     "owner_id_from_user",

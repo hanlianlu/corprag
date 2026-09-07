@@ -4,13 +4,18 @@ import {msg, str, updateWhenLocaleChanges } from '@lit/localize';
 import {html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {repeat} from 'lit/directives/repeat.js';
 import {
+  corpusRunActive,
+  getCorpusRunStatus,
+  resumeCorpusRun,
+  type WebCorpusRunReceipt,
+  type WebCorpusRunStatus,
+} from '../api/corpus-runs.ts';
+import {
   deleteFileRequest,
   FilesApiError,
   getFilePanel,
-  getIngestStatus,
   uploadFileBatch,
   type WebFilePanelSnapshot,
-  type WebIngestStatus,
 } from '../api/files.ts';
 import {icon} from '../design-system/index.ts';
 import {isAbortError} from '../lib/errors.ts';
@@ -23,7 +28,19 @@ import './failed-file-recovery.ts';
 import fileStyles from '../styles/inspector-files.module.css';
 import type {DlFailedFileRecovery} from './failed-file-recovery.ts';
 import {InspectorFilesSession} from './inspector-files-session.ts';
-import type {ToastRequestDetail} from './toast.ts';
+
+type MutationRun = WebCorpusRunReceipt | (
+  WebCorpusRunStatus & Pick<WebCorpusRunReceipt, 'workspace' | 'fileCount'>
+);
+
+function waitingForRepair(
+  run: MutationRun | null | undefined,
+): run is WebCorpusRunStatus & Pick<WebCorpusRunReceipt, 'workspace' | 'fileCount'> {
+  return run !== null
+    && run !== undefined
+    && 'phase' in run
+    && run.phase === 'waiting_for_repair';
+}
 
 function uploadLabel(files: readonly File[], label?: string | null): string {
   if (label) return label;
@@ -42,6 +59,7 @@ export class DlInspectorFiles extends LightElement {
     error: {state: true},
     uploading: {state: true},
     acceptedFiles: {state: true},
+    mutationRun: {state: true},
     filesLoadMoreState: {state: true},
   };
 
@@ -52,15 +70,16 @@ export class DlInspectorFiles extends LightElement {
   declare error: string | null;
   declare uploading: boolean;
   declare acceptedFiles: number;
+  declare mutationRun: MutationRun | null;
   declare filesLoadMoreState: 'idle' | 'loading' | 'error';
 
   #workspace = '';
+  #requestGeneration = 0;
   readonly #session = new InspectorFilesSession();
   #olderFilesFlight: Promise<void> | null = null;
   #olderFilesAnnouncement = '';
   #restoreOlderFocus = false;
   #deleteTrigger: HTMLElement | null = null;
-  #releaseWorkspaceEvents: (() => void)[] = [];
 
   constructor() {
     super();
@@ -72,6 +91,7 @@ export class DlInspectorFiles extends LightElement {
     this.error = null;
     this.uploading = false;
     this.acceptedFiles = 0;
+    this.mutationRun = null;
     this.filesLoadMoreState = 'idle';
     this.#workspace = this.handles.ingest.workspace;
     /** Store reads: this.handles.ingest.workspace. */
@@ -95,7 +115,6 @@ export class DlInspectorFiles extends LightElement {
     }
     const workspace = this.handles.ingest.workspace;
     if (this.active && workspace !== this.#workspace && this.isConnected) {
-      this.#workspace = workspace;
       void this.reload();
     }
     this.querySelectorAll<HTMLElement>('[data-pct]').forEach((fill) => {
@@ -111,24 +130,36 @@ export class DlInspectorFiles extends LightElement {
   async reload(showLoading = true): Promise<void> {
     const workspace = this.handles.ingest.workspace;
     this.#invalidateOlderFiles();
-    if (this.snapshot !== null && this.snapshot.workspace !== workspace) {
+    if (workspace !== this.#workspace) {
+      // Hide the old Workspace before any new-Workspace I/O. A failed load must
+      // never leave actionable rows from the previously selected Workspace.
       this.snapshot = null;
       this.acceptedFiles = 0;
+      this.mutationRun = null;
+      this.#stopPolling();
     }
     this.#workspace = workspace;
     this.uploading = false;
-    const controller = this.#startRequest();
-    this.#stopPolling();
+    const {controller, generation} = this.#startRequest();
+    if (!corpusRunActive(this.mutationRun)) this.#stopPolling();
     if (showLoading) this.loading = true;
     this.error = null;
     try {
       const snapshot = await getFilePanel(workspace, null, controller.signal);
-      if (!this.#isCurrent(controller, workspace)) return;
+      if (!this.#isCurrent(controller, workspace, generation)) return;
+      if (snapshot.workspace !== workspace) {
+        throw new Error('file panel response changed workspace identity');
+      }
       this.snapshot = snapshot;
-      this.acceptedFiles = 0;
-      if (snapshot.ingest.busy) this.#schedulePoll(workspace);
+      if (!corpusRunActive(this.mutationRun)) this.acceptedFiles = 0;
     } catch (error) {
-      if (isAbortError(error) || !this.#isCurrent(controller, workspace)) return;
+      if (
+        isAbortError(error)
+        || !this.#isCurrent(controller, workspace, generation)
+      ) return;
+      // Keep the workspace transition fail closed even when a transport ignores
+      // AbortSignal and resolves an invalidated request later.
+      if (this.snapshot?.workspace !== workspace) this.snapshot = null;
       this.error = error instanceof FilesApiError
         ? error.message
         : msg('Failed to load files.', {id: 'inspectorFiles.loadFailed'});
@@ -221,7 +252,7 @@ export class DlInspectorFiles extends LightElement {
     const workspace = this.handles.ingest.workspace;
     this.#invalidateOlderFiles();
     this.#workspace = workspace;
-    const controller = this.#startRequest();
+    const {controller, generation} = this.#startRequest();
     this.#stopPolling();
     this.#beginMutation();
     this.uploading = true;
@@ -230,23 +261,19 @@ export class DlInspectorFiles extends LightElement {
     requestToast(this, {message: msg(str`Uploading ${name}...`, {id: 'inspectorFiles.uploadingToast'})});
     try {
       const receipt = await uploadFileBatch(workspace, files, controller.signal);
-      if (!this.#isCurrent(controller, workspace)) return;
-      this.snapshot = {
-        workspace,
-        files: this.snapshot?.workspace === workspace ? this.snapshot.files : [],
-        ingest: receipt.ingest,
-        nextCursor: this.snapshot?.workspace === workspace
-          ? this.snapshot.nextCursor
-          : null,
-      };
-      this.acceptedFiles = receipt.fileCount;
+      if (!this.#isCurrent(controller, workspace, generation)) return;
+      this.mutationRun = receipt;
+      this.acceptedFiles = receipt.fileCount ?? files.length;
       requestToast(this, {
-        message: msg('Files received — processing in background', {id: 'inspectorFiles.filesReceived'}),
+        message: msg('Files received — Corpus update accepted', {id: 'inspectorFiles.filesReceived'}),
         duration: 3000,
       });
-      this.#schedulePoll(workspace);
+      void this.#poll(workspace);
     } catch (error) {
-      if (isAbortError(error) || !this.#isCurrent(controller, workspace)) return;
+      if (
+        isAbortError(error)
+        || !this.#isCurrent(controller, workspace, generation)
+      ) return;
       const message = error instanceof FilesApiError
         ? error.message
         : msg('Upload failed.', {id: 'inspectorFiles.uploadFailed'});
@@ -281,20 +308,23 @@ export class DlInspectorFiles extends LightElement {
     const workspace = this.handles.ingest.workspace;
     this.#invalidateOlderFiles();
     this.#stopPolling();
-    const controller = this.#startRequest();
+    const {controller, generation} = this.#startRequest();
     this.#beginMutation();
     this.error = null;
     try {
-      const snapshot = await deleteFileRequest(workspace, filePath, controller.signal);
-      if (!this.#isCurrent(controller, workspace)) return;
-      this.snapshot = snapshot;
+      const receipt = await deleteFileRequest(workspace, filePath, controller.signal);
+      if (!this.#isCurrent(controller, workspace, generation)) return;
+      this.mutationRun = receipt;
       requestToast(this, {
-        message: msg('File deleted.', {id: 'inspectorFiles.fileDeleted'}),
+        message: msg('File deletion accepted.', {id: 'inspectorFiles.fileDeleted'}),
         duration: 3000,
       });
-      if (snapshot.ingest.busy) this.#schedulePoll(workspace);
+      void this.#poll(workspace);
     } catch (error) {
-      if (isAbortError(error) || !this.#isCurrent(controller, workspace)) return;
+      if (
+        isAbortError(error)
+        || !this.#isCurrent(controller, workspace, generation)
+      ) return;
       const message = error instanceof FilesApiError
         ? error.message
         : msg('Deletion failed.', {id: 'inspectorFiles.deletionFailed'});
@@ -307,18 +337,33 @@ export class DlInspectorFiles extends LightElement {
   }
 
   async #poll(workspace: string): Promise<void> {
+    const receipt = this.mutationRun;
+    if (!receipt) return;
     const controller = this.#session.startPollRequest();
     try {
-      const status = await getIngestStatus(workspace, controller.signal);
+      const status = await getCorpusRunStatus(receipt.statusUrl, controller.signal);
       if (workspace !== this.handles.ingest.workspace || !this.active || !this.isConnected) return;
-      if (!status.busy) {
-        await this.reload(false);
-        const recovery = this.querySelector<DlFailedFileRecovery>('dl-failed-file-recovery');
-        await recovery?.refresh(false);
+      if (this.mutationRun?.runId !== receipt.runId) return;
+      this.mutationRun = {
+        ...status,
+        workspace: receipt.workspace,
+        fileCount: receipt.fileCount,
+      };
+      if (waitingForRepair(this.mutationRun)) return;
+      if (corpusRunActive(status)) {
+        this.#schedulePoll(workspace);
         return;
       }
-      this.#setIngestStatus(workspace, status);
-      this.#schedulePoll(workspace);
+      this.acceptedFiles = 0;
+      requestToast(this, {
+        message: status.status === 'succeeded'
+          ? msg('Corpus update finished.', {id: 'inspectorFiles.corpusUpdateFinished'})
+          : msg('Corpus update did not finish.', {id: 'inspectorFiles.corpusUpdateFailed'}),
+        duration: 4000,
+      });
+      await this.reload(false);
+      const recovery = this.querySelector<DlFailedFileRecovery>('dl-failed-file-recovery');
+      await recovery?.refresh(false);
     } catch (error) {
       if (isAbortError(error)) return;
       if (workspace === this.handles.ingest.workspace && this.active && this.isConnected) {
@@ -329,15 +374,43 @@ export class DlInspectorFiles extends LightElement {
     }
   }
 
-  #setIngestStatus(workspace: string, ingest: WebIngestStatus): void {
-    this.snapshot = {
-      workspace,
-      files: this.snapshot?.workspace === workspace ? this.snapshot.files : [],
-      ingest,
-      nextCursor: this.snapshot?.workspace === workspace
-        ? this.snapshot.nextCursor
-        : null,
-    };
+  async #resumeMutation(): Promise<void> {
+    const waiting = this.mutationRun;
+    const workspace = this.handles.ingest.workspace;
+    if (!waitingForRepair(waiting) || this.#session.mutating) return;
+    const {controller, generation} = this.#startRequest();
+    this.#beginMutation();
+    try {
+      const status = await resumeCorpusRun(waiting.resumeUrl, controller.signal);
+      if (!this.#isCurrent(controller, workspace, generation)) return;
+      this.mutationRun = {
+        ...status,
+        workspace: waiting.workspace,
+        fileCount: waiting.fileCount,
+      };
+      requestToast(this, {
+        message: msg('Corpus repair resume accepted.', {
+          id: 'inspectorFiles.corpusResumeAccepted',
+        }),
+        duration: 3000,
+      });
+      if (corpusRunActive(status) && !waitingForRepair(this.mutationRun)) {
+        this.#schedulePoll(workspace);
+      }
+    } catch (error) {
+      if (
+        isAbortError(error)
+        || !this.#isCurrent(controller, workspace, generation)
+      ) return;
+      const message = msg('Corpus repair resume failed.', {
+        id: 'inspectorFiles.corpusResumeFailed',
+      });
+      this.error = message;
+      requestToast(this, {message, duration: 4000});
+    } finally {
+      this.#finishMutation();
+      this.#session.finishRequest(controller);
+    }
   }
 
   #schedulePoll(workspace: string): void {
@@ -356,12 +429,21 @@ export class DlInspectorFiles extends LightElement {
     this.#session.stopPolling();
   }
 
-  #startRequest(): AbortController {
-    return this.#session.startRequest();
+  #startRequest(): {controller: AbortController; generation: number} {
+    this.#requestGeneration += 1;
+    return {
+      controller: this.#session.startRequest(),
+      generation: this.#requestGeneration,
+    };
   }
 
-  #isCurrent(controller: AbortController, workspace: string): boolean {
-    return this.#session.isCurrent(controller, workspace, this.handles.ingest.workspace);
+  #isCurrent(
+    controller: AbortController,
+    workspace: string,
+    generation: number,
+  ): boolean {
+    return generation === this.#requestGeneration
+      && this.#session.isCurrent(controller, workspace, this.handles.ingest.workspace);
   }
 
   #beginMutation(): void {
@@ -430,30 +512,34 @@ export class DlInspectorFiles extends LightElement {
     `;
   }
 
-  #progress(status: WebIngestStatus): TemplateResult | typeof nothing {
-    if (!status.busy) return nothing;
+  #progress(run: MutationRun | null): TemplateResult | typeof nothing {
+    if (waitingForRepair(run)) {
+      return html`
+        <div id="ingest-progress" role="status">
+          <div class=${fileStyles['file-status']}>
+            <span>
+              ${run.repairReason ?? msg('The corpus outcome needs operator repair.', {
+                id: 'inspectorFiles.corpusRepairRequired',
+              })}
+              ${run.repairRemedy ?? msg('Repair it, then resume this same Run.', {
+                id: 'inspectorFiles.corpusRepairRemedy',
+              })}
+            </span>
+            <button type="button" ?disabled=${this.hasActiveMutation}
+                    @click=${() => { void this.#resumeMutation(); }}>
+              ${msg('Resume after repair', {id: 'inspectorFiles.corpusResumeRepair'})}
+            </button>
+          </div>
+        </div>
+      `;
+    }
+    if (!corpusRunActive(run)) return nothing;
     return html`
       <div id="ingest-progress">
         <div class=${fileStyles['file-status']}>
-          <div class=${fileStyles['spinner']}></div>
-          <span>${status.message || msg('Ingesting...', {id: 'inspectorFiles.ingesting'})}</span>
+          <div class=${fileStyles.spinner}></div>
+          <span>${msg('Corpus update in progress…', {id: 'inspectorFiles.corpusUpdateRunning'})}</span>
         </div>
-        ${status.progressPercent === null ? nothing : html`
-          <div class=${fileStyles['progress-bar-track']} role="progressbar"
-               aria-valuenow=${String(status.progressPercent)} aria-valuemin="0"
-               aria-valuemax="100"
-               aria-label=${msg('Ingest progress', {id: 'inspectorFiles.ingestProgressAria'})}>
-            <div class=${fileStyles['progress-bar-fill']} data-pct=${String(status.progressPercent)}></div>
-          </div>
-          <div class=${fileStyles['progress-label']}>
-            ${msg(str`batch ${status.currentBatch}/${status.totalBatches} · ${status.documents} doc(s)`, {id: 'inspectorFiles.batchProgress'})}
-          </div>
-        `}
-        ${status.pendingEnqueues > 0 ? html`
-          <div class=${fileStyles['ingest-queue-notice']}>
-            ${msg(str`${status.pendingEnqueues} upload(s) queued — will process after current batch`, {id: 'inspectorFiles.queueNotice'})}
-          </div>
-        ` : nothing}
       </div>
     `;
   }
@@ -462,7 +548,7 @@ export class DlInspectorFiles extends LightElement {
     const snapshot = this.snapshot;
     const files = snapshot?.files ?? [];
     return html`
-      ${snapshot ? this.#progress(snapshot.ingest) : nothing}
+      ${this.#progress(this.mutationRun)}
       ${this.error ? html`<div class="file-error" role="alert">${this.error}</div>` : nothing}
       <div class=${`${fileStyles['upload-zone']}${this.uploading ? ` ${fileStyles['is-uploading']}` : ''}`} id="upload-zone">
         <button type="button" class=${fileStyles['upload-zone-file-action']}
@@ -485,7 +571,7 @@ export class DlInspectorFiles extends LightElement {
         @dl-failed-file-recovery-complete=${() => { void this.reload(false); }}
       ></dl-failed-file-recovery>
       ${this.loading ? html`
-        <div class=${fileStyles['file-status']}><div class=${fileStyles['spinner']}></div><span>${msg('Loading files...', {id: 'inspectorFiles.loadingFiles'})}</span></div>
+        <div class=${fileStyles['file-status']}><div class=${fileStyles.spinner}></div><span>${msg('Loading files...', {id: 'inspectorFiles.loadingFiles'})}</span></div>
       ` : nothing}
       ${!this.loading ? html`
         <div id="file-list" role="list" aria-label=${msg('Processed files', {id: 'inspectorFiles.processedFilesAria'})} tabindex="-1">
@@ -523,10 +609,10 @@ export class DlInspectorFiles extends LightElement {
           ${this.#olderFilesAnnouncement}
         </span>
       ` : nothing}
-      ${!this.loading && !this.error && files.length === 0 && !snapshot?.ingest.busy ? html`
+      ${!this.loading && !this.error && files.length === 0 && !corpusRunActive(this.mutationRun) ? html`
         <div class="empty-state">${msg(str`No files ingested in workspace “${this.#workspace}”.`, {id: 'inspectorFiles.emptyState'})}</div>
       ` : nothing}
-      ${this.acceptedFiles > 0 && snapshot?.ingest.busy ? html`
+      ${this.acceptedFiles > 0 && corpusRunActive(this.mutationRun) ? html`
         <div class=${`${fileStyles['ingest-queue-notice']} ${fileStyles['ingest-queue-notice--inline']}`}>
           ${msg(str`${this.acceptedFiles} new file(s) accepted for ingest`, {id: 'inspectorFiles.acceptedForIngest'})}
         </div>

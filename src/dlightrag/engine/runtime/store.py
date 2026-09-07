@@ -1,38 +1,37 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
-"""Durable operations required by the storage-neutral run coordinator."""
+"""Narrow operation-neutral ports owned by RunRuntime."""
 
-from collections.abc import Mapping, Sequence
+import datetime
+from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Protocol
 
-from dlightrag.engine.runtime.contracts import AnswerRunPhase
+from dlightrag.engine.runtime.contracts import RunKind, RunLane, RunPhase
 from dlightrag.engine.runtime.records import (
-    AnswerRunEvent,
-    AnswerRunRecord,
     ClaimedRun,
     LeaseRenewal,
-    PendingArtifact,
-    PendingArtifactReference,
-    PendingPublication,
-    RunArtifactReference,
+    PreparedRunEnvelope,
     RunCreation,
     RunDeletion,
+    RunEvent,
+    RunRecord,
     ShutdownOutcome,
     SweepOutcome,
     TerminalOutcome,
 )
-from dlightrag.engine.runtime.settlements import ArtifactAttachmentUpdate
 
 
-class AnswerRunStore(Protocol):
-    """The durable operations a run coordinator may perform.
+class RunStore(Protocol):
+    """Lifecycle operations used by the coordinator and Run application service."""
 
-    Claim returns a run with its claim-bound execution surface; checkpoint-era
-    commit/attach methods are gone. Accepted attachments register through the
-    acceptance transaction, evidence and fetched resources through effect or
-    stage settlements.
-    """
+    async def accept_run(self, *, envelope: PreparedRunEnvelope, run_id: str) -> RunCreation: ...
 
-    async def claim_next(self, *, worker_id: str) -> ClaimedRun | None: ...
+    async def claim_next(
+        self,
+        *,
+        worker_id: str,
+        run_kinds: Sequence[RunKind],
+        lanes: Sequence[RunLane],
+    ) -> ClaimedRun | None: ...
 
     async def heartbeat(
         self, *, owner_id: str, run_id: str, worker_id: str, fencing_epoch: int
@@ -45,24 +44,38 @@ class AnswerRunStore(Protocol):
         run_id: str,
         worker_id: str,
         fencing_epoch: int,
-        phase: AnswerRunPhase,
+        phase: RunPhase,
     ) -> int | None: ...
 
-    async def append_token_batch(
-        self, *, owner_id: str, run_id: str, worker_id: str, fencing_epoch: int, text: str
-    ) -> int | None: ...
-
-    async def append_reset(
-        self, *, owner_id: str, run_id: str, worker_id: str, fencing_epoch: int
-    ) -> int | None: ...
-
-    async def append_tool_event(
+    async def write_checkpoint(
         self,
         *,
         owner_id: str,
         run_id: str,
         worker_id: str,
         fencing_epoch: int,
+        checkpoint: Mapping[str, object],
+        phase: RunPhase | None = None,
+    ) -> bool: ...
+
+    async def start_handoff(
+        self,
+        *,
+        owner_id: str,
+        run_id: str,
+        worker_id: str,
+        fencing_epoch: int,
+        checkpoint: Mapping[str, object],
+    ) -> bool: ...
+
+    async def append_event(
+        self,
+        *,
+        owner_id: str,
+        run_id: str,
+        worker_id: str,
+        fencing_epoch: int,
+        phase: RunPhase | None,
         event_type: str,
         payload: Mapping[str, object],
     ) -> int | None: ...
@@ -76,7 +89,7 @@ class AnswerRunStore(Protocol):
         fencing_epoch: int,
         result: Mapping[str, object],
         stop_reason: str | None = None,
-        publications: Sequence[PendingPublication] = (),
+        publications: Sequence[object] = (),
     ) -> TerminalOutcome: ...
 
     async def finish_failure(
@@ -88,60 +101,67 @@ class AnswerRunStore(Protocol):
         fencing_epoch: int,
         error_kind: str,
         error_message: str,
+        result: Mapping[str, object] | None = None,
     ) -> TerminalOutcome: ...
 
     async def finish_cancelled(
         self, *, owner_id: str, run_id: str, worker_id: str, fencing_epoch: int
     ) -> TerminalOutcome: ...
 
+    async def defer(
+        self,
+        *,
+        owner_id: str,
+        run_id: str,
+        worker_id: str,
+        fencing_epoch: int,
+        checkpoint: Mapping[str, object],
+        next_attempt_at: datetime.datetime,
+    ) -> bool: ...
+
+    async def resume_repair(self, *, owner_id: str, run_id: str) -> bool: ...
+
+    async def wait_for_repair(
+        self,
+        *,
+        owner_id: str,
+        run_id: str,
+        worker_id: str,
+        fencing_epoch: int,
+        checkpoint: Mapping[str, object],
+    ) -> bool: ...
+
     async def release_for_shutdown(
         self, *, owner_id: str, run_id: str, worker_id: str, fencing_epoch: int
     ) -> ShutdownOutcome: ...
 
     async def sweep_once(self) -> SweepOutcome: ...
-
     async def trim_expired_event_logs(self) -> int: ...
-
     async def prune_expired_runs(self) -> RunDeletion: ...
-
-    async def get_run(self, *, owner_id: str, run_id: str) -> AnswerRunRecord | None: ...
-
+    async def get_run(self, *, owner_id: str, run_id: str) -> RunRecord | None: ...
+    async def get_run_global(self, *, run_id: str) -> RunRecord | None: ...
     async def list_runs(
         self, *, owner_id: str, after_run_id: str | None = None, limit: int = 50
-    ) -> tuple[AnswerRunRecord, ...]: ...
-
-    async def list_run_artifacts(
-        self, *, owner_id: str, run_id: str
-    ) -> tuple[RunArtifactReference, ...]: ...
-
-    async def list_artifact_attachments(
-        self, *, owner_id: str, run_id: str
-    ) -> tuple[ArtifactAttachmentUpdate, ...]: ...
-
+    ) -> tuple[RunRecord, ...]: ...
     async def read_event_page(
         self, *, owner_id: str, run_id: str, after_sequence: int = 0
-    ) -> tuple[AnswerRunEvent, ...]: ...
+    ) -> tuple[RunEvent, ...]: ...
 
 
-class AnswerAcceptanceStore(Protocol):
-    """Acceptance-side durable operations for one new run.
+class RunBlobStore(Protocol):
+    """Opaque immutable bytes referenced by run-owned metadata."""
 
-    Prepared input, accepted blob resources, and the run row commit in one
-    atomic acceptance transaction; queued and running rows store exactly one
-    bounded ``prepared_input_json``.
-    """
-
-    async def accept_run(
+    def stream(
         self,
         *,
         owner_id: str,
-        run_id: str,
-        idempotency_key: str | None,
-        prepared_input: Mapping[str, object],
-        resources: Sequence[Mapping[str, object]],
-        blobs: Sequence[PendingArtifact],
-        references: Sequence[PendingArtifactReference],
-    ) -> RunCreation: ...
+        digest: str,
+        offset: int = 0,
+        length: int | None = None,
+    ) -> AsyncIterator[bytes]: ...
+
+    async def read(self, *, owner_id: str, digest: str) -> bytes | None: ...
+    async def size(self, *, owner_id: str, digest: str) -> int | None: ...
 
 
-__all__ = ["AnswerAcceptanceStore", "AnswerRunStore"]
+__all__ = ["RunBlobStore", "RunStore"]

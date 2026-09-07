@@ -72,14 +72,12 @@ def _make_service(*, workspace: str = "test_ws") -> WorkspaceRag:
     )
     maintenance = MagicMock()
     maintenance.clean_orphan_rows = AsyncMock(return_value=0)
-    maintenance.delete_workspace_record = AsyncMock(return_value=True)
     backend = WorkspaceCorpusBackend(
         workspace_id=workspace,
         read_only=False,
         coordination=AsyncMock(),
         maintenance=maintenance,
         runtime=AsyncMock(),
-        ingest_jobs=AsyncMock(),
     )
     service = WorkspaceRag(
         workspace_id=workspace,
@@ -204,7 +202,6 @@ class TestAresetPhase3:
 
         assert result["orphan_tables_cleaned"] == 3
         maintenance.clean_orphan_rows.assert_awaited_once_with("test_ws", dry_run=False)
-        maintenance.delete_workspace_record.assert_awaited_once_with("test_ws")
 
 
 class TestAresetPhase4:
@@ -234,6 +231,31 @@ class TestAresetPhase4:
         # Only workspace-scoped files counted and removed
         assert result["local_files_removed"] == 2
         assert not ws_dir.exists()
+
+    async def test_preserves_sources_accepted_after_reset_run(self, tmp_path: Path) -> None:
+        service = _make_service()
+        service.settings = cast(
+            Any,
+            SimpleNamespace(input_root=tmp_path / "inputs", read_only=False),
+        )
+        runs = tmp_path / "inputs" / service.workspace_id / ".runs"
+        older = runs / "0199a0a0-0000-7000-8000-000000000001" / "sources"
+        reset = runs / "0199a0a0-0000-7000-8000-000000000002" / "sources"
+        newer = runs / "0199a0a0-0000-7000-8000-000000000003" / "sources"
+        invalid = runs / "stale-partial" / "sources"
+        for source in (older, reset, newer, invalid):
+            source.mkdir(parents=True)
+            (source / "report.pdf").write_bytes(b"pdf")
+
+        result = await service.areset(
+            preserve_run_sources_after="0199a0a0-0000-7000-8000-000000000002"
+        )
+
+        assert result["local_files_removed"] == 3
+        assert not older.exists()
+        assert not reset.exists()
+        assert not invalid.exists()
+        assert (newer / "report.pdf").read_bytes() == b"pdf"
 
     async def test_root_files_survive_reset(self, tmp_path: Path) -> None:
         """Shared files in working_dir root must NOT be deleted per-workspace."""

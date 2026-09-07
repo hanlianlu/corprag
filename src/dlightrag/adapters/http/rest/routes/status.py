@@ -13,6 +13,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
+from dlightrag.adapters.http.application import get_application
 from dlightrag.application.config import ServiceRole
 from dlightrag.application.health import ApplicationHealth
 
@@ -27,6 +28,12 @@ class HealthStorageResponse(_StatusModel):
     vector: str
     graph: str
     kv: str
+    doc_status: str
+
+
+class HealthComponentResponse(_StatusModel):
+    status: Literal["healthy", "degraded", "starting", "unknown", "stopped"]
+    detail: str | None = None
 
 
 class AnswerImageCapabilityResponse(_StatusModel):
@@ -43,6 +50,7 @@ class HealthResponse(_StatusModel):
     crafted_by: str
     maintained_by: str
     storage: HealthStorageResponse
+    components: dict[str, HealthComponentResponse]
     warnings: list[str] | None = None
     answer_image_capability: AnswerImageCapabilityResponse | None = None
 
@@ -54,7 +62,7 @@ class ReadinessResponse(_StatusModel):
 
 
 def _application_health(request: Request) -> ApplicationHealth:
-    return request.app.state.health
+    return get_application(request).health
 
 
 def _not_ready(*, service_role: ServiceRole, detail: str) -> JSONResponse:
@@ -69,7 +77,7 @@ def _not_ready(*, service_role: ServiceRole, detail: str) -> JSONResponse:
 @router.get("/health", response_model=HealthResponse, response_model_exclude_none=True)
 async def health(request: Request) -> dict[str, object]:
     """Report process liveness and the capabilities this build exposes."""
-    config = request.app.state.application.config
+    config = get_application(request).config
     application_health = _application_health(request)
 
     warnings = application_health.warnings
@@ -83,7 +91,9 @@ async def health(request: Request) -> dict[str, object]:
             "vector": config.storage.lightrag.vector_storage,
             "graph": config.storage.lightrag.graph_storage,
             "kv": config.storage.lightrag.kv_storage,
+            "doc_status": config.storage.lightrag.doc_status_storage,
         },
+        "components": application_health.components,
         "answer_image_capability": application_health.answer_image_capability,
     }
     if warnings:
@@ -99,7 +109,7 @@ async def health(request: Request) -> dict[str, object]:
 )
 async def readiness(request: Request) -> ReadinessResponse | JSONResponse:
     """Return whether this process can accept query traffic."""
-    config = request.app.state.application.config
+    config = get_application(request).config
     detail = await _application_health(request).readiness_detail()
     if detail is not None:
         return _not_ready(service_role=config.deployment.service_role, detail=detail)

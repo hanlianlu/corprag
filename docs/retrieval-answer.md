@@ -4,21 +4,26 @@ This document owns how queries become contexts, answers, sources, and citations.
 Payloads live in [Interfaces](interfaces.md), fields in
 [Configuration](configuration.md), runtime ownership in
 [Architecture](architecture.md), and recovery in
-[Durable Answer Runs](durable-answer-runs.md).
+[RunRuntime and durable query execution](durable-answer-runs.md).
 
 DlightRAG always uses LightRAG `mix` as its graph/vector base. It adds metadata
 filtering, optional direct image retrieval, PostgreSQL BM25, RRF fusion,
 provenance hydration, reranking, answer packing, and citation validation.
 
-- `/retrieve` is knowledge-base-only and may take `query_images`.
-- `/answer` takes a query plus optional attachments, then resolves
-  `auto | fast | research`.
+- Top-level `/retrieve` is a durable, owner-scoped Run. It is
+  knowledge-base-only and may take `query_images`.
+- `/answer` creates a durable Answer Run from a query plus optional attachments,
+  then resolves `auto | fast | research`.
+- Retrieval inside an Answer is an internal Retrieval Stage under the Answer
+  Run; it never creates another Run.
 - `auto` considers the valid mode set and conversation context. When both paths
   are legal, routing defaults to Research unless the turn is corpus-grounded.
 
-Every accepted answer pins query, bounded history, resources, authorized search
-scope, model profiles, and execution facts. The Web conversation layer wraps the
-same pipeline; it does not define another answer path.
+Every accepted Retrieval pins normalized query/options, authorized search scope,
+the required `extract` and optional `vlm` model profiles, capability facts, and
+policy revisions. Every accepted Answer additionally pins bounded history and
+Resources. The Web conversation
+layer wraps the Answer pipeline; it does not define another path.
 
 ## Ingestion Shape
 
@@ -42,9 +47,13 @@ explicit multimodal probe failure aborts startup.
 
 ## Query Pipeline
 
+For a top-level request, the Application resolves authorization and accepts a
+`run_kind=retrieval` Query-lane Run before this pipeline executes. The same raw
+pipeline begins directly inside an Answer without nested Run acceptance.
+
 ```text
-Retrieval request
-  -> resolve authorized concrete workspaces and warm them
+Retrieval Stage
+  -> use accepted authorized concrete workspaces and warm them
   -> plan lexical terms and optional metadata filters once
   -> per workspace:
        LightRAG mix
@@ -70,6 +79,13 @@ If both fail, retrieval raises the LightRAG error with BM25 chained. Trace
 `lightrag_mix_chunk_count` records the LightRAG count before fusion;
 `contexts.chunks` is the final fused/reranked set.
 
+Top-level Retrieval uses `planning` and `searching` durable phases. Corpus
+unavailability returns a deferred Runtime outcome with bounded exponential
+backoff, releasing Query execution capacity until `next_attempt_at`. The
+configured retrieval timeout bounds claimed planning/search execution and is a
+terminal `retrieval_timeout`; queue residence is not part of that timeout.
+Unexpected execution failures settle as sanitized `retrieval_failed` errors.
+
 ### BM25
 
 BM25 queries the same `LIGHTRAG_DOC_CHUNKS` rows. Ingestion labels each chunk's
@@ -81,7 +97,16 @@ Changing profile signatures, `k1`, or `b` for an existing workspace requires an
 offline BM25 rebuild. Disabling BM25 removes only this PostgreSQL lane;
 Resource lexical search remains run-scoped and in memory.
 
-## Metadata In-Filtering
+## Product Document Visibility And Metadata In-Filtering
+
+Product Document visibility is always-on: directly attributable chunk evidence
+is admitted only when its document metadata row exists and
+`_dlightrag_finalization_complete` is exactly true. Missing, NULL, false, and
+out-of-band LightRAG documents are unpublished. PostgreSQL applies `IS TRUE` in
+metadata, graph-chunk, BM25, and vector queries. Unscoped ANN/BM25 first rank a
+bounded over-fetch window and then correlate those candidates to metadata;
+non-pushdown vector stores similarly post-filter only bounded hit IDs. A short
+result is preferable to leakage.
 
 Named filters map to typed columns: `filename`, `file_extension`, `title`,
 `author`, and creation-date bounds. Arbitrary keys use `filters.custom` against
@@ -96,18 +121,25 @@ which operator will match unseen data.
   to no candidates or retrieve no chunks, DlightRAG retries unfiltered.
 - Non-empty inferred candidates constrain semantic and BM25 legs.
 
-Every chunk-producing leg is scoped:
+Every chunk-producing leg enforces visibility, with any user filter as an
+additional scope:
 
-- `FilteredVectorStorage` returns immediately for empty candidates, uses exact
-  scoring for small sets, and HNSW iterative scan for larger sets.
+- `FilteredVectorStorage` returns immediately for empty filtered candidates,
+  uses exact scoring for small filtered sets, HNSW iterative scan for larger
+  sets, and a bounded visibility-only path without a user filter.
 - Graph entity/relation legs resolve source chunks by ID, so
-  `FilteredChunkStore` scopes that lookup.
-- Both wrappers use a context variable; ingest/delete run unscoped.
+  `FilteredChunkStore` visibility-checks that bounded lookup too.
+- The wrappers use a context variable only for the optional user filter;
+  visibility itself is not optional. Ingest and delete use their mutation
+  collaborators rather than treating product reads as an internal identity API.
 
 The filter controls quotable chunk evidence. It does not rewrite LightRAG's
 corpus-level entity/relationship summaries, which may merge descriptions from
 multiple documents and have no separable per-document share. Trace
 `metadata_kg_chunks_dropped` counts graph-referenced chunks rejected by scope.
+Bounded fallback paths may also report `visibility_strategy`,
+`visibility_dropped`, and `visibility_shortfall`; these are not snapshot
+isolation claims.
 
 ## Multimodal Retrieval
 
@@ -154,10 +186,15 @@ text where available; unbounded data URIs are never sent.
 The planner runs once, selected workspaces execute concurrently, and each runs
 the complete filtering/fusion/rerank pipeline. The federation layer tags chunks
 with `_workspace`, canonicalizes references, round-robin interleaves the
-per-workspace lists, then truncates to `chunk_top_k`.
+per-workspace lists, and applies the configured output budget plus its
+per-workspace fairness floor.
 
-There is no cross-workspace global rerank. Round-robin preserves representation
-without pretending scores from different workspace/model calls are calibrated.
+By default, round-robin preserves representation without pretending scores from
+different workspace/model calls are calibrated. If `federated_rerank` is true
+and the configured reranker is available, DlightRAG reranks the merged candidate
+pool once across Workspaces. An unavailable/build-failed reranker uses the capped
+interleave; a runtime rerank failure does the same and records its error type in
+trace rather than failing Retrieval.
 
 ## Answer Orchestration
 

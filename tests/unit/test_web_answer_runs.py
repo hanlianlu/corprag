@@ -29,6 +29,11 @@ from dlightrag.application.answer_runs import (
     ChildRosterPage,
     ChildRosterPageRequest,
 )
+from dlightrag.application.runs import (
+    IdempotencyKeyConflict,
+    RunCapacityExceededError,
+    RunEvent,
+)
 from dlightrag.application.web_conversations import (
     CarriedAttachment,
     ConversationHead,
@@ -38,7 +43,6 @@ from dlightrag.application.web_conversations import (
     WebConversationService,
     WebConversationUnavailableError,
 )
-from dlightrag.engine.runtime import AnswerRunEvent, IdempotencyKeyConflict
 from tests.unit.conftest import answer_capability_view
 from tests.unit.web.answer_run_fixtures import (
     RUN_ID,
@@ -99,9 +103,14 @@ def service() -> AsyncMock:
 def application_double() -> AsyncMock:
     created = AsyncMock()
     capability_view = answer_capability_view()
+    created.runs = SimpleNamespace(
+        get=AsyncMock(return_value=answer_run()),
+        list=AsyncMock(return_value=(answer_run(),)),
+        cancel=AsyncMock(),
+        subscribe=MagicMock(),
+    )
     created.answers = SimpleNamespace(
         capabilities=capability_view.read,
-        cancel=AsyncMock(),
         steer=AsyncMock(
             return_value=SimpleNamespace(run_id=RUN_ID, control_sequence=1, kind="steer")
         ),
@@ -109,7 +118,6 @@ def application_double() -> AsyncMock:
             return_value=ChildRosterPage(children=(), next_cursor=None, fetched_rows=0)
         ),
         child_roster_cursor_codec=ChildRosterCursorCodec(b"web-children-test"),
-        subscribe=MagicMock(),
     )
     created.corpora = SimpleNamespace(
         alist_workspace_records=AsyncMock(return_value=[{"workspace": "default"}])
@@ -135,6 +143,20 @@ async def client(service: AsyncMock, application_double: AsyncMock, test_config)
 # ---------------------------------------------------------------------------
 # Submission
 # ---------------------------------------------------------------------------
+
+
+async def test_submission_capacity_rejection_is_typed_and_precedes_202(
+    client: AsyncClient, service: AsyncMock
+) -> None:
+    service.start_answer.side_effect = RunCapacityExceededError("query lane is full")
+
+    response = await client.post("/web/api/answer", json=_BODY)
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "kind": "service_unavailable",
+        "message": "Answer submission is temporarily unavailable",
+    }
 
 
 async def test_submission_returns_202_with_the_authoritative_turn(
@@ -609,13 +631,9 @@ async def test_an_empty_question_is_rejected_before_acceptance(
 # ---------------------------------------------------------------------------
 
 
-async def test_web_projects_resume_steer_and_child_roster(
+async def test_web_projects_steer_and_child_roster(
     client: AsyncClient, application_double: AsyncMock
 ) -> None:
-    resumed = await client.post(f"/web/api/answer/{RUN_ID}/resume")
-    assert resumed.status_code == 200
-    assert resumed.json()["answer_run_id"] == RUN_ID
-
     steered = await client.post(
         f"/web/api/answer/{RUN_ID}/steer", json={"content": "Focus on risks"}
     )
@@ -717,8 +735,10 @@ async def test_web_continuations_return_a_linked_descriptor(
     assert service.continue_answer.await_args.kwargs["parent_run_id"] == RUN_ID
 
 
-async def test_status_projects_the_linked_turn(client: AsyncClient) -> None:
-    response = await client.get(f"/web/api/answer/{RUN_ID}")
+async def test_status_projects_the_linked_turn_at_the_common_run_url(
+    client: AsyncClient,
+) -> None:
+    response = await client.get(f"/web/api/runs/{RUN_ID}")
 
     assert response.status_code == 200
     body = response.json()
@@ -727,13 +747,21 @@ async def test_status_projects_the_linked_turn(client: AsyncClient) -> None:
     assert body["user_text"] == "What changed?"
 
 
-@pytest.mark.parametrize("path", ["", "/events", "/artifacts/missing/presentation"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        f"/web/api/runs/{RUN_ID}",
+        f"/web/api/runs/{RUN_ID}/events",
+        f"/web/api/answer/{RUN_ID}/artifacts/missing/presentation",
+    ],
+)
 async def test_a_run_this_principal_does_not_own_is_404(
-    client: AsyncClient, service: AsyncMock, path: str
+    client: AsyncClient, service: AsyncMock, application_double: AsyncMock, path: str
 ) -> None:
     service.turn_for_run.return_value = None
+    application_double.runs.get.return_value = None
 
-    response = await client.get(f"/web/api/answer/{RUN_ID}{path}")
+    response = await client.get(path)
 
     assert response.status_code == 404
 
@@ -877,20 +905,20 @@ async def test_cancelling_an_unowned_run_never_reaches_answer_service(
     client: AsyncClient, service: AsyncMock, application_double: AsyncMock
 ) -> None:
     service.turn_for_run.return_value = None
+    application_double.runs.cancel.return_value = Mock(outcome="unknown", run=None)
 
-    response = await client.delete(f"/web/api/answer/{RUN_ID}")
+    response = await client.delete(f"/web/api/runs/{RUN_ID}")
 
     assert response.status_code == 404
-    application_double.answers.cancel.assert_not_awaited()
 
 
 async def test_cancelling_a_running_run_reports_the_pending_request(
     client: AsyncClient, application_double: AsyncMock
 ) -> None:
     running = answer_run(status="running", cancel_requested_at=datetime.datetime.now(datetime.UTC))
-    application_double.answers.cancel.return_value = Mock(outcome="pending", run=running)
+    application_double.runs.cancel.return_value = Mock(outcome="pending", run=running)
 
-    response = await client.delete(f"/web/api/answer/{RUN_ID}")
+    response = await client.delete(f"/web/api/runs/{RUN_ID}")
 
     assert response.status_code == 202
     assert response.json()["cancel_requested"] is True
@@ -900,11 +928,11 @@ async def test_cancelling_a_running_run_reports_the_pending_request(
 async def test_cancelling_a_terminal_run_is_a_200_no_op(
     client: AsyncClient, application_double: AsyncMock
 ) -> None:
-    application_double.answers.cancel.return_value = Mock(
+    application_double.runs.cancel.return_value = Mock(
         outcome="already_terminal", run=answer_run(status="succeeded", result=stored_result())
     )
 
-    response = await client.delete(f"/web/api/answer/{RUN_ID}")
+    response = await client.delete(f"/web/api/runs/{RUN_ID}")
 
     assert response.status_code == 200
     assert response.json()["status"] == "succeeded"
@@ -915,7 +943,7 @@ async def test_a_trimmed_event_log_is_410(client: AsyncClient, service: AsyncMoc
         answer_run(status="succeeded", events_trimmed_at=datetime.datetime.now(datetime.UTC))
     )
 
-    response = await client.get(f"/web/api/answer/{RUN_ID}/events")
+    response = await client.get(f"/web/api/runs/{RUN_ID}/events")
 
     assert response.status_code == 410
 
@@ -946,9 +974,9 @@ async def scoped_client(application_double: AsyncMock, test_config):
 @pytest.mark.parametrize(
     ("method", "path"),
     [
-        ("GET", "/web/api/answer/{run_id}"),
-        ("DELETE", "/web/api/answer/{run_id}"),
-        ("GET", "/web/api/answer/{run_id}/events"),
+        ("GET", "/web/api/runs/{run_id}"),
+        ("DELETE", "/web/api/runs/{run_id}"),
+        ("GET", "/web/api/runs/{run_id}/events"),
         ("GET", "/web/api/runs/{run_id}/attachments/1"),
         ("GET", "/web/api/runs/{run_id}/attachments/1/thumbnail"),
     ],
@@ -961,12 +989,14 @@ async def test_a_malformed_run_id_is_the_same_opaque_404(
     scoped_client: AsyncClient, application_double: AsyncMock, method: str, path: str, run_id: str
 ) -> None:
     """An unparseable id is unknown, not a server fault, and never reaches storage."""
+    application_double.runs.get.return_value = None
+    application_double.runs.cancel.return_value = Mock(outcome="unknown", run=None)
     response = await scoped_client.request(method, path.format(run_id=run_id))
 
     assert response.status_code == 404
     scoped_client.store.find_turn_by_run.assert_not_awaited()  # type: ignore[attr-defined]
-    application_double.answers.cancel.assert_not_awaited()
-    application_double.answers.subscribe.assert_not_called()
+    application_double.runs.cancel.assert_not_awaited()
+    application_double.runs.subscribe.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -989,12 +1019,12 @@ async def test_the_resume_cursor_comes_from_either_form(
     def _events(**_kwargs: Any):
         return _empty_events()
 
-    application_double.answers.subscribe.side_effect = _events
-    url = f"/web/api/answer/{RUN_ID}/events" + (f"?after={query}" if query is not None else "")
+    application_double.runs.subscribe.side_effect = _events
+    url = f"/web/api/runs/{RUN_ID}/events" + (f"?after={query}" if query is not None else "")
 
     await client.get(url, headers={"Last-Event-ID": header} if header is not None else None)
 
-    assert application_double.answers.subscribe.call_args.kwargs["after_sequence"] == expected
+    assert application_double.runs.subscribe.call_args.kwargs["after_sequence"] == expected
 
 
 @pytest.mark.parametrize(
@@ -1013,14 +1043,14 @@ async def test_an_unusable_cursor_never_subscribes(
     query: str | None,
     status: int,
 ) -> None:
-    url = f"/web/api/answer/{RUN_ID}/events" + (f"?after={query}" if query is not None else "")
+    url = f"/web/api/runs/{RUN_ID}/events" + (f"?after={query}" if query is not None else "")
 
     response = await client.get(
         url, headers={"Last-Event-ID": header} if header is not None else None
     )
 
     assert response.status_code == status
-    application_double.answers.subscribe.assert_not_called()
+    application_double.runs.subscribe.assert_not_called()
 
 
 async def _empty_events():
@@ -1033,8 +1063,8 @@ async def _empty_events():
 # ---------------------------------------------------------------------------
 
 
-def _event(sequence: int, event_type: str, payload: dict[str, Any]) -> AnswerRunEvent:
-    return AnswerRunEvent(
+def _event(sequence: int, event_type: str, payload: dict[str, Any]) -> RunEvent:
+    return RunEvent(
         sequence=sequence,
         event_type=event_type,  # type: ignore[arg-type]
         payload=payload,
@@ -1042,7 +1072,7 @@ def _event(sequence: int, event_type: str, payload: dict[str, Any]) -> AnswerRun
     )
 
 
-async def _frames(events: list[AnswerRunEvent]) -> list[str]:
+async def _frames(events: list[RunEvent]) -> list[str]:
     async def _iterate():
         for event in events:
             yield event
@@ -1144,15 +1174,15 @@ async def test_closing_the_event_stream_detaches_without_cancelling(
     def _events(**_kwargs: Any):
         return _iterate()
 
-    application_double.answers.subscribe.side_effect = _events
+    application_double.runs.subscribe.side_effect = _events
 
-    async with client.stream("GET", f"/web/api/answer/{RUN_ID}/events") as response:
+    async with client.stream("GET", f"/web/api/runs/{RUN_ID}/events") as response:
         assert response.status_code == 200
         async for _line in response.aiter_lines():
             break
 
     assert detached.is_set()
-    application_double.answers.cancel.assert_not_awaited()
+    application_double.runs.cancel.assert_not_awaited()
 
 
 async def test_a_failed_run_becomes_a_public_browser_error() -> None:
@@ -1161,7 +1191,7 @@ async def test_a_failed_run_becomes_a_public_browser_error() -> None:
     )
 
     payload = json.loads(frame.split("data: ", 1)[1].strip())
-    assert payload == {"message": "Service error.", "error_kind": "answer_stream_failed"}
+    assert payload == {"kind": "answer_stream_failed", "message": "Service error."}
 
 
 def test_the_done_event_is_derived_from_the_canonical_result() -> None:
@@ -1197,9 +1227,11 @@ def test_a_cancelled_run_carries_no_answer() -> None:
     done = render_done_event(
         {"status": "cancelled"}, downloadable_workspaces=None, visual_workspaces=None
     )
+    frame = browser_frame(_event(1, "done", {"status": "cancelled"}))
 
     assert done.status == "cancelled"
     assert done.presentation is None
+    assert json.loads(frame.split("data: ", 1)[1].strip()) == {"status": "cancelled"}
 
 
 # ---------------------------------------------------------------------------
@@ -1395,8 +1427,6 @@ async def test_terminal_turns_project_history_from_the_accepted_envelope() -> No
     so Web continuity must project the prior query from the durable accepted
     envelope instead of the cleared prepared input.
     """
-    import dataclasses
-
     now = datetime.datetime.now(datetime.UTC)
     store = AsyncMock()
     store.submission_seed.return_value = SubmissionSeed(
@@ -1412,18 +1442,15 @@ async def test_terminal_turns_project_history_from_the_accepted_envelope() -> No
         )
     )
     recovered_turn = linked_turn(
-        dataclasses.replace(
-            answer_run(
-                status="succeeded",
-                accepted={
-                    "query": "What changed?",
-                    "workspaces": ["default"],
-                    "mode": "auto",
-                    "attachments": [],
-                },
-                result=stored_result(),
-            ),
-            prepared_input=None,
+        answer_run(
+            status="succeeded",
+            accepted={
+                "query": "What changed?",
+                "workspaces": ["default"],
+                "mode": "auto",
+                "attachments": [],
+            },
+            result=stored_result(),
         )
     )
     store.recovery_page.return_value = RecoveryTurnBatch((recovered_turn,), False, 1)

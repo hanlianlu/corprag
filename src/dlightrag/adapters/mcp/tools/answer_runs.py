@@ -20,13 +20,26 @@ from dlightrag.adapters.mcp.server import (
     IdempotencyKeyParam,
     mcp_app,
 )
-from dlightrag.application.access import AccessAction, current_request_scope
+from dlightrag.application.access import (
+    AccessAction,
+    corpus_mutation_access_action,
+    current_request_scope,
+)
 from dlightrag.application.answer_runs import AnswerRequest as ServiceAnswerRequest
-from dlightrag.application.answer_runs import IdempotencyKeyConflict
 from dlightrag.application.answer_runs.client_contracts import conversation_history_as_dicts
 from dlightrag.application.answer_runs.resource_links import answer_link_resources
 from dlightrag.application.answer_runs.results import project_answer_result
-from dlightrag.application.retrieval import MetadataFilter, RetrievalOptions
+from dlightrag.application.retrieval import (
+    MetadataFilter,
+    RetrievalOptions,
+    RetrieveProjection,
+    retrieval_response_payload,
+)
+from dlightrag.application.runs import (
+    IdempotencyKeyConflict,
+    RunCapacityExceededError,
+    RunView,
+)
 
 
 @mcp_app.tool(
@@ -34,8 +47,8 @@ from dlightrag.application.retrieval import MetadataFilter, RetrievalOptions
     description=(
         "Start an LLM-generated answer backed by retrieved context from the default or "
         "selected workspaces. Returns immediately with a run_id and its initial status; "
-        "the answer itself is NOT returned here. Poll get_answer_run with that run_id "
-        "until status is succeeded, failed, or cancelled, and call cancel_answer_run to "
+        "the answer itself is NOT returned here. Poll get_run with that run_id "
+        "until status is succeeded, failed, or cancelled, and call cancel_run to "
         "stop a run you no longer need. A run survives this call, this connection, and a "
         "server restart."
     ),
@@ -113,42 +126,63 @@ async def answer_tool(
         raise ValueError(
             "idempotency_key was already used for a different answer request"
         ) from None
+    except RunCapacityExceededError:
+        raise ValueError("Run admission capacity is full") from None
     return mcp_server._run_descriptor(creation.run)
 
 
 @mcp_app.tool(
-    name="get_answer_run",
+    name="get_run",
     description=(
-        "Return the current state of an answer run started by the answer tool. status is "
-        "queued, running, succeeded, failed, or cancelled; cancel_requested reports whether "
-        "cancellation was asked for. A succeeded run carries result with answer, typed parts, "
-        "sources, evidence_images, Artifacts, artifact_outcome, contexts, and image_descriptions. "
-        "A failed run carries "
+        "Return the common lifecycle state of a durable run. status is queued, running, "
+        "succeeded, failed, or cancelled; cancel_requested reports whether cancellation was "
+        "asked for. A succeeded run carries its operation-owned result. A failed run carries "
         "error_kind and error_message. An unknown run id, or one owned by another caller, "
         "is reported as not found."
     ),
     annotations=ToolAnnotations(read_only_hint=True),
 )
-async def get_answer_run_tool(
-    run_id: Annotated[str, Field(description="Run id returned by the answer tool.")],
+async def get_run_tool(
+    run_id: Annotated[str, Field(description="Run id returned by a creation tool.")],
 ) -> dict[str, Any]:
     args = AnswerRunInput.model_validate(locals())
     application = await mcp_server._ensure_application()
-    record = await application.answers.get(owner_id=mcp_server._owner_id(), run_id=args.run_id)
-    if record is None:
-        raise ValueError(f"Answer run not found: {args.run_id}")
+    record = await _authorized_run(application, args.run_id, cancel=False)
     result: dict[str, Any] | None = None
     if record.result is not None:
-        result = project_answer_result(
-            record.result,
-            visual_workspaces=await mcp_server._authorized_workspace_names(
-                AccessAction.WORKSPACE_READ_VISUAL_ASSET,
-                [str(value) for value in record.request_input().get("workspaces") or ()],
-                application=application,
-            ),
-            run_id=record.run_id,
-            artifact_url_prefix=None,
-        )
+        if record.run_kind == "retrieval":
+            result = retrieval_response_payload(
+                application.retrieval.project_stored(
+                    record.result,
+                    RetrieveProjection(
+                        downloadable_workspaces=frozenset(),
+                        visual_workspaces=frozenset(
+                            await mcp_server._authorized_workspace_names(
+                                AccessAction.WORKSPACE_READ_VISUAL_ASSET,
+                                [
+                                    str(value)
+                                    for value in record.request_input().get("workspaces") or ()
+                                ],
+                                application=application,
+                            )
+                        ),
+                        include_download_links=False,
+                    ),
+                )
+            )
+        elif record.run_kind == "answer":
+            result = project_answer_result(
+                record.result,
+                visual_workspaces=await mcp_server._authorized_workspace_names(
+                    AccessAction.WORKSPACE_READ_VISUAL_ASSET,
+                    [str(value) for value in record.request_input().get("workspaces") or ()],
+                    application=application,
+                ),
+                run_id=record.run_id,
+                artifact_url_prefix=None,
+            )
+        else:
+            result = dict(record.result)
     return {
         **mcp_server._run_descriptor(record),
         "phase": record.phase,
@@ -156,30 +190,65 @@ async def get_answer_run_tool(
         "result": result,
         "error_kind": record.error_kind,
         "error_message": record.error_message,
+        "repair_reason": record.repair_reason,
+        "repair_remedy": record.repair_remedy,
         "finished_at": record.finished_at.isoformat() if record.finished_at else None,
     }
 
 
 @mcp_app.tool(
-    name="cancel_answer_run",
+    name="cancel_run",
     description=(
-        "Request cancellation of an answer run started by the answer tool and return its "
-        "state. A queued run is cancelled immediately; a running one is cancelled once its "
+        "Request cancellation of a durable run and return its state. A queued run is "
+        "cancelled immediately; a running one is cancelled once its "
         "worker observes the request, so status may still be running with cancel_requested "
         "true. Cancelling an already finished run changes nothing. An unknown run id, or "
         "one owned by another caller, is reported as not found."
     ),
     annotations=ToolAnnotations(read_only_hint=False, idempotent_hint=True),
 )
-async def cancel_answer_run_tool(
-    run_id: Annotated[str, Field(description="Run id returned by the answer tool.")],
+async def cancel_run_tool(
+    run_id: Annotated[str, Field(description="Run id returned by a creation tool.")],
 ) -> dict[str, Any]:
     args = AnswerRunInput.model_validate(locals())
     application = await mcp_server._ensure_application()
-    outcome = await application.answers.cancel(owner_id=mcp_server._owner_id(), run_id=args.run_id)
+    record = await _authorized_run(application, args.run_id, cancel=True)
+    outcome = await application.runs.cancel(owner_id=record.access_scope_id, run_id=args.run_id)
     if outcome.run is None:
-        raise ValueError(f"Answer run not found: {args.run_id}")
+        raise ValueError(f"Run not found: {args.run_id}")
+    if outcome.outcome == "rejected":
+        raise ValueError("Run cancellation is no longer safe after upstream handoff")
     return mcp_server._run_descriptor(outcome.run)
+
+
+@mcp_app.tool(
+    name="resume_corpus_run",
+    description=(
+        "Explicitly confirm operator repair and resume the same Corpus Mutation Run. "
+        "The Run must be in phase waiting_for_repair and remains the lifecycle authority."
+    ),
+    annotations=ToolAnnotations(read_only_hint=False, idempotent_hint=True),
+)
+async def resume_corpus_run_tool(
+    run_id: Annotated[str, Field(description="Waiting-for-repair Corpus Mutation Run id.")],
+) -> dict[str, Any]:
+    args = AnswerRunInput.model_validate(locals())
+    application = await mcp_server._ensure_application()
+    record = await _authorized_run(application, args.run_id, cancel=True)
+    if record.run_kind != "corpus_mutation" or record.phase != "waiting_for_repair":
+        raise ValueError("Run is not waiting for repair")
+    if not await application.runs.resume_repair(
+        owner_id=record.access_scope_id,
+        run_id=args.run_id,
+    ):
+        raise ValueError("Run could not be resumed")
+    updated = await application.runs.get(
+        owner_id=record.access_scope_id,
+        run_id=args.run_id,
+    )
+    if updated is None:
+        raise ValueError(f"Run not found: {args.run_id}")
+    return mcp_server._run_descriptor(updated)
 
 
 @mcp_app.tool(
@@ -203,6 +272,24 @@ async def steer_answer_run_tool(
     }
 
 
+async def _authorized_run(application: Any, run_id: str, *, cancel: bool) -> RunView:
+    record = await application.runs.get_global(run_id=run_id)
+    if record is None:
+        raise ValueError(f"Run not found: {run_id}")
+    if record.access_scope_kind == "owner":
+        if record.access_scope_id != mcp_server._owner_id():
+            raise ValueError(f"Run not found: {run_id}")
+        return record
+    action = AccessAction.WORKSPACE_LIST_FILES
+    if cancel:
+        action = corpus_mutation_access_action(record.request_input().get("action"))
+    try:
+        await mcp_server._enforce_access(action, record.access_scope_id, application=application)
+    except Exception:
+        raise ValueError(f"Run not found: {run_id}") from None
+    return record
+
+
 async def _mcp_continuation(
     run_id: str,
     query: str,
@@ -212,12 +299,14 @@ async def _mcp_continuation(
 ) -> dict[str, Any]:
     application = await mcp_server._ensure_application()
     owner_id = mcp_server._owner_id()
-    parent = await application.answers.get(owner_id=owner_id, run_id=run_id)
+    parent_workspaces = await application.answers.continuation_workspaces(
+        owner_id=owner_id, run_id=run_id
+    )
     authorized_workspaces: list[str] | None = None
-    if parent is not None and parent.terminal:
+    if parent_workspaces is not None:
         authorized_workspaces = await mcp_server._resolve_authorized_query_workspaces(
             application,
-            workspaces=[str(item) for item in parent.request_input().get("workspaces") or ()],
+            workspaces=list(parent_workspaces),
             all_workspaces=False,
         )
     method = application.answers.fork if fork else application.answers.follow_up
@@ -232,6 +321,8 @@ async def _mcp_continuation(
         )
     except IdempotencyKeyConflict:
         raise ValueError("idempotency_key was already used for a different continuation") from None
+    except RunCapacityExceededError:
+        raise ValueError("Run admission capacity is full") from None
     if creation is None:
         raise ValueError("Continuation requires a terminal owned run")
     return mcp_server._run_descriptor(creation.run)
@@ -309,32 +400,16 @@ async def list_answer_children_tool(
 
 
 @mcp_app.tool(
-    name="resume_answer_run",
-    description="Reattach to one durable run; use get_answer_run for full status.",
+    name="list_runs",
+    description="List this caller's durable runs, oldest first.",
     annotations=ToolAnnotations(read_only_hint=True, idempotent_hint=True),
 )
-async def resume_answer_run_tool(
-    run_id: Annotated[str, Field(description="Run id")],
-) -> dict[str, Any]:
-    record = await (await mcp_server._ensure_application()).answers.resume(
-        owner_id=mcp_server._owner_id(), run_id=run_id
-    )
-    if record is None:
-        raise ValueError(f"Answer run not found: {run_id}")
-    return mcp_server._run_descriptor(record)
-
-
-@mcp_app.tool(
-    name="list_answer_runs",
-    description="List this caller's durable answer runs, oldest first.",
-    annotations=ToolAnnotations(read_only_hint=True, idempotent_hint=True),
-)
-async def list_answer_runs_tool(
+async def list_runs_tool(
     after: Annotated[str | None, Field(default=None, description="Cursor run id")] = None,
     limit: Annotated[int, Field(default=50, description="Page size")] = 50,
 ) -> dict[str, Any]:
     application = await mcp_server._ensure_application()
-    rows = await application.answers.list(
+    rows = await application.runs.list(
         owner_id=mcp_server._owner_id(), after_run_id=after, limit=limit
     )
     return {"runs": [mcp_server._run_descriptor(record) for record in rows]}
@@ -349,7 +424,10 @@ async def list_answer_artifacts_tool(
     run_id: Annotated[str, Field(description="Run id")],
 ) -> dict[str, Any]:
     application = await mcp_server._ensure_application()
-    record = await application.answers.get(owner_id=mcp_server._owner_id(), run_id=run_id)
+    owner_id = mcp_server._owner_id()
+    if await application.answers.list_artifacts(owner_id=owner_id, run_id=run_id) is None:
+        raise ValueError(f"Answer run not found: {run_id}")
+    record = await application.runs.get(owner_id=owner_id, run_id=run_id)
     if record is None:
         raise ValueError(f"Answer run not found: {run_id}")
     if record.result is None:

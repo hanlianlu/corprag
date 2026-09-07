@@ -2,12 +2,7 @@
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {
-  getFailedFileRetryStatus,
-  getFailedFiles,
-  getFilePanel,
-  startFailedFileRetry,
-} from './files.ts';
+import {getFailedFiles, getFilePanel, startFailedFileRetry} from './files.ts';
 
 const originalDocument = globalThis.document;
 const originalFetch = globalThis.fetch;
@@ -43,15 +38,6 @@ test('file pages encode the opaque cursor, pass abort, and normalize older paylo
     return new Response(JSON.stringify({
       workspace: 'finance',
       files: [],
-      ingest: {
-        busy: false,
-        message: '',
-        progress_percent: null,
-        current_batch: null,
-        total_batches: null,
-        documents: null,
-        pending_enqueues: 0,
-      },
     }), {headers: {'Content-Type': 'application/json'}});
   };
   const controller = new AbortController();
@@ -73,7 +59,7 @@ test('file pages encode the opaque cursor, pass abort, and normalize older paylo
   ]);
 });
 
-test('failed-file recovery uses bounded pages, CSRF POST, and job polling', async () => {
+test('failed-file recovery uses bounded pages and accepts a durable Run', async () => {
   const seen: Array<{url: string; method: string; headers?: HeadersInit}> = [];
   globalThis.fetch = async (input, init) => {
     const url = String(input);
@@ -81,35 +67,27 @@ test('failed-file recovery uses bounded pages, CSRF POST, and job polling', asyn
     seen.push({url, method, headers: init?.headers});
     if (method === 'POST') {
       return new Response(JSON.stringify({
-        job_id: 'retry-1',
+        run_id: 'run-retry-1',
+        run_kind: 'corpus_mutation',
+        lane: 'corpus_mutation',
         workspace: 'finance',
         status: 'queued',
-        retried: 0,
-        succeeded: 0,
-        failed: 0,
-      }), {headers: {'Content-Type': 'application/json'}});
-    }
-    if (url.includes('/retry/')) {
-      return new Response(JSON.stringify({
-        job_id: 'retry-1',
-        workspace: 'finance',
-        status: 'succeeded',
-        retried: 2,
-        succeeded: 2,
-        failed: 0,
+        status_url: '/web/api/corpus-runs/run-retry-1',
+        events_url: '/web/api/corpus-runs/run-retry-1/events',
+        cancel_url: '/web/api/corpus-runs/run-retry-1',
+        resume_url: '/web/api/corpus-runs/run-retry-1/resume',
       }), {headers: {'Content-Type': 'application/json'}});
     }
     return new Response(JSON.stringify({
       workspace: 'finance',
       failed: [],
       next_cursor: null,
-      active_recovery: null,
     }), {headers: {'Content-Type': 'application/json'}});
   };
 
   await getFailedFiles('finance', 'opaque cursor');
-  await startFailedFileRetry('finance');
-  await getFailedFileRetryStatus('finance', 'retry/1');
+  const receipt = await startFailedFileRetry('finance');
+  assert.equal(receipt.runId, 'run-retry-1');
 
   assert.deepEqual(seen, [
     {
@@ -121,11 +99,6 @@ test('failed-file recovery uses bounded pages, CSRF POST, and job polling', asyn
       url: '/web/api/files/retry?workspace=finance',
       method: 'POST',
       headers: {'X-CSRF-Token': 'test-token'},
-    },
-    {
-      url: '/web/api/files/retry/retry%2F1?workspace=finance',
-      method: 'GET',
-      headers: undefined,
     },
   ]);
 });

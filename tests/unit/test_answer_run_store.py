@@ -7,38 +7,40 @@ from dataclasses import replace
 
 import pytest
 
-from dlightrag.adapters.postgres.answer.answer_runs import (
-    ANSWER_RUN_MIGRATION_SCOPE,
-    ANSWER_RUN_MIGRATIONS,
-    PGAnswerRunStore,
+from dlightrag.adapters.postgres.runtime.run_store import (
+    RUN_MIGRATION_SCOPE,
+    RUN_MIGRATIONS,
+    PGRunStore,
 )
 from dlightrag.engine.runtime import (
-    ANSWER_RUN_LEASE_SECONDS,
     DEFAULT_RUN_RETENTION_SECONDS,
     MAX_RECLAIMS_WITHOUT_PROGRESS,
     RUN_ABANDONED_ERROR_KIND,
     RUN_HEARTBEAT_SECONDS,
+    RUN_LEASE_SECONDS,
+    PreparedRunEnvelope,
+    RunAccessScope,
 )
 
 
 def _all_statements() -> str:
     return "\n".join(
-        statement for migration in ANSWER_RUN_MIGRATIONS for statement in migration.statements
+        statement for migration in RUN_MIGRATIONS for statement in migration.statements
     )
 
 
 class TestMigrationDeclaration:
     def test_scope_and_versions_are_unique_and_ordered(self) -> None:
-        versions = [migration.version for migration in ANSWER_RUN_MIGRATIONS]
-        assert ANSWER_RUN_MIGRATION_SCOPE == "answer_runs"
-        assert versions == sorted(versions)
+        versions = [migration.version for migration in RUN_MIGRATIONS]
+        assert RUN_MIGRATION_SCOPE == "runs"
+        assert versions[0] == "run_runtime_v1"
         assert len(set(versions)) == len(versions)
 
     def test_declares_the_final_answer_and_session_tables(self) -> None:
         created = set(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", _all_statements()))
         assert created == {
-            "dlightrag_answer_runs",
-            "dlightrag_answer_run_events",
+            "dlightrag_runs",
+            "dlightrag_run_events",
             "dlightrag_agent_sessions",
             "dlightrag_agent_session_entries",
             "dlightrag_agent_session_registers",
@@ -55,11 +57,12 @@ class TestMigrationDeclaration:
             "dlightrag_answer_child_sessions",
             "dlightrag_agent_controls",
             "dlightrag_answer_memory_settings",
+            "dlightrag_corpus_mutation_windows",
         }
 
-    def test_no_checkpoint_or_single_row_artifact_columns_remain(self) -> None:
+    def test_generic_checkpoint_exists_without_legacy_progress_columns(self) -> None:
         statements = _all_statements()
-        assert "checkpoint_json" not in statements
+        assert "checkpoint_json" in statements
         assert "completed_turns" not in statements
         assert "recovery_count" not in statements
         assert "dlightrag_answer_artifacts" not in statements
@@ -68,7 +71,7 @@ class TestMigrationDeclaration:
         statements = _all_statements()
         assert "'published_artifact'" in statements
         assert "write_model_published_artifact_kind" in {
-            migration.version for migration in ANSWER_RUN_MIGRATIONS
+            migration.version for migration in RUN_MIGRATIONS
         }
         assert "DROP CONSTRAINT dlightrag_answer_run_artifacts_kind_check" in statements
 
@@ -77,16 +80,17 @@ class TestMigrationDeclaration:
         assert "REFERENCES dlightrag_blobs (owner_id, digest)" in statements
 
     def test_create_table_statements_are_idempotent(self) -> None:
-        for migration in ANSWER_RUN_MIGRATIONS:
+        for migration in RUN_MIGRATIONS:
             for statement in migration.statements:
                 if statement.lstrip().startswith("CREATE TABLE"):
                     assert "IF NOT EXISTS" in statement, statement
                 elif statement.lstrip().startswith("CREATE INDEX"):
                     assert "IF NOT EXISTS" in statement, statement
 
-    def test_does_not_touch_ingest_job_or_web_conversation_schemas(self) -> None:
+    def test_drops_legacy_ingest_tables_without_recreating_them(self) -> None:
         statements = _all_statements()
-        assert "dlightrag_ingest_jobs" not in statements
+        assert "DROP TABLE IF EXISTS dlightrag_ingest_jobs" in statements
+        assert "CREATE TABLE IF NOT EXISTS dlightrag_ingest_jobs" not in statements
         assert "web_conversation" not in statements
 
 
@@ -99,10 +103,10 @@ class TestFixedRuntimeBounds:
         assert DEFAULT_RUN_RETENTION_SECONDS == 365 * 24 * 3600
 
     def test_workers_heartbeat_well_inside_their_lease(self) -> None:
-        assert 0 < RUN_HEARTBEAT_SECONDS <= ANSWER_RUN_LEASE_SECONDS // 2
+        assert 0 < RUN_HEARTBEAT_SECONDS <= RUN_LEASE_SECONDS // 2
 
     def test_accepted_input_envelope_keeps_continuation_context_not_model_facts(self) -> None:
-        from dlightrag.engine.runtime.records import accepted_input_envelope
+        from dlightrag.application.answer_runs.envelope import accepted_input_envelope
 
         envelope = accepted_input_envelope(
             {
@@ -138,12 +142,16 @@ class TestFixedRuntimeBounds:
         assert "resource_manifest" not in envelope
 
     def test_request_input_prefers_the_accepted_envelope(self) -> None:
-        from dlightrag.engine.runtime import AnswerRunRecord
+        from dlightrag.engine.runtime import RunAccessScope, RunRecord
 
-        record = AnswerRunRecord(
-            owner_id="owner-1",
+        record = RunRecord(
             run_id="00000000-0000-0000-0000-000000000001",
-            idempotency_key=None,
+            run_kind="answer",
+            lane="query",
+            submitted_by="owner-1",
+            access_scope=RunAccessScope(kind="owner", scope_id="owner-1"),
+            submission_key=None or "00000000-0000-0000-0000-000000000001",
+            request_fingerprint="test-fingerprint",
             prepared_input={"query": "execution copy"},
             accepted_input={"query": "envelope copy"},
             status="succeeded",
@@ -179,31 +187,72 @@ class TestFixedRuntimeBounds:
 class TestCreationValidation:
     """Input rejected before any connection is acquired needs no database."""
 
+    @staticmethod
+    def _envelope(*, owner: str = "owner", payload: object = None) -> PreparedRunEnvelope:
+        prepared = {"query": "a"} if payload is None else payload
+        return PreparedRunEnvelope(
+            run_kind="answer",
+            lane="query",
+            submitted_by=owner,
+            access_scope=RunAccessScope(kind="owner", scope_id=owner),
+            submission_key="submission-1",
+            request_fingerprint="test-fingerprint",
+            payload=prepared,  # type: ignore[arg-type]
+            accepted_input={"query": "a"},
+            retention_seconds=DEFAULT_RUN_RETENTION_SECONDS,
+        )
+
     async def test_rejects_a_blank_owner(self) -> None:
         with pytest.raises(ValueError):
-            await PGAnswerRunStore().create_run(
-                owner_id="   ",
-                prepared_input={"query": "a"},
-                idempotency_fingerprint="test-fingerprint",
+            await PGRunStore().create_run(
+                envelope=self._envelope(owner="   "),
+                run_id="00000000-0000-0000-0000-000000000001",
+            )
+
+    @pytest.mark.parametrize(
+        ("field", "value", "message"),
+        [
+            ("submission_key", "", "submission_key"),
+            ("request_fingerprint", "", "request_fingerprint"),
+            ("retention_seconds", 0, "retention_seconds"),
+        ],
+    )
+    async def test_rejects_invalid_required_envelope_fields(
+        self, field: str, value: object, message: str
+    ) -> None:
+        envelope = replace(self._envelope(), **{field: value})
+        with pytest.raises(ValueError, match=message):
+            await PGRunStore().create_run(
+                envelope=envelope,
+                run_id="00000000-0000-0000-0000-000000000001",
+            )
+
+    async def test_rejects_supersession_on_a_non_mutation_envelope(self) -> None:
+        envelope = replace(
+            self._envelope(),
+            supersedes_run_id="00000000-0000-0000-0000-000000000002",
+        )
+
+        with pytest.raises(ValueError, match="only Corpus Mutation"):
+            await PGRunStore().create_run(
+                envelope=envelope,
+                run_id="00000000-0000-0000-0000-000000000001",
             )
 
     async def test_rejects_a_prepared_input_that_is_not_json(self) -> None:
         with pytest.raises(TypeError):
-            await PGAnswerRunStore().create_run(
-                owner_id="owner",
-                prepared_input={"q": object()},
-                idempotency_fingerprint="test-fingerprint",
+            await PGRunStore().create_run(
+                envelope=self._envelope(payload={"q": object()}),
+                run_id="00000000-0000-0000-0000-000000000001",
             )
 
     async def test_rejects_a_fetched_resource_reference_at_creation(self) -> None:
         from dlightrag.engine.runtime import PendingArtifactReference
 
         with pytest.raises(ValueError):
-            await PGAnswerRunStore().create_run_in(
-                object(),
-                owner_id="owner",
-                request={"query": "a"},
-                idempotency_fingerprint="fp",
+            await PGRunStore().create_run(
+                envelope=self._envelope(),
+                run_id="00000000-0000-0000-0000-000000000001",
                 references=(
                     PendingArtifactReference(
                         resource_id="r",

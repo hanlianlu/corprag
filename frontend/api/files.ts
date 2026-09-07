@@ -1,8 +1,8 @@
 // Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
 
 import * as v from 'valibot';
+import {corpusRunReceipt, type WebCorpusRunReceipt} from './corpus-runs.ts';
 import {csrfHeaders} from './csrf.ts';
-import {parseWire} from './wire.ts';
 
 const webFileItem = v.pipe(
   v.object({file_name: v.string(), file_path: v.string()}),
@@ -10,61 +10,19 @@ const webFileItem = v.pipe(
 );
 export type WebFileItem = v.InferOutput<typeof webFileItem>;
 
-const webIngestStatus = v.pipe(
-  v.object({
-    busy: v.boolean(),
-    message: v.string(),
-    progress_percent: v.nullable(v.number()),
-    current_batch: v.nullable(v.number()),
-    total_batches: v.nullable(v.number()),
-    documents: v.nullable(v.number()),
-    pending_enqueues: v.number(),
-  }),
-  v.transform((w) => ({
-    busy: w.busy,
-    message: w.message,
-    progressPercent: w.progress_percent,
-    currentBatch: w.current_batch,
-    totalBatches: w.total_batches,
-    documents: w.documents,
-    pendingEnqueues: w.pending_enqueues,
-  })),
-);
-export type WebIngestStatus = v.InferOutput<typeof webIngestStatus>;
-
 const webFilePanelSnapshot = v.pipe(
   v.object({
     workspace: v.string(),
     files: v.array(webFileItem),
-    ingest: webIngestStatus,
     next_cursor: v.optional(v.nullable(v.string())),
   }),
   v.transform((w) => ({
     workspace: w.workspace,
     files: w.files,
-    ingest: w.ingest,
     nextCursor: w.next_cursor ?? null,
   })),
 );
 export type WebFilePanelSnapshot = v.InferOutput<typeof webFilePanelSnapshot>;
-
-const webUploadReceipt = v.pipe(
-  v.object({
-    workspace: v.string(),
-    file_count: v.number(),
-    queued: v.boolean(),
-    ingest: webIngestStatus,
-  }),
-  v.transform((w) => ({
-    workspace: w.workspace,
-    fileCount: w.file_count,
-    queued: w.queued,
-    ingest: w.ingest,
-  })),
-);
-export type WebUploadReceipt = v.InferOutput<typeof webUploadReceipt>;
-
-export type FailedRecoveryStatus = 'queued' | 'running' | 'succeeded' | 'partial' | 'failed';
 
 const webFailedFileItem = v.pipe(
   v.object({
@@ -82,38 +40,16 @@ const webFailedFileItem = v.pipe(
 );
 export type WebFailedFileItem = v.InferOutput<typeof webFailedFileItem>;
 
-const webFailedRecoveryJob = v.pipe(
-  v.object({
-    job_id: v.string(),
-    workspace: v.string(),
-    status: v.picklist(['queued', 'running', 'succeeded', 'partial', 'failed']),
-    retried: v.number(),
-    succeeded: v.number(),
-    failed: v.number(),
-  }),
-  v.transform((w) => ({
-    jobId: w.job_id,
-    workspace: w.workspace,
-    status: w.status,
-    retried: w.retried,
-    succeeded: w.succeeded,
-    failed: w.failed,
-  })),
-);
-export type WebFailedRecoveryJob = v.InferOutput<typeof webFailedRecoveryJob>;
-
 const webFailedFilesPage = v.pipe(
   v.object({
     workspace: v.string(),
     failed: v.array(webFailedFileItem),
     next_cursor: v.optional(v.nullable(v.string())),
-    active_recovery: v.nullable(webFailedRecoveryJob),
   }),
   v.transform((w) => ({
     workspace: w.workspace,
     failed: w.failed,
     nextCursor: w.next_cursor ?? null,
-    activeRecovery: w.active_recovery,
   })),
 );
 export type WebFailedFilesPage = v.InferOutput<typeof webFailedFilesPage>;
@@ -169,14 +105,6 @@ export async function getFilePanel(
   return json(response, webFilePanelSnapshot, 'Failed to load files');
 }
 
-export async function getIngestStatus(
-  workspace: string,
-  signal?: AbortSignal,
-): Promise<WebIngestStatus> {
-  const response = await fetch(url('/web/api/ingest-status', workspace), {signal});
-  return json(response, webIngestStatus, 'Failed to read ingest status');
-}
-
 export async function getFailedFiles(
   workspace: string,
   cursor: string | null = null,
@@ -191,30 +119,20 @@ export async function getFailedFiles(
 export async function startFailedFileRetry(
   workspace: string,
   signal?: AbortSignal,
-): Promise<WebFailedRecoveryJob> {
+): Promise<WebCorpusRunReceipt> {
   const response = await fetch(url('/web/api/files/retry', workspace), {
     method: 'POST',
     headers: csrfHeaders(),
     signal,
   });
-  return json(response, webFailedRecoveryJob, 'Document recovery could not be started');
-}
-
-export async function getFailedFileRetryStatus(
-  workspace: string,
-  jobId: string,
-  signal?: AbortSignal,
-): Promise<WebFailedRecoveryJob> {
-  const path = `/web/api/files/retry/${encodeURIComponent(jobId)}`;
-  const response = await fetch(url(path, workspace), {signal});
-  return json(response, webFailedRecoveryJob, 'Failed to read document recovery status');
+  return json(response, corpusRunReceipt, 'Document recovery could not be started');
 }
 
 export async function uploadFileBatch(
   workspace: string,
   files: readonly File[],
   signal?: AbortSignal,
-): Promise<WebUploadReceipt> {
+): Promise<WebCorpusRunReceipt> {
   const body = new FormData();
   body.append('workspace', workspace);
   for (const file of files) {
@@ -227,14 +145,14 @@ export async function uploadFileBatch(
     body,
     signal,
   });
-  return json(response, webUploadReceipt, 'Upload failed');
+  return json(response, corpusRunReceipt, 'Upload failed');
 }
 
 export async function deleteFileRequest(
   workspace: string,
   filePath: string,
   signal?: AbortSignal,
-): Promise<WebFilePanelSnapshot> {
+): Promise<WebCorpusRunReceipt> {
   const target = new URL('/web/api/files', window.location.origin);
   target.searchParams.set('workspace', workspace);
   target.searchParams.set('file_path', filePath);
@@ -243,5 +161,5 @@ export async function deleteFileRequest(
     headers: csrfHeaders(),
     signal,
   });
-  return json(response, webFilePanelSnapshot, 'Deletion failed');
+  return json(response, corpusRunReceipt, 'Deletion failed');
 }

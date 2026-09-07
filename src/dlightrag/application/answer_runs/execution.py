@@ -13,12 +13,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from dlightrag.application.answer_runs.mode import canonical_answer_mode
-from dlightrag.application.retrieval import RetrievalOptions
 from dlightrag.engine.agent.session.plan import AgentRunPlan
 from dlightrag.engine.ai.capacity import ModelProfile
 from dlightrag.engine.ai.fingerprints import ModelFingerprint
 from dlightrag.engine.ai.reasoning import REASONING_LEVELS, ReasoningLevels, ReasoningProfile
 from dlightrag.engine.answer.resources.models import ResourceInput
+from dlightrag.engine.rag.retrieval import RetrievalOptions
 from dlightrag.engine.runtime.errors import RunExecutionError
 
 

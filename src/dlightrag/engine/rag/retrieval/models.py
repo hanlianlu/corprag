@@ -12,6 +12,19 @@ from dlightrag.engine.rag.retrieval.metadata_fields import canonical_metadata_ke
 ContextRow = dict[str, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class RetrievalOptions:
+    """Operation-neutral retrieval controls shared by Answer and Retrieval.
+
+    Public requests remain flat. This value object only keeps Engine call seams
+    from growing parallel scalar arguments.
+    """
+
+    top_k: int | None = None
+    chunk_top_k: int | None = None
+    federated_rerank: bool = False
+
+
 class MetadataFilter(BaseModel):
     """Structured filter for document metadata queries."""
 

@@ -88,28 +88,6 @@ def config() -> MagicMock:
     return cfg
 
 
-async def test_delete_workspace_record_uses_the_operational_registry(monkeypatch, config) -> None:
-    conn = _Conn()
-    connect = AsyncMock(side_effect=AssertionError("registry operations must not connect directly"))
-    monkeypatch.setattr("dlightrag.adapters.postgres.corpus.corpus.asyncpg.connect", connect)
-
-    store = _maintenance_store(config, conn)
-    assert await store.delete_workspace_record("research") is True
-
-    config.pg_connection_kwargs.assert_called_once_with()
-    # Promotion jobs and the registry row delete in one transaction, jobs
-    # first, so a deleted workspace never keeps retrying promotion work.
-    digest = hashlib.sha256(b"research").hexdigest()[:16]
-    assert conn.executed == [
-        ("DELETE FROM dlightrag_promotion_jobs WHERE workspace = $1", ("research",)),
-        ("DELETE FROM dlightrag_workspace_meta WHERE workspace = $1", ("research",)),
-        (f"DROP TABLE IF EXISTS p_metadata_w_{digest}", ()),
-        (f"DROP TABLE IF EXISTS s_metadata_w_{digest}", ()),
-    ]
-    connect.assert_not_awaited()
-    assert conn.closed is False
-
-
 async def test_workspace_exists_uses_the_operational_registry_point_lookup(
     monkeypatch, config
 ) -> None:
@@ -133,6 +111,9 @@ async def test_clean_orphan_tables_quotes_public_table_identifiers(monkeypatch, 
         def __init__(self) -> None:
             self.executed: list[tuple[str, tuple[object, ...]]] = []
             self.closed = False
+
+        def transaction(self) -> _Tx:
+            return _Tx()
 
         async def fetch(self, query: str) -> list[dict[str, str]]:
             assert "pg_tables" in query
@@ -176,34 +157,37 @@ async def test_clean_orphan_tables_quotes_public_table_identifiers(monkeypatch, 
     cleaned = await store.clean_orphan_rows("research", dry_run=False)
 
     assert cleaned == 1
-    assert conn.executed == [
-        (
-            'DELETE FROM public."dlightrag_bad""name" WHERE workspace = $1',
-            ("research",),
-        ),
-    ]
+    assert conn.executed[0] == (
+        'DELETE FROM public."dlightrag_bad""name" WHERE workspace = $1',
+        ("research",),
+    )
+    assert conn.executed[1] == (
+        "DELETE FROM dlightrag_promotion_jobs WHERE workspace = $1",
+        ("research",),
+    )
+    assert "UPDATE dlightrag_workspace_meta" in conn.executed[2][0]
+    assert conn.executed[2][1] == ("research",)
+    assert not any("DELETE FROM dlightrag_workspace_meta" in query for query, _ in conn.executed)
     assert conn.closed is True
 
 
 async def test_clean_orphan_tables_never_drops_migration_managed_tables(
     monkeypatch, config
 ) -> None:
-    """Reset DELETEs workspace rows but never drops migration-managed tables.
-
-    Regression: doc_metadata/ingest_jobs are global tables with a workspace
-    column, owned by dlightrag_schema_migrations. Resetting the last workspace
-    empties them; dropping an emptied one orphaned the ledger and left the running
-    app raising UndefinedTableError until the next restart.
-    """
+    """Reset clears corpus rows but preserves operational identity tables."""
 
     class Conn:
         def __init__(self) -> None:
             self.executed: list[tuple[str, tuple[object, ...]]] = []
             self.closed = False
 
+        def transaction(self) -> _Tx:
+            return _Tx()
+
         async def fetch(self, query: str) -> list[dict[str, str]]:
             assert "pg_tables" in query
-            return [{"tablename": "dlightrag_ingest_jobs"}]
+            assert "dlightrag_ingest_jobs" not in query
+            return [{"tablename": "dlightrag_doc_metadata"}]
 
         async def fetchrow(self, query: str, *args: object) -> dict[str, object] | None:
             if "information_schema.columns" in query:
@@ -215,7 +199,7 @@ async def test_clean_orphan_tables_never_drops_migration_managed_tables(
 
         async def fetchval(self, query: str, *args: object) -> str:
             assert query == "SELECT quote_ident($1)"
-            return "dlightrag_ingest_jobs"
+            return "dlightrag_doc_metadata"
 
         async def execute(self, query: str, *args: object) -> str:
             self.executed.append((query, args))
@@ -235,10 +219,12 @@ async def test_clean_orphan_tables_never_drops_migration_managed_tables(
     cleaned = await store.clean_orphan_rows("default", dry_run=False)
 
     assert cleaned == 1
-    assert conn.executed == [
-        ("DELETE FROM public.dlightrag_ingest_jobs WHERE workspace = $1", ("default",)),
-    ]
+    assert conn.executed[0] == (
+        "DELETE FROM public.dlightrag_doc_metadata WHERE workspace = $1",
+        ("default",),
+    )
     assert not any("DROP TABLE" in query for query, _ in conn.executed)
+    assert not any("DELETE FROM dlightrag_workspace_meta" in query for query, _ in conn.executed)
     assert conn.closed is True
 
 

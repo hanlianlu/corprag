@@ -47,7 +47,6 @@ def _backend() -> WorkspaceCorpusBackend:
         coordination=_Coordination(),
         maintenance=AsyncMock(),
         runtime=AsyncMock(),
-        ingest_jobs=AsyncMock(),
     )
 
 
@@ -167,18 +166,18 @@ def test_ai_runtime_and_rag_concurrency_owners_vary_independently(test_config) -
     from dlightrag.application.settings import rag_settings
 
     mutate_config(test_config, "models.max_concurrency", 3)
-    mutate_config(test_config, "answer.runtime.answer_worker_concurrency", 5)
+    mutate_config(test_config, "runtime.query.worker_concurrency", 5)
     mutate_config(test_config, "corpus.ingestion.pipeline.max_concurrency", 13)
 
     scheduler = ModelScheduler(max_concurrency=test_config.models.max_concurrency)
     coordinator = RunCoordinator(
         store=AsyncMock(),
-        executor=AsyncMock(),
-        answer_worker_concurrency=test_config.answer.runtime.answer_worker_concurrency,
+        executors={"answer": AsyncMock()},
+        query_worker_concurrency=test_config.runtime.query.worker_concurrency,
     )
 
     assert scheduler.max_concurrency == 3
-    assert coordinator.answer_worker_concurrency == 5
+    assert coordinator.query_worker_concurrency == 5
     assert rag_settings(test_config).rag_pipeline_max_async == 13
 
 

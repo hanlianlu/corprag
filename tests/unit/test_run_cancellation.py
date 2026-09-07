@@ -84,7 +84,7 @@ async def test_payload_alone_never_cancels_without_authoritative_rescan() -> Non
         # The wake digest arrived, but no authoritative row said cancel-pending.
         await asyncio.sleep(0.05)
         assert cancelled == []
-        assert "LISTEN dlightrag_answer_run_cancel" in connection.executed
+        assert "LISTEN dlightrag_run_cancel" in connection.executed
 
         # Once the authoritative rescan reports the run, the signal fires.
         pending.append(("o", "r1"))
@@ -172,6 +172,64 @@ async def test_initial_connection_failure_keeps_readiness_false_and_retries() ->
         assert not listener.ready.is_set()
         await asyncio.wait_for(listener.ready.wait(), timeout=5.0)
         assert listener.ready.is_set()
+    finally:
+        await listener.aclose()
+
+
+async def test_initial_rescan_failure_keeps_readiness_false_until_recovery() -> None:
+    attempts = 0
+    first_failed = asyncio.Event()
+    first = _FakeConnection()
+    second = _FakeConnection()
+
+    async def _rescan() -> AsyncIterator[tuple[str, str]]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            first_failed.set()
+            raise RuntimeError("scan unavailable")
+        for item in ():
+            yield item
+
+    async def _on_cancel(owner: str, run: str) -> None:
+        return None
+
+    listener = _listener(connections=[first, second], rescan=_rescan, on_cancel=_on_cancel)
+    await listener.start()
+    try:
+        await asyncio.wait_for(first_failed.wait(), timeout=1.0)
+        assert not listener.ready.is_set()
+        await asyncio.wait_for(listener.ready.wait(), timeout=5.0)
+        assert attempts == 2
+        assert first.closed
+    finally:
+        await listener.aclose()
+
+
+async def test_initial_cancel_handler_failure_keeps_readiness_false_until_recovery() -> None:
+    attempts = 0
+    first_failed = asyncio.Event()
+    first = _FakeConnection()
+    second = _FakeConnection()
+
+    async def _rescan() -> AsyncIterator[tuple[str, str]]:
+        yield ("o", "r1")
+
+    async def _on_cancel(owner: str, run: str) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            first_failed.set()
+            raise RuntimeError("local signal unavailable")
+
+    listener = _listener(connections=[first, second], rescan=_rescan, on_cancel=_on_cancel)
+    await listener.start()
+    try:
+        await asyncio.wait_for(first_failed.wait(), timeout=1.0)
+        assert not listener.ready.is_set()
+        await asyncio.wait_for(listener.ready.wait(), timeout=5.0)
+        assert attempts == 2
+        assert first.closed
     finally:
         await listener.aclose()
 

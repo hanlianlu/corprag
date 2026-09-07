@@ -1,5 +1,5 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
-"""Canonical eight-section configuration contracts."""
+"""Canonical nine-section configuration contracts."""
 
 import os
 from pathlib import Path
@@ -31,13 +31,14 @@ def _clean_sources(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(DlightragConfig.model_config, "env_file", None)
 
 
-def test_root_has_exactly_eight_sections() -> None:
+def test_root_has_exactly_nine_sections() -> None:
     assert tuple(DlightragConfig.model_fields) == (
         "deployment",
         "storage",
         "models",
         "corpus",
         "answer",
+        "runtime",
         "access",
         "interfaces",
         "observability",
@@ -61,7 +62,7 @@ def test_defaults_preserve_runtime_contract(tmp_path: Path) -> None:
     assert config.corpus.retrieval.federation_min_chunks_per_workspace == 7
     assert config.corpus.promotion.doc_threshold is None
     assert config.corpus.promotion.chunk_threshold is None
-    assert config.answer.runtime.answer_run_retention_days == 365
+    assert config.runtime.run_retention_days == 365
     assert config.input_dir_path == tmp_path / "inputs"
 
 

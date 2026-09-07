@@ -14,11 +14,14 @@ from dlightrag.engine.runtime.progress import (
 )
 from dlightrag.engine.runtime.records import (
     AlreadyCommittedTerminal,
-    CoordinatorOwnedSuccess,
+    Deferred,
+    Failed,
     ReclaimDecision,
     ReclaimState,
     RunExecutionContext,
     RunExecutionOutcome,
+    Succeeded,
+    WaitingForRepair,
     advance_reclaim,
 )
 from dlightrag.engine.runtime.settlements import (
@@ -138,7 +141,10 @@ class TestBoundStores:
             StageConflict,
         }
         assert set(get_args(RunExecutionOutcome.__value__)) == {
-            CoordinatorOwnedSuccess,
+            Succeeded,
+            Failed,
+            Deferred,
+            WaitingForRepair,
             AlreadyCommittedTerminal,
         }
 

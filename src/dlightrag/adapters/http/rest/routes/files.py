@@ -9,8 +9,6 @@ from starlette.responses import FileResponse, RedirectResponse
 
 from dlightrag.adapters.http.rest.auth import get_current_user
 from dlightrag.adapters.http.rest.models import (
-    DeleteFilesResponse,
-    DeleteRequest,
     FailedFilesResponse,
     FileListResponse,
 )
@@ -23,9 +21,8 @@ from dlightrag.application.corpus_admin import (
     FilePanelPageRequest,
     safe_log_text,
 )
-from dlightrag.application.errors import WorkspaceWriteFencedError
 
-from .deps import enforce_access, get_application, raise_fenced_http, resolve_workspace
+from .deps import enforce_access, get_application, resolve_workspace
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -64,26 +61,6 @@ async def list_files(
     }
 
 
-@router.delete("/files", response_model=DeleteFilesResponse)
-async def delete_files(
-    body: DeleteRequest, request: Request, user: UserContext = Depends(get_current_user)
-) -> dict[str, Any]:
-    """Delete documents from knowledge base."""
-    application = get_application(request)
-    ws = resolve_workspace(body.workspace, request)
-    await enforce_access(request, user, AccessAction.WORKSPACE_DELETE_FILES, workspace=ws)
-    try:
-        results = await application.corpora.delete_files(
-            ws,
-            file_paths=body.file_paths,
-            filenames=body.filenames,
-            dry_run=body.dry_run,
-        )
-    except WorkspaceWriteFencedError as exc:
-        raise raise_fenced_http(exc) from exc
-    return {"results": results, "workspace": ws}
-
-
 @router.get("/files/failed", response_model=FailedFilesResponse)
 async def list_failed_files(
     request: Request,
@@ -115,22 +92,6 @@ async def list_failed_files(
         "next_cursor": _encode_file_cursor(application, snapshot["next_cursor"]),
         "fetched_rows": snapshot["fetched_rows"],
     }
-
-
-@router.post("/files/retry")
-async def retry_failed_files(
-    request: Request,
-    workspace: str | None = Query(default=None),
-    user: UserContext = Depends(get_current_user),
-) -> dict[str, Any]:
-    """Re-ingest FAILED documents from stored source/download metadata."""
-    application = get_application(request)
-    ws = resolve_workspace(workspace, request)
-    await enforce_access(request, user, AccessAction.WORKSPACE_INGEST, workspace=ws)
-    try:
-        return await application.corpora.retry_failed_docs(ws)
-    except WorkspaceWriteFencedError as exc:
-        raise raise_fenced_http(exc) from exc
 
 
 @router.get("/files/raw/{document_id:path}", response_model=None)

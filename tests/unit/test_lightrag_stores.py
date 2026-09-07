@@ -377,6 +377,27 @@ async def test_read_scoped_chunks_skips_empty_request() -> None:
     assert await stores.read_scoped(scope, []) == []
 
 
+async def test_read_scoped_chunks_skips_storage_for_empty_scope() -> None:
+    from dlightrag.engine.rag.retrieval import MetadataFilter, MetadataScope
+
+    class FakeTextChunksDB:
+        async def _run_with_retry(self, operation, timing_label=None):  # noqa: ANN001, ANN202
+            raise AssertionError("empty scope must not reach storage")
+
+    fake = FakeLightRAG()
+    fake.text_chunks = SimpleNamespace(db=FakeTextChunksDB(), workspace="ws")
+    stores = PGCorpusChunkStore(fake)
+    scope = MetadataScope(
+        filters=MetadataFilter(filename="missing.pdf"),
+        filename_mode="exact",
+        doc_exists=False,
+        candidate_count=0,
+        candidate_count_exact=True,
+    )
+
+    assert await stores.read_scoped(scope, ["c1", "c2", "c1"]) == [None, None, None]
+
+
 async def test_context_chunks_by_ids_formats_text_chunks() -> None:
     fake = FakeLightRAG()
     fake.text_chunks = AsyncMock()

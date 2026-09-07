@@ -9,7 +9,8 @@ from uuid import UUID
 
 from dlightrag.application.answer_runs.routing import RoutingAcceptance
 from dlightrag.application.opaque_cursor import OpaqueCursorEnvelope
-from dlightrag.engine.runtime import AnswerRunRecord, PendingArtifact, PendingArtifactReference
+from dlightrag.application.runs import RunView
+from dlightrag.engine.runtime import PendingArtifact, PendingArtifactReference, PreparedRunEnvelope
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,7 +21,7 @@ class LinkedTurn:
     turn_number: int
     submission_id: str
     created_at: datetime.datetime
-    run: AnswerRunRecord
+    run: RunView
     conversation_id: str = ""
 
     @property
@@ -390,8 +391,8 @@ class WebConversationStore(Protocol):
         principal_id: str,
         conversation_id: str,
         submission_id: str,
-        request: Mapping[str, Any],
-        idempotency_fingerprint: str,
+        envelope: PreparedRunEnvelope,
+        run_id: str,
         artifacts: Sequence[PendingArtifact],
         references: Sequence[PendingArtifactReference],
         title_hint: str | None,

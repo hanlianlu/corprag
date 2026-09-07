@@ -14,15 +14,15 @@ from httpx import ASGITransport, AsyncClient
 
 from dlightrag.adapters.http.rest.auth import get_current_user
 from dlightrag.adapters.http.server import create_app
-from dlightrag.application.access import UserContext
+from dlightrag.application.access import UserContext, owner_id_from_user
 from dlightrag.application.answer_runs import ChildRosterCursorCodec, ChildRosterPage
 from dlightrag.application.config import DlightragConfig
+from dlightrag.application.runs import IdempotencyKeyConflict, RunCancellation, RunView
 from dlightrag.engine.runtime import (
-    AnswerRunEvent,
-    AnswerRunRecord,
-    CancellationOutcome,
-    IdempotencyKeyConflict,
+    RunAccessScope,
     RunCreation,
+    RunEvent,
+    RunRecord,
 )
 
 _ANON = UserContext(user_id="anonymous", auth_mode="none")
@@ -30,11 +30,15 @@ _RUN_ID = "0199a0a0-0000-7000-8000-000000000001"
 _NOW = datetime.datetime(2026, 8, 13, tzinfo=datetime.UTC)
 
 
-def _record(**overrides: Any) -> AnswerRunRecord:
+def _record(**overrides: Any) -> RunRecord:
     fields: dict[str, Any] = {
-        "owner_id": "owner",
         "run_id": _RUN_ID,
-        "idempotency_key": None,
+        "run_kind": "answer",
+        "lane": "query",
+        "submitted_by": owner_id_from_user(_ANON),
+        "access_scope": RunAccessScope(kind="owner", scope_id=owner_id_from_user(_ANON)),
+        "submission_key": _RUN_ID,
+        "request_fingerprint": "test-fingerprint",
         "prepared_input": {"query": "hi", "workspaces": ["default"]},
         "status": "queued",
         "phase": None,
@@ -55,13 +59,17 @@ def _record(**overrides: Any) -> AnswerRunRecord:
         "updated_at": _NOW,
         "started_at": None,
         "finished_at": None,
+        "purge_after": None,
+        "next_attempt_at": None,
+        "active_permit": False,
+        "checkpoint": None,
     }
     fields.update(overrides)
-    return AnswerRunRecord(**fields)
+    return RunRecord(**fields)
 
 
-def _event(sequence: int, event_type: str, payload: dict[str, Any]) -> AnswerRunEvent:
-    return AnswerRunEvent(
+def _event(sequence: int, event_type: str, payload: dict[str, Any]) -> RunEvent:
+    return RunEvent(
         sequence=sequence,
         event_type=event_type,  # pyright: ignore[reportArgumentType]
         payload=payload,
@@ -77,28 +85,41 @@ class _RunApplication:
         self.corpora = SimpleNamespace(
             alist_workspace_records=AsyncMock(return_value=[{"workspace": "default"}])
         )
+        self.runs = self
         self.answers = self
         self.child_roster_cursor_codec = ChildRosterCursorCodec(b"run-api-test")
         self.created: list[dict[str, Any]] = []
         self.cancelled: list[str] = []
         self.subscriptions: list[dict[str, Any]] = []
-        self.record: AnswerRunRecord | None = _record()
-        self.events: list[AnswerRunEvent] = []
+        self.record: RunRecord | None = _record()
+        self.events: list[RunEvent] = []
         self.conflict = False
         self.replayed = False
-        self.replay_record: AnswerRunRecord | None = None
-        self.cancellation = CancellationOutcome(outcome="pending", run=_record(status="running"))
+        self.replay_record: RunRecord | None = None
+        self.cancellation = RunCancellation(
+            outcome="pending", run=RunView.from_runtime(_record(status="running"))
+        )
         self.closed_subscribers = 0
         self.artifact_bytes: bytes | None = None
         self.controls: list[str] = []
         self.continuations: list[dict[str, Any]] = []
 
+    async def list_artifacts(self, *, owner_id: str, run_id: str) -> tuple[Any, ...] | None:
+        del owner_id, run_id
+        if self.record is None or self.record.run_kind != "answer":
+            return None
+        return ()
+
     async def artifact_size(self, *, owner_id: str, run_id: str, resource_id: str) -> int | None:
         del owner_id, run_id, resource_id
+        if self.record is None or self.record.run_kind != "answer":
+            return None
         return None if self.artifact_bytes is None else len(self.artifact_bytes)
 
     async def read_artifact(self, *, owner_id: str, run_id: str, resource_id: str) -> bytes | None:
         del owner_id, run_id, resource_id
+        if self.record is None or self.record.run_kind != "answer":
+            return None
         return self.artifact_bytes
 
     async def open_artifact(
@@ -111,6 +132,8 @@ class _RunApplication:
         length: int | None = None,
     ) -> AsyncIterator[bytes] | None:
         del owner_id, run_id, resource_id
+        if self.record is None or self.record.run_kind != "answer":
+            return None
         if self.artifact_bytes is None:
             return None
         blob = self.artifact_bytes[max(0, offset) :]
@@ -145,27 +168,47 @@ class _RunApplication:
         record = self.record or _record()
         return RunCreation(run=record, replayed=self.replayed)
 
-    async def get(self, *, owner_id: str, run_id: str) -> AnswerRunRecord | None:
+    async def get(self, *, owner_id: str, run_id: str) -> RunRecord | None:
         del owner_id, run_id
         return self.record
 
+    async def get_global(self, *, run_id: str) -> RunView | None:
+        del run_id
+        return RunView.from_runtime(self.record) if self.record is not None else None
+
     async def steer(self, *, owner_id: str, run_id: str, instruction: str) -> Any:
         del owner_id
+        if self.record is None or self.record.run_kind != "answer":
+            return None
         self.controls.append(instruction)
         return SimpleNamespace(run_id=run_id, control_sequence=len(self.controls), kind="steer")
 
-    async def follow_up(self, **kwargs: Any) -> RunCreation:
+    async def continuation_workspaces(
+        self, *, owner_id: str, run_id: str
+    ) -> tuple[str, ...] | None:
+        del owner_id, run_id
+        if self.record is None or self.record.run_kind != "answer" or not self.record.terminal:
+            return None
+        return tuple(str(item) for item in self.record.request_input().get("workspaces") or ())
+
+    async def follow_up(self, **kwargs: Any) -> RunCreation | None:
+        if self.record is None or self.record.run_kind != "answer":
+            return None
         self.controls.append(f"follow:{kwargs['query']}")
         self.continuations.append(dict(kwargs))
         return RunCreation(run=self.record or _record(), replayed=False)
 
-    async def fork(self, **kwargs: Any) -> RunCreation:
+    async def fork(self, **kwargs: Any) -> RunCreation | None:
+        if self.record is None or self.record.run_kind != "answer":
+            return None
         self.controls.append(f"fork:{kwargs['query']}")
         self.continuations.append(dict(kwargs))
         return RunCreation(run=self.record or _record(), replayed=False)
 
     async def transcript_tail(self, *, owner_id: str, run_id: str, limit: int) -> Any:
         del owner_id, limit
+        if self.record is None or self.record.run_kind != "answer":
+            return None
         return SimpleNamespace(
             run_id=run_id,
             status=(self.record or _record()).status,
@@ -180,31 +223,33 @@ class _RunApplication:
         page: Any = None,
     ) -> Any:
         del owner_id, run_id, page
+        if self.record is None or self.record.run_kind != "answer":
+            return None
         return ChildRosterPage(
             children=(({"child_session_id": "child-1", "status": "running"},)),
             next_cursor=None,
             fetched_rows=1,
         )
 
-    async def resume(self, *, owner_id: str, run_id: str) -> AnswerRunRecord | None:
+    async def resume(self, *, owner_id: str, run_id: str) -> RunRecord | None:
         del owner_id, run_id
         return self.record
 
-    async def cancel(self, *, owner_id: str, run_id: str) -> CancellationOutcome:
+    async def cancel(self, *, owner_id: str, run_id: str) -> RunCancellation:
         del owner_id
         self.cancelled.append(run_id)
         return self.cancellation
 
     def subscribe(
         self, *, owner_id: str, run_id: str, after_sequence: int = 0
-    ) -> AsyncIterator[AnswerRunEvent]:
+    ) -> AsyncIterator[RunEvent]:
         self.subscriptions.append(
             {"owner_id": owner_id, "run_id": run_id, "after_sequence": after_sequence}
         )
         events = [event for event in self.events if event.sequence > after_sequence]
         owner = self
 
-        async def _iterate() -> AsyncIterator[AnswerRunEvent]:
+        async def _iterate() -> AsyncIterator[RunEvent]:
             try:
                 for event in events:
                     yield event
@@ -273,10 +318,12 @@ class TestCreate:
         body = response.json()
         assert body == {
             "run_id": _RUN_ID,
+            "run_kind": "answer",
+            "lane": "query",
             "status": "queued",
-            "status_url": f"/answer/{_RUN_ID}",
-            "events_url": f"/answer/{_RUN_ID}/events",
-            "cancel_url": f"/answer/{_RUN_ID}",
+            "status_url": f"/runs/{_RUN_ID}",
+            "events_url": f"/runs/{_RUN_ID}/events",
+            "cancel_url": f"/runs/{_RUN_ID}",
             "parent_run_id": None,
             "continuation_kind": None,
         }
@@ -327,7 +374,7 @@ class TestCreate:
     async def test_idempotent_replay_returns_the_current_status(
         self, client: AsyncClient, run_application: _RunApplication
     ) -> None:
-        run_application.replay_record = _record(status="running", idempotency_key="key-1")
+        run_application.replay_record = _record(status="running", submission_key="key-1")
 
         response = await client.post(
             "/answer", json={"query": "hello"}, headers={"Idempotency-Key": "key-1"}
@@ -389,7 +436,7 @@ class TestStatus:
     ) -> None:
         run_application.record = None
 
-        response = await client.get(f"/answer/{_RUN_ID}")
+        response = await client.get(f"/runs/{_RUN_ID}")
 
         assert response.status_code == 404
 
@@ -412,7 +459,7 @@ class TestStatus:
             cancel_requested_at=_NOW,
         )
 
-        body = (await client.get(f"/answer/{_RUN_ID}")).json()
+        body = (await client.get(f"/runs/{_RUN_ID}")).json()
 
         assert body["status"] == "running"
         assert body["phase"] == "researching"
@@ -425,7 +472,7 @@ class TestStatus:
     ) -> None:
         run_application.record = _record(status="succeeded", result=_stored_result())
 
-        body = (await client.get(f"/answer/{_RUN_ID}")).json()
+        body = (await client.get(f"/runs/{_RUN_ID}")).json()
 
         result = body["result"]
         assert result["answer"] == "Answer [1-1]."
@@ -444,7 +491,7 @@ class TestStatus:
             finished_at=_NOW,
         )
 
-        body = (await client.get(f"/answer/{_RUN_ID}")).json()
+        body = (await client.get(f"/runs/{_RUN_ID}")).json()
 
         assert body["error_kind"] == "answer_stream_failed"
         assert body["error_message"] == "Answer run failed."
@@ -510,7 +557,7 @@ class TestResultProjection:
     ) -> None:
         run_application.record = _record(status="succeeded", result=_stored_result())
 
-        result = (await client.get(f"/answer/{_RUN_ID}")).json()["result"]
+        result = (await client.get(f"/runs/{_RUN_ID}")).json()["result"]
 
         image = result["evidence_images"][0]
         assert image["answer_image_sent"] is False
@@ -526,7 +573,7 @@ class TestResultProjection:
         run_application.record = _record(status="succeeded", result=_stored_result())
         _app.state.access_control = _QueryOnlyAccess()
 
-        result = (await client.get(f"/answer/{_RUN_ID}")).json()["result"]
+        result = (await client.get(f"/runs/{_RUN_ID}")).json()["result"]
 
         assert result["evidence_images"] == []
         assert result["sources"][0]["chunks"][0]["image_url"] is None
@@ -562,7 +609,7 @@ class TestEvents:
             _event(3, "done", {"status": "succeeded", "result": _stored_result()}),
         ]
 
-        response = await client.get(f"/answer/{_RUN_ID}/events")
+        response = await client.get(f"/runs/{_RUN_ID}/events")
 
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/event-stream")
@@ -579,7 +626,7 @@ class TestEvents:
             _event(1, "done", {"status": "succeeded", "result": _stored_result()})
         ]
 
-        response = await client.get(f"/answer/{_RUN_ID}/events")
+        response = await client.get(f"/runs/{_RUN_ID}/events")
 
         payload = json.loads(_sse_frames(response.text)[0]["data"])
         source = payload["result"]["sources"][0]
@@ -594,7 +641,7 @@ class TestEvents:
             _event(2, "token", {"text": "b"}),
         ]
 
-        response = await client.get(f"/answer/{_RUN_ID}/events", headers={"Last-Event-ID": "1"})
+        response = await client.get(f"/runs/{_RUN_ID}/events", headers={"Last-Event-ID": "1"})
 
         assert [frame["id"] for frame in _sse_frames(response.text)] == ["2"]
         assert run_application.subscriptions[0]["after_sequence"] == 1
@@ -608,7 +655,7 @@ class TestEvents:
             _event(2, "token", {"text": "b"}),
         ]
 
-        await client.get(f"/answer/{_RUN_ID}/events?after=1")
+        await client.get(f"/runs/{_RUN_ID}/events?after=1")
 
         assert run_application.subscriptions[0]["after_sequence"] == 1
 
@@ -616,7 +663,7 @@ class TestEvents:
         self, client: AsyncClient, run_application: _RunApplication
     ) -> None:
         response = await client.get(
-            f"/answer/{_RUN_ID}/events?after=2", headers={"Last-Event-ID": "1"}
+            f"/runs/{_RUN_ID}/events?after=2", headers={"Last-Event-ID": "1"}
         )
 
         assert response.status_code == 400
@@ -628,7 +675,7 @@ class TestEvents:
         run_application.record = _record(status="succeeded", result=_stored_result())
 
         response = await client.get(
-            f"/answer/{_RUN_ID}/events?after=2", headers={"Last-Event-ID": "2"}
+            f"/runs/{_RUN_ID}/events?after=2", headers={"Last-Event-ID": "2"}
         )
 
         assert response.status_code == 200
@@ -638,7 +685,7 @@ class TestEvents:
     async def test_malformed_cursor_is_400(
         self, client: AsyncClient, run_application: _RunApplication, cursor: str
     ) -> None:
-        response = await client.get(f"/answer/{_RUN_ID}/events?after={cursor}")
+        response = await client.get(f"/runs/{_RUN_ID}/events?after={cursor}")
 
         assert response.status_code == 400
 
@@ -648,7 +695,7 @@ class TestEvents:
         run_application.record = _record(status="succeeded", result=_stored_result())
         run_application.events = [_event(1, "token", {"text": "a"})]
 
-        response = await client.get(f"/answer/{_RUN_ID}/events", headers={"Last-Event-ID": ""})
+        response = await client.get(f"/runs/{_RUN_ID}/events", headers={"Last-Event-ID": ""})
 
         assert response.status_code == 200
         assert run_application.subscriptions[0]["after_sequence"] == 0
@@ -657,7 +704,7 @@ class TestEvents:
     async def test_malformed_last_event_id_is_400(
         self, client: AsyncClient, run_application: _RunApplication, cursor: str
     ) -> None:
-        response = await client.get(f"/answer/{_RUN_ID}/events", headers={"Last-Event-ID": cursor})
+        response = await client.get(f"/runs/{_RUN_ID}/events", headers={"Last-Event-ID": cursor})
 
         assert response.status_code == 400
         assert not run_application.subscriptions
@@ -667,7 +714,7 @@ class TestEvents:
     ) -> None:
         run_application.record = None
 
-        response = await client.get(f"/answer/{_RUN_ID}/events")
+        response = await client.get(f"/runs/{_RUN_ID}/events")
 
         assert response.status_code == 404
 
@@ -678,7 +725,7 @@ class TestEvents:
             status="succeeded", result=_stored_result(), finished_at=_NOW, events_trimmed_at=_NOW
         )
 
-        response = await client.get(f"/answer/{_RUN_ID}/events")
+        response = await client.get(f"/runs/{_RUN_ID}/events")
 
         assert response.status_code == 410
 
@@ -690,7 +737,7 @@ class TestEvents:
             _event(1, "done", {"status": "succeeded", "result": _stored_result()})
         ]
 
-        await client.get(f"/answer/{_RUN_ID}/events")
+        await client.get(f"/runs/{_RUN_ID}/events")
 
         assert run_application.cancelled == []
         assert run_application.closed_subscribers == 1
@@ -706,10 +753,12 @@ class TestCancel:
         self, client: AsyncClient, run_application: _RunApplication
     ) -> None:
         cancelled = _record(status="cancelled", finished_at=_NOW)
-        run_application.cancellation = CancellationOutcome(outcome="cancelled", run=cancelled)
+        run_application.cancellation = RunCancellation(
+            outcome="cancelled", run=RunView.from_runtime(cancelled)
+        )
         run_application.record = cancelled
 
-        response = await client.delete(f"/answer/{_RUN_ID}")
+        response = await client.delete(f"/runs/{_RUN_ID}")
 
         assert response.status_code == 200
         assert response.json()["status"] == "cancelled"
@@ -718,9 +767,11 @@ class TestCancel:
         self, client: AsyncClient, run_application: _RunApplication
     ) -> None:
         running = _record(status="running", cancel_requested_at=_NOW)
-        run_application.cancellation = CancellationOutcome(outcome="pending", run=running)
+        run_application.cancellation = RunCancellation(
+            outcome="pending", run=RunView.from_runtime(running)
+        )
 
-        response = await client.delete(f"/answer/{_RUN_ID}")
+        response = await client.delete(f"/runs/{_RUN_ID}")
 
         assert response.status_code == 202
         assert response.json()["cancel_requested"] is True
@@ -729,9 +780,11 @@ class TestCancel:
         self, client: AsyncClient, run_application: _RunApplication
     ) -> None:
         finished = _record(status="succeeded", result=_stored_result(), finished_at=_NOW)
-        run_application.cancellation = CancellationOutcome(outcome="already_terminal", run=finished)
+        run_application.cancellation = RunCancellation(
+            outcome="already_terminal", run=RunView.from_runtime(finished)
+        )
 
-        response = await client.delete(f"/answer/{_RUN_ID}")
+        response = await client.delete(f"/runs/{_RUN_ID}")
 
         assert response.status_code == 200
         assert response.json()["status"] == "succeeded"
@@ -739,16 +792,16 @@ class TestCancel:
     async def test_unknown_run_cancellation_is_404(
         self, client: AsyncClient, run_application: _RunApplication
     ) -> None:
-        run_application.cancellation = CancellationOutcome(outcome="unknown", run=None)
+        run_application.cancellation = RunCancellation(outcome="unknown", run=None)
 
-        response = await client.delete(f"/answer/{_RUN_ID}")
+        response = await client.delete(f"/runs/{_RUN_ID}")
 
         assert response.status_code == 404
 
     async def test_both_cancellation_responses_are_documented(self, client: AsyncClient) -> None:
-        responses = (await client.get("/openapi.json")).json()["paths"]["/answer/{run_id}"][
-            "delete"
-        ]["responses"]
+        responses = (await client.get("/openapi.json")).json()["paths"]["/runs/{run_id}"]["delete"][
+            "responses"
+        ]
 
         assert set(responses) >= {"200", "202"}
         assert (
@@ -767,14 +820,14 @@ async def test_schema_validation_error_is_a_safe_503(
 ) -> None:
     from dlightrag.engine.runtime import RunSchemaError
 
-    run_application.get = AsyncMock(  # pyright: ignore[reportAttributeAccessIssue]
-        side_effect=RunSchemaError("column dlightrag_answer_runs.secret is missing")
+    run_application.get_global = AsyncMock(  # pyright: ignore[reportAttributeAccessIssue]
+        side_effect=RunSchemaError("column dlightrag_runs.secret is missing")
     )
 
-    response = await client.get(f"/answer/{_RUN_ID}")
+    response = await client.get(f"/runs/{_RUN_ID}")
 
     assert response.status_code == 503
-    assert "dlightrag_answer_runs" not in response.text
+    assert "dlightrag_runs" not in response.text
 
 
 # ---------------------------------------------------------------------------
@@ -987,7 +1040,6 @@ class TestAgentControls:
         steer = await client.post(f"/answer/{_RUN_ID}/steer", json={"content": "focus"})
         follow = await client.post(f"/answer/{_RUN_ID}/follow-up", json={"content": "next"})
         fork = await client.post(f"/answer/{_RUN_ID}/fork", json={"content": "branch"})
-        resume = await client.post(f"/answer/{_RUN_ID}/resume")
         transcript = await client.get(f"/answer/{_RUN_ID}/transcript")
         children = await client.get(f"/answer/{_RUN_ID}/children")
 
@@ -995,7 +1047,6 @@ class TestAgentControls:
         assert steer.json()["control_sequence"] == 1
         assert follow.status_code == 202
         assert fork.status_code == 202
-        assert resume.status_code == 200
         assert transcript.json()["messages"] == [{"role": "user", "content": "hi"}]
         assert children.json()["children"][0]["child_session_id"] == "child-1"
         assert run_application.controls == ["focus", "follow:next", "fork:branch"]
@@ -1023,3 +1074,51 @@ class TestAgentControls:
         assert response.status_code == 403
         resolver.assert_awaited_once()
         assert run_application.continuations == []
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "body", "status"),
+    [
+        ("POST", f"/answer/{_RUN_ID}/steer", {"content": "focus"}, 409),
+        ("POST", f"/answer/{_RUN_ID}/follow-up", {"content": "next"}, 409),
+        ("POST", f"/answer/{_RUN_ID}/fork", {"content": "branch"}, 409),
+        ("GET", f"/answer/{_RUN_ID}/transcript", None, 404),
+        ("GET", f"/answer/{_RUN_ID}/children", None, 404),
+        ("GET", f"/answer/{_RUN_ID}/artifacts", None, 404),
+    ],
+)
+async def test_retrieval_run_id_is_unknown_to_answer_only_rest_routes(
+    client: AsyncClient,
+    run_application: _RunApplication,
+    method: str,
+    path: str,
+    body: dict[str, str] | None,
+    status: int,
+) -> None:
+    run_application.record = _record(
+        run_kind="retrieval",
+        status="succeeded",
+        accepted_input={"query": "retrieval", "workspaces": ["default"]},
+        result={"answer": "fabricated"},
+    )
+
+    response = await client.request(method, path, json=body)
+
+    assert response.status_code == status
+    assert run_application.continuations == []
+
+
+@pytest.mark.parametrize("suffix", ["", "/presentation"])
+async def test_retrieval_run_id_cannot_read_published_artifacts_over_rest(
+    client: AsyncClient,
+    run_application: _RunApplication,
+    suffix: str,
+) -> None:
+    _publish_test_artifact(run_application)
+    assert run_application.record is not None
+    result = run_application.record.result
+    run_application.record = _record(run_kind="retrieval", status="succeeded", result=result)
+
+    response = await client.get(f"/answer/{_RUN_ID}/artifacts/{_ARTIFACT_ID}{suffix}")
+
+    assert response.status_code == 404

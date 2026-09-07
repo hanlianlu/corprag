@@ -21,12 +21,6 @@ from typing import Any, cast
 import asyncpg
 import pytest
 
-from dlightrag.adapters.postgres.answer.answer_runs import (
-    ANSWER_RUN_MIGRATION_SCOPE,
-    ANSWER_RUN_MIGRATIONS,
-    ANSWER_RUN_SCHEMA_TABLES,
-    PGAnswerRunStore,
-)
 from dlightrag.adapters.postgres.core._migrations import (
     Migration,
     TableRequirement,
@@ -38,6 +32,12 @@ from dlightrag.adapters.postgres.core._migrations import (
     verify_migrations as _verify_migrations,
 )
 from dlightrag.adapters.postgres.corpus import pg_metadata_index, workspaces
+from dlightrag.adapters.postgres.runtime.run_store import (
+    RUN_MIGRATION_SCOPE,
+    RUN_MIGRATIONS,
+    RUN_SCHEMA_TABLES,
+    PGRunStore,
+)
 from dlightrag.adapters.postgres.web import web_conversations
 from dlightrag.application.config import (
     DeploymentSettings,
@@ -213,12 +213,12 @@ async def test_reader_startup_fails_before_the_writer_migrates(database: str) ->
     config = _config(database, service_role="reader")
     pool = await _pool(config, config.domain_pool_server_settings())
     try:
-        store = PGAnswerRunStore(pool=pool)
+        store = PGRunStore(pool=pool)
         with pytest.raises(RuntimeError, match="dlightrag_schema_migrations"):
             await store.initialize(validate_only=True)
 
         async with pool.acquire() as conn:
-            assert await conn.fetchval("SELECT to_regclass('dlightrag_answer_runs')") is None
+            assert await conn.fetchval("SELECT to_regclass('dlightrag_runs')") is None
     finally:
         await pool.close()
 
@@ -227,7 +227,7 @@ async def test_reader_startup_validates_a_migrated_schema_without_ddl(database: 
     writer_config = _config(database, service_role="writer")
     writer_pool = await _pool(writer_config, writer_config.domain_pool_server_settings())
     try:
-        await PGAnswerRunStore(pool=writer_pool).initialize()
+        await PGRunStore(pool=writer_pool).initialize()
     finally:
         await writer_pool.close()
 
@@ -235,7 +235,7 @@ async def test_reader_startup_validates_a_migrated_schema_without_ddl(database: 
     reader_pool = await _pool(reader_config, reader_config.lightrag_pool_server_settings())
     try:
         # A read-only session proves validation issues no DDL and no ledger write.
-        await PGAnswerRunStore(pool=reader_pool).initialize(validate_only=True)
+        await PGRunStore(pool=reader_pool).initialize(validate_only=True)
     finally:
         await reader_pool.close()
 
@@ -247,45 +247,49 @@ async def test_reader_startup_fails_when_a_declared_version_is_missing(database:
         async with pool.acquire() as conn:
             await apply_migrations(
                 conn,
-                scope=ANSWER_RUN_MIGRATION_SCOPE,
-                migrations=ANSWER_RUN_MIGRATIONS[:1],
+                scope=RUN_MIGRATION_SCOPE,
+                migrations=RUN_MIGRATIONS[:1],
             )
             await conn.execute(
                 "DELETE FROM dlightrag_schema_migrations WHERE scope = $1 AND version = $2",
-                ANSWER_RUN_MIGRATION_SCOPE,
-                ANSWER_RUN_MIGRATIONS[0].version,
+                RUN_MIGRATION_SCOPE,
+                RUN_MIGRATIONS[0].version,
             )
-            with pytest.raises(RuntimeError, match=ANSWER_RUN_MIGRATION_SCOPE):
+            with pytest.raises(RuntimeError, match=RUN_MIGRATION_SCOPE):
                 await verify_migrations(
                     conn,
-                    scope=ANSWER_RUN_MIGRATION_SCOPE,
-                    migrations=ANSWER_RUN_MIGRATIONS,
-                    tables=ANSWER_RUN_SCHEMA_TABLES,
+                    scope=RUN_MIGRATION_SCOPE,
+                    migrations=RUN_MIGRATIONS,
+                    tables=RUN_SCHEMA_TABLES,
                 )
     finally:
         await pool.close()
 
 
-async def test_metadata_field_stats_migration_backfills_existing_rows(database: str) -> None:
+async def test_metadata_field_stats_migration_backfills_only_published_rows(
+    database: str,
+) -> None:
     config = _config(database, service_role="writer")
     pool = await _pool(config, config.domain_pool_server_settings())
-    legacy = tuple(
+    pre_stats = tuple(
         migration
         for migration in pg_metadata_index._SCHEMA_MIGRATIONS
-        if migration.version != "metadata_field_stats"
+        if migration.version not in {"metadata_field_stats", "product_document_visibility"}
     )
     try:
         async with pool.acquire() as conn:
             await apply_migrations(
                 conn,
                 scope="doc_metadata",
-                migrations=legacy,
+                migrations=pre_stats,
                 require_applied_prefix=False,
             )
             await conn.execute(
                 "INSERT INTO dlightrag_doc_metadata "
-                "(workspace, doc_id, title, custom_metadata) "
-                "VALUES ('legacy', 'doc-1', 'Report', '{\"department\":\"finance\"}')"
+                "(workspace, doc_id, title, custom_metadata, "
+                "_dlightrag_finalization_complete) VALUES "
+                "('legacy', 'doc-hidden', 'Hidden', '{\"hidden_only\":true}', FALSE), "
+                "('legacy', 'doc-ready', 'Report', '{\"department\":\"finance\"}', TRUE)"
             )
 
             await apply_migrations(
@@ -331,7 +335,7 @@ _SCOPES = (
         pg_metadata_index._SCHEMA_TABLES,
         require_applied_prefix=False,
     ),
-    _Scope(ANSWER_RUN_MIGRATION_SCOPE, ANSWER_RUN_MIGRATIONS, ANSWER_RUN_SCHEMA_TABLES),
+    _Scope(RUN_MIGRATION_SCOPE, RUN_MIGRATIONS, RUN_SCHEMA_TABLES),
     _Scope(
         "web_conversations",
         web_conversations.WEB_CONVERSATION_MIGRATIONS,
@@ -371,25 +375,25 @@ _DAMAGE_CASES = [
         id="doc-index",
     ),
     pytest.param(
-        ANSWER_RUN_MIGRATION_SCOPE,
+        RUN_MIGRATION_SCOPE,
         "DROP TABLE dlightrag_answer_run_artifacts",
         ["table dlightrag_answer_run_artifacts"],
         id="answer-table",
     ),
     pytest.param(
-        ANSWER_RUN_MIGRATION_SCOPE,
-        "DROP INDEX idx_dlightrag_answer_runs_idempotency",
-        ["index idx_dlightrag_answer_runs_idempotency"],
-        id="answer-index",
+        RUN_MIGRATION_SCOPE,
+        "DROP INDEX idx_dlightrag_runs_submission",
+        ["index idx_dlightrag_runs_submission"],
+        id="run-index",
     ),
     pytest.param(
-        ANSWER_RUN_MIGRATION_SCOPE,
-        "ALTER TABLE dlightrag_answer_runs DROP CONSTRAINT dlightrag_answer_runs_status_check",
-        ["constraint dlightrag_answer_runs_status_check"],
+        RUN_MIGRATION_SCOPE,
+        "ALTER TABLE dlightrag_runs DROP CONSTRAINT dlightrag_runs_status_check",
+        ["constraint dlightrag_runs_status_check"],
         id="answer-check",
     ),
     pytest.param(
-        ANSWER_RUN_MIGRATION_SCOPE,
+        RUN_MIGRATION_SCOPE,
         "ALTER TABLE dlightrag_blobs DROP CONSTRAINT dlightrag_blobs_pkey CASCADE",
         [
             "primary key dlightrag_blobs (owner_id, digest)",
@@ -519,7 +523,7 @@ async def test_reader_rejects_an_undeclared_migration_version(database: str) -> 
             await conn.execute(
                 "INSERT INTO dlightrag_schema_migrations (scope, version, description) "
                 "VALUES ($1, $2, $3)",
-                ANSWER_RUN_MIGRATION_SCOPE,
+                RUN_MIGRATION_SCOPE,
                 "9999_from_a_newer_revision",
                 "undeclared",
             )
@@ -527,9 +531,9 @@ async def test_reader_rejects_an_undeclared_migration_version(database: str) -> 
             with pytest.raises(CorpusSchemaError, match="undeclared versions"):
                 await verify_migrations(
                     conn,
-                    scope=ANSWER_RUN_MIGRATION_SCOPE,
-                    migrations=ANSWER_RUN_MIGRATIONS,
-                    tables=ANSWER_RUN_SCHEMA_TABLES,
+                    scope=RUN_MIGRATION_SCOPE,
+                    migrations=RUN_MIGRATIONS,
+                    tables=RUN_SCHEMA_TABLES,
                 )
     finally:
         await pool.close()

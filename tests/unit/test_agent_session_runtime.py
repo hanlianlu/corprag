@@ -25,6 +25,7 @@ from dlightrag.engine.agent.session.operation import (
     OperationCancelled,
     OperationCompleted,
     OperationFailed,
+    ProviderRequestPending,
     ToolEffectPending,
 )
 from dlightrag.engine.agent.session.plan import AgentRunPlan
@@ -57,6 +58,7 @@ from dlightrag.engine.agent.session.transactions import (
 )
 from dlightrag.engine.agent.tools import AgentTool, ToolResult
 from dlightrag.engine.ai.messages import AssistantTurn, ToolCall
+from dlightrag.engine.dependencies import ProviderUnavailableError
 
 
 class _Args(BaseModel):
@@ -665,7 +667,7 @@ async def test_compaction_retries_exactly_the_plan_attempt_limit() -> None:
 
 
 @pytest.mark.asyncio
-async def test_provider_retry_exhaustion_is_typed_operation_failure() -> None:
+async def test_provider_retry_exhaustion_yields_to_owning_durable_run() -> None:
     tool = _agent_tool()
 
     class UnavailableProvider(_Effects):
@@ -697,13 +699,23 @@ async def test_provider_retry_exhaustion_is_typed_operation_failure() -> None:
         content="question",
         plan=replace(_plan(tool), provider_attempt_limit=2),
     )
-    final = await runtime.drive(session_id=session_id, operation_id=accepted.operation_id)
-    assert isinstance(final.state, OperationFailed)
-    assert final.state.kind == "provider_unavailable"
+    with pytest.raises(ProviderUnavailableError):
+        await runtime.drive(session_id=session_id, operation_id=accepted.operation_id)
+
+    interrupted = await runtime.restore(
+        session_id=session_id,
+        operation_id=accepted.operation_id,
+    )
+    assert isinstance(interrupted.state, ProviderRequestPending)
+    assert interrupted.state.provider_attempts == 2
     assert len(effects.provider_attempts) == 2
     assert not any(
         record.ref.kind == "session_fault" for record in (await store.load(session_id)).registers
     )
+
+    runtime._effects = _Effects([_assistant(text="recovered")])
+    recovered = await runtime.drive(session_id=session_id, operation_id=accepted.operation_id)
+    assert isinstance(recovered.state, OperationCompleted)
 
 
 @pytest.mark.asyncio
@@ -1139,9 +1151,11 @@ async def test_runtime_cache_decodes_thousand_entry_history_once_across_many_reg
         content="new question",
         plan=replace(_plan(tool), provider_attempt_limit=attempts),
     )
-    final = await runtime.drive(session_id=session_id, operation_id=accepted.operation_id)
+    with pytest.raises(ProviderUnavailableError):
+        await runtime.drive(session_id=session_id, operation_id=accepted.operation_id)
+    final = await runtime.restore(session_id=session_id, operation_id=accepted.operation_id)
 
-    assert isinstance(final.state, OperationFailed)
+    assert isinstance(final.state, ProviderRequestPending)
     assert repository.load_calls == 1
     assert repository.refresh_calls == 102
     assert repository.decoded_rows == 1000
@@ -1151,9 +1165,7 @@ async def test_runtime_cache_decodes_thousand_entry_history_once_across_many_reg
         final.context.snapshot.entries[index] is initial.entries[index] for index in range(1000)
     )
     assert final.context.snapshot.entries[1000].sequence == 1001
-    assert not any(
-        record.ref.kind == "request_snapshot" for record in final.context.snapshot.registers
-    )
+    assert any(record.ref.kind == "request_snapshot" for record in final.context.snapshot.registers)
     authoritative = await repository.authoritative(session_id)
     assert final.context.snapshot.entries == authoritative.entries
     assert final.context.snapshot.registers == authoritative.registers

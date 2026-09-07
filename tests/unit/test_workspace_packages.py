@@ -21,7 +21,7 @@ _BATTERIES = (
     "botocore>=1.43.3",
     "google-genai>=2.19.0",
     "json-repair>=0.62.0",
-    "lightrag-hku>=1.5.6",
+    "lightrag-hku>=1.5.7",
     "lingua-language-detector>=2.2.0",
     "openai>=2.54.0",
 )
@@ -134,7 +134,7 @@ def _write_workspace_artifacts(
     root_include_legal: bool = True,
     root_include_model_catalog: bool = True,
     root_include_frontend: bool = True,
-    root_extras: tuple[str, ...] = (),
+    root_extras: tuple[str, ...] = ("milvus",),
     memory_source: str = "",
     memory_sdist_source: str | None = None,
     memory_version: str = _VERSION,
@@ -395,7 +395,7 @@ def test_workspace_wheel_verifier_requires_root_model_catalog(tmp_path: Path) ->
     assert "model_catalog.json" in completed.stderr
 
 
-def test_workspace_wheel_verifier_rejects_root_extras(tmp_path: Path) -> None:
+def test_workspace_wheel_verifier_rejects_unexpected_root_extras(tmp_path: Path) -> None:
     _write_workspace_artifacts(tmp_path, root_extras=("all",))
 
     completed = _verify_wheels(tmp_path)

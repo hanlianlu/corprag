@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import Cookie, HTTPException, Request
 
+from dlightrag.adapters.http.application import get_application
 from dlightrag.application.access import (
     AccessControl,
     AccessDeniedError,
@@ -15,7 +16,6 @@ from dlightrag.application.access import (
 from dlightrag.application.settings import access_settings
 
 if TYPE_CHECKING:
-    from dlightrag.application import Application
     from dlightrag.application.web_conversations import WebConversationService
 
 DEFAULT_WORKSPACE = "default"
@@ -26,11 +26,6 @@ def get_workspace(dlightrag_workspace: str = Cookie(default=DEFAULT_WORKSPACE)) 
     from dlightrag.application.corpus_admin import normalize_workspace
 
     return normalize_workspace(dlightrag_workspace)
-
-
-def get_application(request: Request) -> Application:
-    """Return the one app-scoped composition root."""
-    return request.app.state.application
 
 
 def get_web_conversation_service(request: Request) -> WebConversationService:

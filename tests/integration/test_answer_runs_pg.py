@@ -14,6 +14,8 @@ Requires PostgreSQL at localhost:5432 (dlightrag/dlightrag); skipped otherwise.
 """
 
 import asyncio
+import hashlib
+import json
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
@@ -21,24 +23,27 @@ from typing import Any
 import asyncpg
 import pytest
 
-from dlightrag.adapters.postgres.answer._blobs import (
+from dlightrag.adapters.postgres.runtime.run_blob_store import (
     BlobSizeConflict,
+    PGRunBlobStore,
     write_blob_content,
     write_complete_blob,
 )
-from dlightrag.adapters.postgres.answer.answer_runs import PGAnswerRunStore
+from dlightrag.adapters.postgres.runtime.run_store import PGRunStore
 from dlightrag.engine.agent.session.ids import StageIntentId
 from dlightrag.engine.runtime import (
     MAX_RECLAIMS_WITHOUT_PROGRESS,
+    RUN_ABANDONED_ERROR_KIND,
     IdempotencyKeyConflict,
     PendingArtifact,
     PendingArtifactReference,
+    RunCapacityExceededError,
     StageTerminalCommit,
-    answer_run_request_fingerprint,
+    run_request_fingerprint,
 )
 from dlightrag.engine.runtime.blob_chunks import BLOB_CHUNK_BYTES
 from dlightrag.engine.runtime.records import PendingPublication
-from tests.conftest import FingerprintingAnswerRunStore
+from tests.conftest import FingerprintingRunStore
 from tests.integration.pg_conn import PG_CONN_KWARGS
 
 pytestmark = [
@@ -51,6 +56,90 @@ _PG_CONN_KWARGS: dict[str, Any] = PG_CONN_KWARGS
 _OWNER = "owner-alpha"
 _OTHER_OWNER = "owner-beta"
 _WORKER = "worker-1"
+_ABANDONED_ERROR_MESSAGE = "Run exceeded its reclaim-without-progress bound."
+
+# Verbatim deployed Answer-run tables from baseline main@5c66e5b2. In
+# particular, accepted_input_json is already a required column; this fixture
+# guards the supported terminal-only rename without inventing an older schema.
+_BASELINE_ANSWER_RUNS_DDL = """
+CREATE TABLE IF NOT EXISTS dlightrag_answer_runs (
+    owner_id            TEXT        NOT NULL,
+    run_id              UUID        NOT NULL,
+    idempotency_key     TEXT,
+    prepared_input_json JSONB,
+    accepted_input_json JSONB        NOT NULL DEFAULT '{}'::jsonb,
+    request_fingerprint TEXT        NOT NULL,
+    status              TEXT        NOT NULL DEFAULT 'queued',
+    phase               TEXT,
+    stop_reason         TEXT,
+    cancel_requested_at TIMESTAMPTZ,
+    lease_owner         TEXT,
+    lease_expires_at    TIMESTAMPTZ,
+    fencing_epoch       BIGINT      NOT NULL DEFAULT 0,
+    durable_progress_version       BIGINT  NOT NULL DEFAULT 0,
+    last_reclaim_progress_version  BIGINT  NOT NULL DEFAULT 0,
+    reclaims_without_progress      INTEGER NOT NULL DEFAULT 0,
+    next_event_sequence BIGINT      NOT NULL DEFAULT 1,
+    events_trimmed_at   TIMESTAMPTZ,
+    result_json         JSONB,
+    error_kind          TEXT,
+    error_message       TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    started_at          TIMESTAMPTZ,
+    finished_at         TIMESTAMPTZ,
+    workspace_epoch     BIGINT,
+    PRIMARY KEY (owner_id, run_id),
+    CONSTRAINT dlightrag_answer_runs_status_check
+        CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
+    CONSTRAINT dlightrag_answer_runs_phase_check
+        CHECK (phase IS NULL OR phase IN ('routing', 'planning', 'searching', 'researching', 'generating')),
+    CONSTRAINT dlightrag_answer_runs_counter_check
+        CHECK (fencing_epoch >= 0 AND next_event_sequence >= 1
+               AND durable_progress_version >= 0
+               AND last_reclaim_progress_version >= 0
+               AND reclaims_without_progress >= 0),
+    CONSTRAINT dlightrag_answer_runs_lease_check
+        CHECK ((lease_owner IS NULL) = (lease_expires_at IS NULL)),
+    CONSTRAINT dlightrag_answer_runs_terminal_check
+        CHECK ((status IN ('succeeded', 'failed', 'cancelled')) = (finished_at IS NOT NULL)),
+    CONSTRAINT dlightrag_answer_runs_result_check
+        CHECK (status <> 'succeeded' OR result_json IS NOT NULL),
+    CONSTRAINT dlightrag_answer_runs_error_check
+        CHECK ((status = 'failed') = (error_kind IS NOT NULL)),
+    CONSTRAINT dlightrag_answer_runs_prepared_input_check
+        CHECK ((status IN ('queued', 'running')) = (prepared_input_json IS NOT NULL)),
+    CONSTRAINT dlightrag_answer_runs_workspace_epoch_check
+        CHECK (workspace_epoch IS NULL OR workspace_epoch >= 1)
+)
+"""
+_BASELINE_ANSWER_RUN_EVENTS_DDL = """
+CREATE TABLE IF NOT EXISTS dlightrag_answer_run_events (
+    owner_id       TEXT        NOT NULL,
+    run_id         UUID        NOT NULL,
+    event_sequence BIGINT      NOT NULL,
+    event_type     TEXT        NOT NULL,
+    payload        JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (owner_id, run_id, event_sequence),
+    FOREIGN KEY (owner_id, run_id)
+        REFERENCES dlightrag_answer_runs (owner_id, run_id) ON DELETE CASCADE,
+    CONSTRAINT dlightrag_answer_run_events_type_check
+        CHECK (event_type IN (
+            'progress', 'token', 'reset',
+            'tool_start', 'tool_progress', 'tool_end',
+            'memory_operation_settled', 'done', 'error'
+        )),
+    CONSTRAINT dlightrag_answer_run_events_sequence_check
+        CHECK (event_sequence >= 1)
+)
+"""
+
+
+def _blob_store(store: PGRunStore) -> PGRunBlobStore:
+    pool = store._operation_pool  # noqa: SLF001 - bind the separate blob seam in tests
+    assert pool is not None
+    return PGRunBlobStore(pool=pool)
 
 
 async def _pg_available() -> bool:
@@ -91,8 +180,8 @@ async def pool() -> AsyncIterator[Any]:
 
 
 @pytest.fixture
-async def store(pool: Any) -> PGAnswerRunStore:
-    created = FingerprintingAnswerRunStore(pool=pool)
+async def store(pool: Any) -> PGRunStore:
+    created = FingerprintingRunStore(pool=pool)
     await created.initialize()
     # Establish the complete operational schema exactly as a real process does.
     from dlightrag.adapters.postgres.web.web_conversations import PGWebConversationStore
@@ -114,7 +203,7 @@ def _request(query: str = "why", **extra: Any) -> dict[str, Any]:
 async def _expire_lease(pool: Any, run_id: str) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE dlightrag_answer_runs "
+            "UPDATE dlightrag_runs "
             "SET lease_expires_at = NOW() - INTERVAL '1 second' WHERE run_id = $1",
             uuid.UUID(run_id),
         )
@@ -123,8 +212,10 @@ async def _expire_lease(pool: Any, run_id: str) -> None:
 async def _backdate_finish(pool: Any, run_id: str, *, days: int) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE dlightrag_answer_runs "
-            "SET finished_at = NOW() - ($2 * INTERVAL '1 day') WHERE run_id = $1",
+            "UPDATE dlightrag_runs "
+            "SET finished_at = NOW() - ($2 * INTERVAL '1 day'), "
+            "purge_after = NOW() - ($2 * INTERVAL '1 day') "
+            "+ make_interval(secs => retention_seconds::double precision) WHERE run_id = $1",
             uuid.UUID(run_id),
             days,
         )
@@ -133,8 +224,7 @@ async def _backdate_finish(pool: Any, run_id: str, *, days: int) -> None:
 async def _event_types(pool: Any, run_id: str) -> list[str]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT event_type FROM dlightrag_answer_run_events "
-            "WHERE run_id = $1 ORDER BY event_sequence",
+            "SELECT event_type FROM dlightrag_run_events WHERE run_id = $1 ORDER BY event_sequence",
             uuid.UUID(run_id),
         )
     return [str(row["event_type"]) for row in rows]
@@ -144,12 +234,40 @@ async def _prepared_input(pool: Any, run_id: str) -> str | None:
     """Read the raw prepared input column."""
     async with pool.acquire() as conn:
         return await conn.fetchval(
-            "SELECT prepared_input_json FROM dlightrag_answer_runs WHERE run_id = $1",
+            "SELECT prepared_input_json FROM dlightrag_runs WHERE run_id = $1",
             uuid.UUID(run_id),
         )
 
 
-async def _claimed(store: PGAnswerRunStore, *, worker_id: str = _WORKER) -> Any:
+async def _write_fetched_blob(pool: Any, run_id: str, content: bytes) -> str:
+    """Write complete fetched bytes and their run-owned resource reference."""
+    digest = hashlib.sha256(content).hexdigest()
+    locator = f"https://example.test/{digest[:12]}".encode()
+    async with pool.acquire() as conn, conn.transaction():
+        await write_blob_content(
+            conn,
+            owner_id=_OWNER,
+            digest=digest,
+            content=content,
+        )
+        await conn.execute(
+            "INSERT INTO dlightrag_answer_resources "
+            "(owner_id, run_id, resource_id, kind, safe_name, media_type, capabilities, "
+            "ordinal, blob_digest, locator_digest, source_locator) "
+            "VALUES ($1, $2, $3, 'fetched_blob', 'page.html', 'text/html', $4::jsonb, "
+            "0, $5, $6, $7)",
+            _OWNER,
+            uuid.UUID(run_id),
+            f"fetched-{digest[:16]}",
+            '{"resource_kind":"web"}',
+            digest,
+            hashlib.sha256(locator).hexdigest(),
+            locator,
+        )
+    return digest
+
+
+async def _claimed(store: PGRunStore, *, worker_id: str = _WORKER) -> Any:
     claim = await store.claim_next(worker_id=worker_id)
     assert claim is not None
     return claim
@@ -160,12 +278,282 @@ def _delete_action(value: Any) -> str:
     return value.decode() if isinstance(value, bytes | bytearray) else str(value)
 
 
+async def _assert_run_event_parent_guard(store: FingerprintingRunStore, pool: Any) -> None:
+    """Exercise the direct-DML event invariants on either schema path."""
+    async with pool.acquire() as conn:
+        trigger_rows = await conn.fetch(
+            "SELECT trigger_name, event_manipulation, action_timing "
+            "FROM information_schema.triggers "
+            "WHERE trigger_schema = 'public' "
+            "AND event_object_table = 'dlightrag_run_events'"
+        )
+    assert {
+        (
+            str(row["trigger_name"]),
+            str(row["event_manipulation"]),
+            str(row["action_timing"]),
+        )
+        for row in trigger_rows
+    } == {
+        ("trg_dlightrag_run_events_enforce", "INSERT", "BEFORE"),
+        ("trg_dlightrag_run_events_enforce", "UPDATE", "BEFORE"),
+    }
+
+    async def remove(run_id: str) -> None:
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM dlightrag_runs WHERE run_id = $1", uuid.UUID(run_id))
+
+    # Even a live lease cannot publish a sequence the parent has not allocated.
+    creation = await store.create_run(owner_id=_OWNER, request=_request("future sequence"))
+    await _claimed(store)
+    async with pool.acquire() as conn:
+        with pytest.raises(asyncpg.exceptions.CheckViolationError):
+            await conn.execute(
+                "INSERT INTO dlightrag_run_events "
+                "(owner_id, run_id, event_sequence, event_type, payload) "
+                "VALUES ($1, $2, 1, 'progress', '{}'::jsonb)",
+                _OWNER,
+                uuid.UUID(creation.run.run_id),
+            )
+        await conn.execute(
+            "UPDATE dlightrag_runs SET next_event_sequence = 2 WHERE run_id = $1",
+            uuid.UUID(creation.run.run_id),
+        )
+        with pytest.raises(asyncpg.exceptions.CheckViolationError):
+            await conn.execute(
+                "INSERT INTO dlightrag_run_events "
+                "(owner_id, run_id, event_sequence, event_type, payload) "
+                "VALUES ($1, $2, 1, 'progress', '[]'::jsonb)",
+                _OWNER,
+                uuid.UUID(creation.run.run_id),
+            )
+    await remove(creation.run.run_id)
+
+    # Nonterminal events require a running parent with a present, live lease.
+    creation = await store.create_run(owner_id=_OWNER, request=_request("queued event"))
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE dlightrag_runs SET next_event_sequence = 2 WHERE run_id = $1",
+            uuid.UUID(creation.run.run_id),
+        )
+        with pytest.raises(asyncpg.exceptions.CheckViolationError):
+            await conn.execute(
+                "INSERT INTO dlightrag_run_events "
+                "(owner_id, run_id, event_sequence, event_type, payload) "
+                "VALUES ($1, $2, 1, 'progress', '{}'::jsonb)",
+                _OWNER,
+                uuid.UUID(creation.run.run_id),
+            )
+    await remove(creation.run.run_id)
+
+    creation = await store.create_run(owner_id=_OWNER, request=_request("unleased event"))
+    await _claimed(store)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE dlightrag_runs SET active_permit = FALSE, lease_owner = NULL, "
+            "lease_expires_at = NULL, next_event_sequence = 2 WHERE run_id = $1",
+            uuid.UUID(creation.run.run_id),
+        )
+        with pytest.raises(asyncpg.exceptions.CheckViolationError):
+            await conn.execute(
+                "INSERT INTO dlightrag_run_events "
+                "(owner_id, run_id, event_sequence, event_type, payload) "
+                "VALUES ($1, $2, 1, 'progress', '{}'::jsonb)",
+                _OWNER,
+                uuid.UUID(creation.run.run_id),
+            )
+    await remove(creation.run.run_id)
+
+    creation = await store.create_run(owner_id=_OWNER, request=_request("expired event"))
+    await _claimed(store)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE dlightrag_runs SET lease_expires_at = NOW() - INTERVAL '1 second', "
+            "next_event_sequence = 2 WHERE run_id = $1",
+            uuid.UUID(creation.run.run_id),
+        )
+        with pytest.raises(asyncpg.exceptions.CheckViolationError):
+            await conn.execute(
+                "INSERT INTO dlightrag_run_events "
+                "(owner_id, run_id, event_sequence, event_type, payload) "
+                "VALUES ($1, $2, 1, 'progress', '{}'::jsonb)",
+                _OWNER,
+                uuid.UUID(creation.run.run_id),
+            )
+    await remove(creation.run.run_id)
+
+    # Terminal events are admitted only after the matching parent transition.
+    creation = await store.create_run(owner_id=_OWNER, request=_request("early terminal"))
+    await _claimed(store)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE dlightrag_runs SET next_event_sequence = 2 WHERE run_id = $1",
+            uuid.UUID(creation.run.run_id),
+        )
+        with pytest.raises(asyncpg.exceptions.CheckViolationError):
+            await conn.execute(
+                "INSERT INTO dlightrag_run_events "
+                "(owner_id, run_id, event_sequence, event_type, payload) "
+                "VALUES ($1, $2, 1, 'done', "
+                '\'{"status":"succeeded","result":{}}\'::jsonb)',
+                _OWNER,
+                uuid.UUID(creation.run.run_id),
+            )
+    await remove(creation.run.run_id)
+
+    creation = await store.create_run(owner_id=_OWNER, request=_request("terminal mismatch"))
+    claim = await _claimed(store)
+    assert (
+        await store.finish_success(
+            owner_id=_OWNER,
+            run_id=creation.run.run_id,
+            worker_id=_WORKER,
+            fencing_epoch=claim.run.fencing_epoch,
+            result={"answer": "complete"},
+        )
+    ).committed
+    async with pool.acquire() as conn:
+        # Cleanup and retention DELETEs remain legal; the guard covers only writes.
+        assert (
+            await conn.execute(
+                "DELETE FROM dlightrag_run_events WHERE owner_id = $1 AND run_id = $2",
+                _OWNER,
+                uuid.UUID(creation.run.run_id),
+            )
+        ) == "DELETE 1"
+        with pytest.raises(asyncpg.exceptions.CheckViolationError):
+            await conn.execute(
+                "INSERT INTO dlightrag_run_events "
+                "(owner_id, run_id, event_sequence, event_type, payload) "
+                "VALUES ($1, $2, 1, 'done', "
+                '\'{"status":"succeeded","result":{"answer":"wrong"}}\'::jsonb)',
+                _OWNER,
+                uuid.UUID(creation.run.run_id),
+            )
+        with pytest.raises(asyncpg.exceptions.CheckViolationError):
+            await conn.execute(
+                "INSERT INTO dlightrag_run_events "
+                "(owner_id, run_id, event_sequence, event_type, payload) "
+                "VALUES ($1, $2, 1, 'error', "
+                '\'{"kind":"provider_error","message":"boom"}\'::jsonb)',
+                _OWNER,
+                uuid.UUID(creation.run.run_id),
+            )
+    await remove(creation.run.run_id)
+
+    # UPDATEs pass through the same parent-sequence guard.
+    creation = await store.create_run(owner_id=_OWNER, request=_request("event update"))
+    claim = await _claimed(store)
+    assert (
+        await store.append_event(
+            owner_id=_OWNER,
+            run_id=creation.run.run_id,
+            worker_id=_WORKER,
+            fencing_epoch=claim.run.fencing_epoch,
+            phase=None,
+            event_type="progress",
+            payload={"phase": "working"},
+        )
+    ) == 1
+    async with pool.acquire() as conn:
+        with pytest.raises(asyncpg.exceptions.CheckViolationError):
+            await conn.execute(
+                "UPDATE dlightrag_run_events SET event_sequence = 2 "
+                "WHERE owner_id = $1 AND run_id = $2",
+                _OWNER,
+                uuid.UUID(creation.run.run_id),
+            )
+        assert (
+            await conn.execute(
+                "DELETE FROM dlightrag_run_events WHERE owner_id = $1 AND run_id = $2",
+                _OWNER,
+                uuid.UUID(creation.run.run_id),
+            )
+        ) == "DELETE 1"
+    await remove(creation.run.run_id)
+
+
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
 
 
 class TestSchema:
+    async def test_migrates_the_deployed_terminal_answer_schema_and_remains_writable(
+        self, pool
+    ) -> None:
+        legacy_run_id = uuid.uuid7()
+        accepted_input = {"query": "legacy terminal", "workspaces": ["alpha"]}
+        legacy_result = {"answer": "preserved"}
+        async with pool.acquire() as conn:
+            await conn.execute(_BASELINE_ANSWER_RUNS_DDL)
+            await conn.execute(_BASELINE_ANSWER_RUN_EVENTS_DDL)
+            await conn.execute(
+                "INSERT INTO dlightrag_answer_runs "
+                "(owner_id, run_id, idempotency_key, accepted_input_json, "
+                "request_fingerprint, status, next_event_sequence, result_json, "
+                "started_at, finished_at) "
+                "VALUES ($1, $2, 'legacy-terminal', $3::jsonb, 'legacy-fingerprint', "
+                "'succeeded', 2, $4::jsonb, NOW(), NOW())",
+                _OWNER,
+                legacy_run_id,
+                json.dumps(accepted_input),
+                json.dumps(legacy_result),
+            )
+            await conn.execute(
+                "INSERT INTO dlightrag_answer_run_events "
+                "(owner_id, run_id, event_sequence, event_type, payload) "
+                "VALUES ($1, $2, 1, 'done', $3::jsonb)",
+                _OWNER,
+                legacy_run_id,
+                json.dumps({"status": "succeeded", "result": legacy_result}),
+            )
+
+        migrated = FingerprintingRunStore(pool=pool)
+        await migrated.initialize()
+
+        legacy = await migrated.get_run(owner_id=_OWNER, run_id=str(legacy_run_id))
+        assert legacy is not None
+        assert legacy.status == "succeeded"
+        assert legacy.accepted_input == accepted_input
+        assert legacy.result == legacy_result
+        legacy_events = await migrated.read_event_page(owner_id=_OWNER, run_id=str(legacy_run_id))
+        assert [(event.event_type, event.payload) for event in legacy_events] == [
+            ("done", {"status": "succeeded", "result": legacy_result})
+        ]
+
+        inserted = await migrated.create_run(owner_id=_OWNER, request=_request("after migration"))
+        claim = await _claimed(migrated)
+        assert claim.run.run_id == inserted.run.run_id
+        outcome = await migrated.finish_success(
+            owner_id=_OWNER,
+            run_id=inserted.run.run_id,
+            worker_id=_WORKER,
+            fencing_epoch=claim.run.fencing_epoch,
+            result={"answer": "new"},
+        )
+        assert outcome.committed is True
+        assert (await migrated.get_run(owner_id=_OWNER, run_id=inserted.run.run_id)) is not None
+        async with pool.acquire() as conn:
+            assert await conn.fetchval("SELECT to_regclass('dlightrag_answer_runs')") is None
+            assert await conn.fetchval("SELECT to_regclass('dlightrag_runs')") == "dlightrag_runs"
+            event_checks = {
+                str(row["conname"])
+                for row in await conn.fetch(
+                    "SELECT conname FROM pg_constraint "
+                    "WHERE conrelid = 'dlightrag_run_events'::regclass AND contype = 'c'"
+                )
+            }
+        assert "dlightrag_run_events_sequence_check" in event_checks
+        assert "dlightrag_answer_run_events_sequence_check" not in event_checks
+
+        reader = PGRunStore(pool=pool)
+        await reader.initialize(validate_only=True)
+        await _assert_run_event_parent_guard(migrated, pool)
+
+    async def test_fresh_schema_enforces_run_event_parent_contract(self, store, pool) -> None:
+        await _assert_run_event_parent_guard(store, pool)
+
     async def test_creates_exactly_the_answer_schema_tables(self, store, pool) -> None:
         async with pool.acquire() as conn:
             rows = await conn.fetch(
@@ -173,8 +561,8 @@ class TestSchema:
                 "WHERE table_schema = 'public' AND table_name LIKE 'dlightrag_%'"
             )
         assert {str(row["table_name"]) for row in rows} - {"dlightrag_schema_migrations"} == {
-            "dlightrag_answer_runs",
-            "dlightrag_answer_run_events",
+            "dlightrag_runs",
+            "dlightrag_run_events",
             "dlightrag_agent_sessions",
             "dlightrag_agent_session_entries",
             "dlightrag_agent_session_registers",
@@ -191,6 +579,7 @@ class TestSchema:
             "dlightrag_answer_child_sessions",
             "dlightrag_agent_controls",
             "dlightrag_answer_memory_settings",
+            "dlightrag_corpus_mutation_windows",
         }
 
     async def test_artifact_reference_constraint_uses_one_output_kind(self, store, pool) -> None:
@@ -218,7 +607,7 @@ class TestSchema:
                 "SELECT created_at, run_id, "
                 "prepared_input_json ->> 'context_policy_revision', "
                 "prepared_input_json -> 'pinned_models' "
-                "FROM dlightrag_answer_runs "
+                "FROM dlightrag_runs "
                 "WHERE status IN ('queued', 'running') "
                 "AND cancel_requested_at IS NULL "
                 "AND NOT (status = 'running' AND lease_expires_at < NOW() "
@@ -229,7 +618,7 @@ class TestSchema:
             cancel_plan = await conn.fetch(
                 "EXPLAIN (COSTS OFF) "
                 "SELECT owner_id, run_id, created_at "
-                "FROM dlightrag_answer_runs "
+                "FROM dlightrag_runs "
                 "WHERE cancel_requested_at IS NOT NULL "
                 "AND status = 'running' AND lease_owner = $1 "
                 "AND lease_expires_at > NOW() "
@@ -237,10 +626,10 @@ class TestSchema:
                 _WORKER,
             )
 
-        assert "idx_dlightrag_answer_runs_claim" in "\n".join(
+        assert "idx_dlightrag_runs_claim" in "\n".join(
             str(row["QUERY PLAN"]) for row in active_plan
         )
-        assert "idx_dlightrag_answer_runs_cancel_pending" in "\n".join(
+        assert "idx_dlightrag_runs_cancel_pending" in "\n".join(
             str(row["QUERY PLAN"]) for row in cancel_plan
         )
 
@@ -265,12 +654,16 @@ class TestSchema:
         async with pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT column_name FROM information_schema.columns WHERE table_name = $1",
-                "dlightrag_answer_runs",
+                "dlightrag_runs",
             )
         assert {str(row["column_name"]) for row in rows} == {
             "owner_id",
             "run_id",
-            "idempotency_key",
+            "run_kind",
+            "lane",
+            "submitted_by",
+            "access_scope_kind",
+            "submission_key",
             "prepared_input_json",
             "accepted_input_json",
             "request_fingerprint",
@@ -293,7 +686,14 @@ class TestSchema:
             "updated_at",
             "started_at",
             "finished_at",
-            "workspace_epoch",
+            "agent_workspace_epoch",
+            "retention_seconds",
+            "purge_after",
+            "next_attempt_at",
+            "active_permit",
+            "checkpoint_json",
+            "handoff_started_at",
+            "superseded_by_run_id",
         }
 
     async def test_foreign_keys_cascade_runs_and_restrict_blobs(self, store, pool) -> None:
@@ -305,64 +705,70 @@ class TestSchema:
                        c.confdeltype AS on_delete
                 FROM pg_constraint AS c
                 WHERE c.contype = 'f'
-                  AND c.conrelid::regclass::text LIKE 'dlightrag_answer%'
+                  AND c.conrelid::regclass::text LIKE 'dlightrag_%'
                 """
             )
         actions = {
             (str(row["child"]), str(row["parent"])): _delete_action(row["on_delete"])
             for row in rows
         }
-        assert actions[("dlightrag_answer_run_events", "dlightrag_answer_runs")] == "c"
-        assert actions[("dlightrag_answer_run_artifacts", "dlightrag_answer_runs")] == "c"
+        assert actions[("dlightrag_run_events", "dlightrag_runs")] == "c"
+        assert actions[("dlightrag_answer_run_artifacts", "dlightrag_runs")] == "c"
         assert actions[("dlightrag_answer_run_artifacts", "dlightrag_blobs")] == "r"
 
-    async def test_rejects_unknown_status_phase_and_event_type(self, store, pool) -> None:
+    async def test_rejects_unknown_status_but_accepts_executor_owned_labels(
+        self, store, pool
+    ) -> None:
         creation = await store.create_run(owner_id=_OWNER, request=_request())
         run_id = uuid.UUID(creation.run.run_id)
         async with pool.acquire() as conn:
             with pytest.raises(asyncpg.exceptions.CheckViolationError):
                 await conn.execute(
-                    "UPDATE dlightrag_answer_runs SET status = 'paused' WHERE run_id = $1", run_id
+                    "UPDATE dlightrag_runs SET status = 'paused' WHERE run_id = $1", run_id
                 )
-            with pytest.raises(asyncpg.exceptions.CheckViolationError):
-                await conn.execute(
-                    "UPDATE dlightrag_answer_runs SET phase = 'polishing' WHERE run_id = $1", run_id
-                )
-            with pytest.raises(asyncpg.exceptions.CheckViolationError):
-                await conn.execute(
-                    "INSERT INTO dlightrag_answer_run_events "
-                    "(owner_id, run_id, event_sequence, event_type) VALUES ($1, $2, 1, 'thinking')",
-                    _OWNER,
-                    run_id,
-                )
+            await conn.execute(
+                "UPDATE dlightrag_runs SET phase = 'polishing' WHERE run_id = $1", run_id
+            )
+        claim = await _claimed(store)
+        assert (
+            await store.append_event(
+                owner_id=_OWNER,
+                run_id=creation.run.run_id,
+                worker_id=_WORKER,
+                fencing_epoch=claim.run.fencing_epoch,
+                phase=None,
+                event_type="thinking",
+                payload={},
+            )
+        ) == 1
 
     async def test_allows_only_one_terminal_event_per_run(self, store, pool) -> None:
         creation = await store.create_run(owner_id=_OWNER, request=_request())
+        claim = await _claimed(store)
+        assert (
+            await store.finish_success(
+                owner_id=_OWNER,
+                run_id=creation.run.run_id,
+                worker_id=_WORKER,
+                fencing_epoch=claim.run.fencing_epoch,
+                result={"answer": "complete"},
+            )
+        ).committed
         run_id = uuid.UUID(creation.run.run_id)
         async with pool.acquire() as conn:
             await conn.execute(
-                "INSERT INTO dlightrag_answer_run_events "
-                "(owner_id, run_id, event_sequence, event_type) VALUES ($1, $2, 1, 'done')",
-                _OWNER,
+                "UPDATE dlightrag_runs SET next_event_sequence = 3 WHERE run_id = $1",
                 run_id,
             )
             with pytest.raises(asyncpg.exceptions.UniqueViolationError):
                 await conn.execute(
-                    "INSERT INTO dlightrag_answer_run_events "
-                    "(owner_id, run_id, event_sequence, event_type) VALUES ($1, $2, 2, 'error')",
+                    "INSERT INTO dlightrag_run_events "
+                    "(owner_id, run_id, event_sequence, event_type, payload) "
+                    "VALUES ($1, $2, 2, 'done', "
+                    '\'{"status":"succeeded","result":{"answer":"complete"}}\'::jsonb)',
                     _OWNER,
                     run_id,
                 )
-
-    async def test_preserves_ingest_job_migration_scope(self, store, pool) -> None:
-        from dlightrag.adapters.postgres.corpus.ingest_jobs import PGIngestJobStore
-
-        await PGIngestJobStore(pool=pool).initialize()
-        async with pool.acquire() as conn:
-            rows = await conn.fetch("SELECT scope, version FROM dlightrag_schema_migrations")
-        recorded = {(str(row["scope"]), str(row["version"])) for row in rows}
-        assert ("answer_runs", "answer_runs") in recorded
-        assert ("ingest_jobs", "ingest_jobs") in recorded
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +777,18 @@ class TestSchema:
 
 
 class TestCreation:
+    async def test_nonterminal_admission_fuse_is_atomic_across_submitters(self, pool) -> None:
+        first_store = FingerprintingRunStore(pool=pool, query_max_nonterminal_runs=1)
+        second_store = FingerprintingRunStore(pool=pool, query_max_nonterminal_runs=1)
+        await first_store.initialize()
+        results = await asyncio.gather(
+            first_store.create_run(owner_id=_OWNER, request=_request("a")),
+            second_store.create_run(owner_id=_OTHER_OWNER, request=_request("b")),
+            return_exceptions=True,
+        )
+        assert sum(isinstance(result, RunCapacityExceededError) for result in results) == 1
+        assert sum(not isinstance(result, BaseException) for result in results) == 1
+
     async def test_creates_queued_run_with_uuid7_identity(self, store) -> None:
         creation = await store.create_run(owner_id=_OWNER, request=_request())
         assert creation.replayed is False
@@ -395,7 +813,8 @@ class TestCreation:
         lookup = await store.replay_run(
             owner_id=_OWNER,
             idempotency_key="k1",
-            idempotency_fingerprint=answer_run_request_fingerprint(_request()),
+            idempotency_fingerprint=run_request_fingerprint(_request()),
+            run_kind="answer",
         )
         assert lookup is not None
         assert lookup.replayed is True
@@ -474,12 +893,36 @@ class TestCancellation:
         assert await _event_types(pool, creation.run.run_id) == ["done"]
         events = await store.read_event_page(owner_id=_OWNER, run_id=creation.run.run_id)
         assert events[0].sequence == 1
-        assert events[0].payload.get("status", "cancelled") == "cancelled"
+        assert events[0].payload == {"status": "cancelled"}
 
     async def test_running_run_records_pending_request(self, store) -> None:
         creation = await store.create_run(owner_id=_OWNER, request=_request())
         await _claimed(store)
         outcome = await store.request_cancellation(owner_id=_OWNER, run_id=creation.run.run_id)
+        assert outcome.outcome == "pending"
+        assert outcome.run is not None
+        assert outcome.run.status == "running"
+        assert outcome.run.cancel_requested is True
+
+    async def test_queued_cancellation_racing_a_claim_reports_pending(self, store, pool) -> None:
+        creation = await store.create_run(owner_id=_OWNER, request=_request())
+        async with pool.acquire() as claiming, claiming.transaction():
+            await claiming.execute(
+                "UPDATE dlightrag_runs SET status = 'running', lease_owner = 'claiming-worker', "
+                "lease_expires_at = NOW() + INTERVAL '30 seconds', "
+                "fencing_epoch = fencing_epoch + 1, started_at = NOW(), "
+                "active_permit = TRUE, updated_at = NOW() "
+                "WHERE owner_id = $1 AND run_id = $2",
+                _OWNER,
+                uuid.UUID(creation.run.run_id),
+            )
+            cancellation = asyncio.create_task(
+                store.request_cancellation(owner_id=_OWNER, run_id=creation.run.run_id)
+            )
+            await asyncio.sleep(0.05)
+            assert not cancellation.done()
+
+        outcome = await asyncio.wait_for(cancellation, timeout=5)
         assert outcome.outcome == "pending"
         assert outcome.run is not None
         assert outcome.run.status == "running"
@@ -521,6 +964,39 @@ class TestCancellation:
         assert record.status == "cancelled"
         assert record.result is None
         assert await _event_types(pool, creation.run.run_id) == ["done"]
+
+    async def test_failure_yields_to_a_cancellation_that_won_the_row(self, store, pool) -> None:
+        creation = await store.create_run(owner_id=_OWNER, request=_request())
+        claim = await _claimed(store)
+        accepted = await store.request_cancellation(owner_id=_OWNER, run_id=creation.run.run_id)
+        assert accepted.outcome == "pending"
+
+        outcome, repeated = await asyncio.gather(
+            store.finish_failure(
+                owner_id=_OWNER,
+                run_id=creation.run.run_id,
+                worker_id=_WORKER,
+                fencing_epoch=claim.run.fencing_epoch,
+                error_kind="provider_error",
+                error_message="provider failed",
+                result={"partial": True},
+            ),
+            store.request_cancellation(owner_id=_OWNER, run_id=creation.run.run_id),
+        )
+
+        assert repeated.outcome in {"pending", "already_terminal"}
+        assert outcome.committed is True
+        assert outcome.status == "cancelled"
+        record = await store.get_run(owner_id=_OWNER, run_id=creation.run.run_id)
+        assert record is not None
+        assert record.status == "cancelled"
+        assert record.result is None
+        assert record.error_kind is None
+        assert record.error_message is None
+        events = await store.read_event_page(owner_id=_OWNER, run_id=creation.run.run_id)
+        assert [(event.event_type, event.payload) for event in events] == [
+            ("done", {"status": "cancelled"})
+        ]
 
     async def test_fast_terminal_yields_when_cancellation_commits_first(self, store, pool) -> None:
         creation = await store.create_run(owner_id=_OWNER, request=_request())
@@ -613,6 +1089,32 @@ class TestClaiming:
         assert len(claimed) == 2
         assert len({claim.run.run_id for claim in claimed}) == 2
 
+    async def test_deployment_wide_query_claims_stop_at_the_atomic_active_ceiling(
+        self, store
+    ) -> None:
+        for index in range(17):
+            await store.create_run(owner_id=_OWNER, request=_request(f"run-{index}"))
+
+        attempts = await asyncio.gather(
+            *(store.claim_next(worker_id=f"host-{index}") for index in range(24))
+        )
+        claimed = [claim for claim in attempts if claim is not None]
+        assert len(claimed) == 16
+        assert len({claim.run.run_id for claim in claimed}) == 16
+        assert await store.claim_next(worker_id="over-cap") is None
+
+        released = claimed[0]
+        await store.finish_success(
+            owner_id=_OWNER,
+            run_id=released.run.run_id,
+            worker_id=str(released.run.lease_owner),
+            fencing_epoch=released.run.fencing_epoch,
+            result={"answer": "done"},
+        )
+        final = await store.claim_next(worker_id="after-release")
+        assert final is not None
+        assert final.run.run_id not in {claim.run.run_id for claim in claimed}
+
     async def test_returns_none_when_no_row_is_eligible(self, store) -> None:
         assert await store.claim_next(worker_id=_WORKER) is None
 
@@ -630,6 +1132,35 @@ class TestClaiming:
         assert reclaim.run.fencing_epoch == 2
         assert reclaim.run.reclaims_without_progress == 1
         assert reclaim.run.lease_owner == "worker-2"
+
+    async def test_reclaim_abandonment_persists_the_exact_public_error(self, store, pool) -> None:
+        creation = await store.create_run(owner_id=_OWNER, request=_request())
+        await _claimed(store)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE dlightrag_runs "
+                "SET reclaims_without_progress = $2, lease_expires_at = NOW() - INTERVAL '1 second' "
+                "WHERE run_id = $1",
+                uuid.UUID(creation.run.run_id),
+                MAX_RECLAIMS_WITHOUT_PROGRESS - 1,
+            )
+
+        assert await store.claim_next(worker_id="abandoning-worker") is None
+        record = await store.get_run(owner_id=_OWNER, run_id=creation.run.run_id)
+        assert record is not None
+        assert record.status == "failed"
+        assert record.error_kind == RUN_ABANDONED_ERROR_KIND
+        assert record.error_message == _ABANDONED_ERROR_MESSAGE
+        events = await store.read_event_page(owner_id=_OWNER, run_id=creation.run.run_id)
+        assert [(event.event_type, event.payload) for event in events] == [
+            (
+                "error",
+                {
+                    "kind": RUN_ABANDONED_ERROR_KIND,
+                    "message": _ABANDONED_ERROR_MESSAGE,
+                },
+            )
+        ]
 
     async def test_skips_cancel_pending_rows(self, store) -> None:
         creation = await store.create_run(owner_id=_OWNER, request=_request())
@@ -701,8 +1232,16 @@ class TestLeaseFencing:
 
         assert (await store.heartbeat(**stale_args)).renewed is False
         assert await store.record_phase(**stale_args, phase="searching") is None
-        assert await store.append_token_batch(**stale_args, text="stale") is None
-        assert await store.append_reset(**stale_args) is None
+        assert (
+            await store.append_event(
+                **stale_args, phase=None, event_type="token", payload={"text": "stale"}
+            )
+            is None
+        )
+        assert (
+            await store.append_event(**stale_args, phase=None, event_type="reset", payload={})
+            is None
+        )
         assert (
             await store.finish_success(**stale_args, result={"answer": "stale"})
         ).committed is False
@@ -796,6 +1335,26 @@ class TestEvents:
             (1, "progress", {"phase": "researching"})
         ]
 
+    async def test_executor_owned_event_labels_round_trip_without_runtime_registration(
+        self, store
+    ) -> None:
+        creation = await store.create_run(owner_id=_OWNER, request=_request())
+        claim = await _claimed(store)
+        sequence = await store.append_event(
+            owner_id=_OWNER,
+            run_id=creation.run.run_id,
+            worker_id=_WORKER,
+            fencing_epoch=claim.run.fencing_epoch,
+            phase=None,
+            event_type="thinking",
+            payload={"step": 1},
+        )
+        assert sequence == 1
+        events = await store.read_event_page(owner_id=_OWNER, run_id=creation.run.run_id)
+        assert [(event.event_type, event.payload) for event in events] == [
+            ("thinking", {"step": 1})
+        ]
+
     async def test_sequences_are_gap_free_under_concurrent_appends(self, store) -> None:
         creation = await store.create_run(owner_id=_OWNER, request=_request())
         claim = await _claimed(store)
@@ -806,7 +1365,15 @@ class TestEvents:
             fencing_epoch=claim.run.fencing_epoch,
         )
         sequences = await asyncio.gather(
-            *(store.append_token_batch(**args, text=f"chunk-{index}") for index in range(24))
+            *(
+                store.append_event(
+                    **args,
+                    phase=None,
+                    event_type="token",
+                    payload={"text": f"chunk-{index}"},
+                )
+                for index in range(24)
+            )
         )
         assert sorted(sequence for sequence in sequences if sequence is not None) == list(
             range(1, 25)
@@ -824,9 +1391,9 @@ class TestEvents:
             fencing_epoch=claim.run.fencing_epoch,
         )
         await store.record_phase(**args, phase="planning")
-        await store.append_token_batch(**args, text="one")
-        await store.append_reset(**args)
-        await store.append_token_batch(**args, text="two")
+        await store.append_event(**args, phase=None, event_type="token", payload={"text": "one"})
+        await store.append_event(**args, phase=None, event_type="reset", payload={})
+        await store.append_event(**args, phase=None, event_type="token", payload={"text": "two"})
         events = await store.read_event_page(
             owner_id=_OWNER, run_id=creation.run.run_id, after_sequence=2
         )
@@ -840,16 +1407,18 @@ class TestEvents:
         claim = await _claimed(store)
         async with pool.acquire() as conn:
             await conn.execute(
-                "UPDATE dlightrag_answer_runs "
+                "UPDATE dlightrag_runs "
                 "SET lease_expires_at = NOW() + INTERVAL '1 second' WHERE run_id = $1",
                 uuid.UUID(creation.run.run_id),
             )
-        await store.append_token_batch(
+        await store.append_event(
             owner_id=_OWNER,
             run_id=creation.run.run_id,
             worker_id=_WORKER,
             fencing_epoch=claim.run.fencing_epoch,
-            text="hi",
+            phase=None,
+            event_type="token",
+            payload={"text": "hi"},
         )
         record = await store.get_run(owner_id=_OWNER, run_id=creation.run.run_id)
         assert record is not None
@@ -909,6 +1478,10 @@ class TestTerminalTransitions:
         assert record.status == "failed"
         assert record.error_kind == "provider_error"
         assert record.error_message == "boom"
+        events = await store.read_event_page(owner_id=_OWNER, run_id=creation.run.run_id)
+        assert [(event.event_type, event.payload) for event in events] == [
+            ("error", {"kind": "provider_error", "message": "boom"})
+        ]
 
     async def test_worker_observed_cancellation_commits_cancelled(self, store, pool) -> None:
         creation = await store.create_run(owner_id=_OWNER, request=_request())
@@ -923,6 +1496,8 @@ class TestTerminalTransitions:
         assert outcome.committed is True
         assert outcome.status == "cancelled"
         assert await _event_types(pool, creation.run.run_id) == ["done"]
+        events = await store.read_event_page(owner_id=_OWNER, run_id=creation.run.run_id)
+        assert events[0].payload == {"status": "cancelled"}
 
     async def test_a_fenced_terminal_transition_clears_the_prepared_input(
         self, store, pool
@@ -984,7 +1559,7 @@ class TestShutdownAndRecovery:
         await _claimed(store)
         async with pool.acquire() as conn:
             await conn.execute(
-                "UPDATE dlightrag_answer_runs "
+                "UPDATE dlightrag_runs "
                 "SET reclaims_without_progress = $2, lease_expires_at = NOW() - INTERVAL '1 second' "
                 "WHERE run_id = $1",
                 uuid.UUID(abandoned.run.run_id),
@@ -1006,11 +1581,12 @@ class TestShutdownAndRecovery:
             requirement async for requirement in store.iter_active_run_requirements(page_size=1)
         ]
 
-        assert {row["context_policy_revision"] for row in requirements} == {
+        assert {row["prepared_input"]["context_policy_revision"] for row in requirements} == {
             "queued",
             "recoverable",
         }
-        assert all(row["pinned_models"] == [] for row in requirements)
+        assert all(row["run_kind"] == "answer" for row in requirements)
+        assert all(row["prepared_input"]["pinned_models"] == [] for row in requirements)
 
     async def test_cancel_pending_rescan_keyset_pages_only_live_worker_leases(
         self,
@@ -1065,6 +1641,8 @@ class TestShutdownAndRecovery:
         assert record is not None
         assert record.status == "cancelled"
         assert await _event_types(pool, creation.run.run_id) == ["done"]
+        events = await store.read_event_page(owner_id=_OWNER, run_id=creation.run.run_id)
+        assert events[0].payload == {"status": "cancelled"}
 
     async def test_sweeper_finalizes_an_unleased_cancellation(self, store, pool) -> None:
         creation = await store.create_run(owner_id=_OWNER, request=_request())
@@ -1077,6 +1655,40 @@ class TestShutdownAndRecovery:
         assert record is not None
         assert record.status == "cancelled"
         assert await _event_types(pool, creation.run.run_id) == ["done"]
+        events = await store.read_event_page(owner_id=_OWNER, run_id=creation.run.run_id)
+        assert events[0].payload == {"status": "cancelled"}
+
+    async def test_sweeper_abandonment_persists_the_exact_public_error(self, store, pool) -> None:
+        creation = await store.create_run(owner_id=_OWNER, request=_request())
+        await _claimed(store)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE dlightrag_runs "
+                "SET reclaims_without_progress = $2, lease_expires_at = NOW() - INTERVAL '1 second' "
+                "WHERE run_id = $1",
+                uuid.UUID(creation.run.run_id),
+                MAX_RECLAIMS_WITHOUT_PROGRESS,
+            )
+
+        sweep = await store.sweep_once()
+
+        assert sweep.cancelled == 0
+        assert sweep.abandoned == 1
+        record = await store.get_run(owner_id=_OWNER, run_id=creation.run.run_id)
+        assert record is not None
+        assert record.status == "failed"
+        assert record.error_kind == RUN_ABANDONED_ERROR_KIND
+        assert record.error_message == _ABANDONED_ERROR_MESSAGE
+        events = await store.read_event_page(owner_id=_OWNER, run_id=creation.run.run_id)
+        assert [(event.event_type, event.payload) for event in events] == [
+            (
+                "error",
+                {
+                    "kind": RUN_ABANDONED_ERROR_KIND,
+                    "message": _ABANDONED_ERROR_MESSAGE,
+                },
+            )
+        ]
 
     async def test_sweeper_leaves_live_leases_alone(self, store) -> None:
         creation = await store.create_run(owner_id=_OWNER, request=_request())
@@ -1123,7 +1735,7 @@ class TestArtifacts:
         assert references[0].digest == artifact.digest
         assert references[0].reference_kind == "current_attachment"
         assert references[0].transform_locator == {"page": 2}
-        assert await store.load_artifact(owner_id=_OWNER, digest=artifact.digest) == (
+        assert await _blob_store(store).read(owner_id=_OWNER, digest=artifact.digest) == (
             artifact.content
         )
 
@@ -1139,7 +1751,7 @@ class TestArtifacts:
                 references=[_reference(artifact.digest, resource_id=f"res-{index}")],
             )
             assert (
-                await store.load_artifact(owner_id=_OWNER, digest=artifact.digest)
+                await _blob_store(store).read(owner_id=_OWNER, digest=artifact.digest)
                 == contents[index]
             )
 
@@ -1174,7 +1786,7 @@ class TestArtifacts:
         )
 
         assert len({creation.run.run_id for creation in creations}) == 2
-        assert await store.load_artifact(owner_id=_OWNER, digest=artifact.digest) == content
+        assert await _blob_store(store).read(owner_id=_OWNER, digest=artifact.digest) == content
         async with pool.acquire() as conn:
             assert (
                 await conn.fetchval(
@@ -1223,8 +1835,10 @@ class TestArtifacts:
         )
 
         assert len({creation.run.run_id for creation in creations}) == 2
-        assert await store.load_artifact(owner_id=_OWNER, digest=first.digest) == first.content
-        assert await store.load_artifact(owner_id=_OWNER, digest=second.digest) == second.content
+        assert await _blob_store(store).read(owner_id=_OWNER, digest=first.digest) == first.content
+        assert (
+            await _blob_store(store).read(owner_id=_OWNER, digest=second.digest) == second.content
+        )
         left_references = await store.list_run_artifacts(
             owner_id=_OWNER, run_id=creations[0].run.run_id
         )
@@ -1354,7 +1968,8 @@ class TestArtifacts:
                     raise task_error
 
         assert (
-            await store.load_artifact(owner_id=_OWNER, digest=artifact.digest) == artifact.content
+            await _blob_store(store).read(owner_id=_OWNER, digest=artifact.digest)
+            == artifact.content
         )
 
     async def test_blob_size_collision_rolls_back_acceptance_and_publication(
@@ -1439,7 +2054,7 @@ class TestArtifacts:
                 artifact.digest,
             )
         assert sorted(str(row["owner_id"]) for row in owners) == sorted([_OWNER, _OTHER_OWNER])
-        assert await store.load_artifact(owner_id="ghost", digest=artifact.digest) is None
+        assert await _blob_store(store).read(owner_id="ghost", digest=artifact.digest) is None
         assert first.run.run_id is not None
 
     async def test_deleting_one_run_keeps_bytes_another_run_still_links(self, store) -> None:
@@ -1459,12 +2074,22 @@ class TestArtifacts:
         deletion = await store.delete_runs(owner_id=_OWNER, run_ids=[first.run.run_id])
         assert deletion.runs == 1
         assert deletion.artifacts == 0
-        assert await store.load_artifact(owner_id=_OWNER, digest=artifact.digest) is not None
+        assert await _blob_store(store).read(owner_id=_OWNER, digest=artifact.digest) is not None
 
         final = await store.delete_runs(owner_id=_OWNER, run_ids=[second.run.run_id])
         assert final.runs == 1
         assert final.artifacts == 1
-        assert await store.load_artifact(owner_id=_OWNER, digest=artifact.digest) is None
+        assert await _blob_store(store).read(owner_id=_OWNER, digest=artifact.digest) is None
+
+    async def test_deleting_a_run_collects_its_fetched_resource_blob(self, store, pool) -> None:
+        creation = await store.create_run(owner_id=_OWNER, request=_request())
+        digest = await _write_fetched_blob(pool, creation.run.run_id, b"fetched delete bytes")
+
+        deletion = await store.delete_runs(owner_id=_OWNER, run_ids=[creation.run.run_id])
+
+        assert deletion.runs == 1
+        assert deletion.artifacts == 1
+        assert await _blob_store(store).read(owner_id=_OWNER, digest=digest) is None
 
     async def test_deletion_is_owner_scoped(self, store) -> None:
         creation = await store.create_run(owner_id=_OWNER, request=_request())
@@ -1558,7 +2183,7 @@ class TestArtifacts:
 
         assert deletion.runs == 1
         assert deletion.artifacts == 0
-        assert await store.load_artifact(owner_id=_OWNER, digest=artifact.digest) == (
+        assert await _blob_store(store).read(owner_id=_OWNER, digest=artifact.digest) == (
             artifact.content
         )
         references = await store.list_run_artifacts(owner_id=_OWNER, run_id=second.run.run_id)
@@ -1634,20 +2259,39 @@ class TestRetention:
         assert outcome.runs == 1
         assert outcome.artifacts == 1
         assert await store.get_run(owner_id=_OWNER, run_id=creation.run.run_id) is None
-        assert await store.load_artifact(owner_id=_OWNER, digest=artifact.digest) is None
+        assert await _blob_store(store).read(owner_id=_OWNER, digest=artifact.digest) is None
         async with pool.acquire() as conn:
             remaining = await conn.fetchval(
-                "SELECT count(*) FROM dlightrag_answer_run_events WHERE run_id = $1",
+                "SELECT count(*) FROM dlightrag_run_events WHERE run_id = $1",
                 uuid.UUID(creation.run.run_id),
             )
         assert int(remaining) == 0
+
+    async def test_prune_collects_fetched_resource_blobs(self, store, pool) -> None:
+        creation = await store.create_run(owner_id=_OWNER, request=_request())
+        digest = await _write_fetched_blob(pool, creation.run.run_id, b"fetched retention bytes")
+        claim = await _claimed(store)
+        await store.finish_success(
+            owner_id=_OWNER,
+            run_id=creation.run.run_id,
+            worker_id=_WORKER,
+            fencing_epoch=claim.run.fencing_epoch,
+            result={"answer": "old"},
+        )
+        await _backdate_finish(pool, creation.run.run_id, days=370)
+
+        outcome = await store.prune_expired_runs()
+
+        assert outcome.runs == 1
+        assert outcome.artifacts == 1
+        assert await _blob_store(store).read(owner_id=_OWNER, digest=digest) is None
 
     async def test_prune_leaves_unfinished_runs_alone(self, store, pool) -> None:
         creation = await store.create_run(owner_id=_OWNER, request=_request())
         await _claimed(store)
         async with pool.acquire() as conn:
             await conn.execute(
-                "UPDATE dlightrag_answer_runs "
+                "UPDATE dlightrag_runs "
                 "SET created_at = NOW() - INTERVAL '90 days' WHERE run_id = $1",
                 uuid.UUID(creation.run.run_id),
             )
@@ -1686,7 +2330,7 @@ async def _force_blob_delete_restrict(pool: Any, *, only_digest: str | None = No
         )
 
 
-async def _succeed_and_expire(store: PGAnswerRunStore, pool: Any, run_id: str) -> None:
+async def _succeed_and_expire(store: PGRunStore, pool: Any, run_id: str) -> None:
     claim = await _claimed(store)
     await store.finish_success(
         owner_id=_OWNER,
@@ -1714,7 +2358,7 @@ class TestBlobCleanupFailureIsolation:
         assert deletion.runs == 1
         assert deletion.artifacts == 0
         assert await store.get_run(owner_id=_OWNER, run_id=creation.run.run_id) is None
-        assert await store.load_artifact(owner_id=_OWNER, digest=artifact.digest) is not None
+        assert await _blob_store(store).read(owner_id=_OWNER, digest=artifact.digest) is not None
 
     async def test_retention_advances_past_a_contended_head_batch(self, store, pool) -> None:
         run_ids: list[str] = []
@@ -1740,7 +2384,7 @@ class TestBlobCleanupFailureIsolation:
             assert await store.get_run(owner_id=_OWNER, run_id=run_id) is None
         assert (await store.prune_expired_runs()).runs == 0
         for digest in digests:
-            assert await store.load_artifact(owner_id=_OWNER, digest=digest) is not None
+            assert await _blob_store(store).read(owner_id=_OWNER, digest=digest) is not None
 
     async def test_one_contended_digest_does_not_shield_unrelated_orphans(
         self, store, pool
@@ -1768,9 +2412,9 @@ class TestBlobCleanupFailureIsolation:
         assert outcome.artifacts == 2
         for run_id in run_ids:
             assert await store.get_run(owner_id=_OWNER, run_id=run_id) is None
-        assert await store.load_artifact(owner_id=_OWNER, digest=contended) is not None
+        assert await _blob_store(store).read(owner_id=_OWNER, digest=contended) is not None
         for digest in (digests[0], digests[2]):
-            assert await store.load_artifact(owner_id=_OWNER, digest=digest) is None
+            assert await _blob_store(store).read(owner_id=_OWNER, digest=digest) is None
 
 
 # ---------------------------------------------------------------------------
@@ -1790,7 +2434,12 @@ class TestEventPaging:
         )
         appended = 501
         for index in range(appended):
-            await store.append_token_batch(**args, text=f"chunk-{index}")
+            await store.append_event(
+                **args,
+                phase=None,
+                event_type="token",
+                payload={"text": f"chunk-{index}"},
+            )
         assert (await store.finish_success(**args, result={"answer": "end"})).committed is True
 
         pages: list[tuple[int, ...]] = []

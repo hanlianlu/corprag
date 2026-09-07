@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
-"""CLI for dlightrag — ingestion runs locally, queries go through the REST API.
+"""CLI for dlightrag — durable ingestion, retrieval, and answers over REST.
 
 Usage:
-    # Local ingestion (runs directly via WorkspaceRag, no API server needed)
+    # Durable ingestion (requires the API server)
     uv run scripts/cli.py ingest ./docs
     uv run scripts/cli.py ingest ./docs --replace
     uv run scripts/cli.py ingest ./docs --workspace project-a
@@ -47,13 +47,13 @@ from pydantic import ValidationError
 from dlightrag.adapters.http.client import (
     AnswerAttachmentUpload,
     AnswerResult,
-    AnswerRunCancelledError,
     AnswerRunClient,
-    AnswerRunFailedError,
+    RunCancelledError,
+    RunFailedError,
 )
 from dlightrag.adapters.http.client import http as sdk_http
 from dlightrag.adapters.http.client.requests import query_image_blocks_from_urls
-from dlightrag.application.corpus_admin import ingest_kwargs_from_spec, ingest_spec_from_payload
+from dlightrag.application.corpus_admin import ingest_spec_from_payload
 
 
 def _print_json(data: Any) -> None:
@@ -189,60 +189,27 @@ def _render_answer_for_terminal(data: AnswerResult) -> str:
 # ═══════════════════════════════════════════════════════════════════
 
 
-async def _run_ingest(args: argparse.Namespace) -> None:
-    from dlightrag.adapters.observability import LangfuseTelemetry
-    from dlightrag.application.config import get_config
-    from dlightrag.application.settings import rag_settings
-    from dlightrag.engine.ai.scheduler import ModelScheduler
-    from dlightrag.engine.rag.workspace.workspace_rag import WorkspaceRag
-    from dlightrag.engine.rag.workspace.workspaces import normalize_workspace
-
-    source = args.source_type
-    kwargs = ingest_kwargs_from_spec(ingest_spec_from_payload(args))
-
-    if source == "local":
-        print(f"Ingesting: {args.path} (replace={args.replace})")
-    elif source == "azure_blob":
-        target = args.blob_path or (f"prefix={args.prefix}" if args.prefix else "entire container")
-        print(
-            f"Ingesting Azure Blob: container={args.container_name}, {target} (replace={args.replace})"
-        )
-    elif source == "s3":
-        target = args.s3_key or (f"prefix={args.prefix}" if args.prefix else "entire bucket")
-        print(f"Ingesting S3: bucket={args.bucket}, {target} (replace={args.replace})")
-
-    config = get_config()
-    workspace = normalize_workspace(args.workspace or config.deployment.workspace)
+async def _run_ingest(args: argparse.Namespace) -> dict[str, Any]:
+    spec = ingest_spec_from_payload(args)
+    payload = spec.model_dump(mode="json", exclude_none=True)
     if args.workspace:
-        config = config.model_copy(
-            update={"deployment": config.deployment.model_copy(update={"workspace": workspace})}
-        )
-    print(f"Workspace: {workspace}\n")
-
-    from dlightrag.adapters.postgres.corpus.corpus import build_pg_corpus_backend
-
-    service = await WorkspaceRag.acreate(
-        workspace_id=workspace,
-        settings=rag_settings(config),
-        backend=build_pg_corpus_backend(config),
-        scheduler=ModelScheduler(max_concurrency=config.models.max_concurrency),
-        telemetry=LangfuseTelemetry(),
-    )
-    try:
-        result = await service.aingest(source_type=source, **kwargs)
-        _print_json(result)
-    except KeyboardInterrupt:
-        print("\nIngestion cancelled.")
-    except Exception as e:
-        print(f"Ingestion failed: {e}", file=sys.stderr)
-        sys.exit(1)
-    finally:
-        await service.aclose()
+        payload["workspace"] = args.workspace
+    async with _answer_client() as client:
+        return await client.ingest(payload, replace=bool(spec.replace))
 
 
 def cmd_ingest(args: argparse.Namespace) -> None:
     _validate_ingest_args(args)
-    asyncio.run(_run_ingest(args))
+    action = "replace" if args.replace else "ingest"
+    print(f"API: {sdk_http.api_url()}/runs/corpus/{action}\n")
+    try:
+        _print_json(asyncio.run(_run_ingest(args)))
+    except RunCancelledError:
+        _die("Corpus Mutation Run was cancelled")
+    except RunFailedError as exc:
+        _die(f"Corpus Mutation Run failed ({exc.error_kind}): {exc.public_message}")
+    except httpx.HTTPStatusError as exc:
+        _die(f"HTTP {exc.response.status_code}: {exc.response.text}")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -250,23 +217,31 @@ def cmd_ingest(args: argparse.Namespace) -> None:
 # ═══════════════════════════════════════════════════════════════════
 
 
-def cmd_query(args: argparse.Namespace) -> None:
-    url = f"{sdk_http.api_url()}/retrieve"
-    payload = _apply_query_options({"query": args.query}, args)
+async def _run_query(args: argparse.Namespace) -> dict[str, Any]:
+    async with _answer_client() as client:
+        result = await client.retrieve(_apply_query_options({"query": args.query}, args))
+    return {
+        "contexts": dict(result.contexts),
+        "sources": [dict(source) for source in result.sources],
+        "trace": dict(result.trace),
+        "image_descriptions": list(result.image_descriptions),
+    }
 
+
+def cmd_query(args: argparse.Namespace) -> None:
     print(f"Query: {args.query}")
     if args.workspaces:
         print(f"Workspaces: {', '.join(args.workspaces)}")
-    print(f"API: {url}\n")
+    print(f"API: {sdk_http.api_url()}/retrieve\n")
 
-    resp = httpx.post(
-        url,
-        json=payload,
-        headers=sdk_http.json_headers(),
-        timeout=sdk_http.client_timeout(),
-    )
-    resp.raise_for_status()
-    _print_json(resp.json())
+    try:
+        _print_json(asyncio.run(_run_query(args)))
+    except RunCancelledError:
+        _die("retrieval run was cancelled")
+    except RunFailedError as exc:
+        _die(f"retrieval run failed ({exc.error_kind}): {exc.public_message}")
+    except httpx.HTTPStatusError as exc:
+        _die(f"HTTP {exc.response.status_code}: {exc.response.text}")
 
 
 def _attachment_uploads(paths: list[str] | None) -> list[AnswerAttachmentUpload]:
@@ -303,10 +278,10 @@ def cmd_answer(args: argparse.Namespace) -> None:
 
     try:
         data = asyncio.run(_run_answer(args))
-    except AnswerRunCancelledError:
+    except RunCancelledError:
         _die("answer run was cancelled")
         return
-    except AnswerRunFailedError as exc:
+    except RunFailedError as exc:
         _die(f"answer run failed ({exc.error_kind}): {exc.public_message}")
         return
     except httpx.HTTPStatusError as exc:
@@ -350,10 +325,10 @@ async def _run_chat(args: argparse.Namespace) -> None:
             except httpx.ConnectError:
                 print(f"[error] Connection failed: {sdk_http.api_url()}\n")
                 continue
-            except AnswerRunFailedError as exc:
+            except RunFailedError as exc:
                 print(f"[error] answer run failed ({exc.error_kind}): {exc.public_message}\n")
                 continue
-            except AnswerRunCancelledError:
+            except RunCancelledError:
                 print("[error] answer run was cancelled\n")
                 continue
 
@@ -439,7 +414,7 @@ def _add_answer_options(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="dlightrag-cli",
-        description="dlightrag CLI — ingestion runs locally, queries go through the REST API",
+        description="dlightrag CLI — durable ingestion, retrieval, and answers over REST",
         suggest_on_error=True,
     )
     sub = parser.add_subparsers(dest="command", required=True)

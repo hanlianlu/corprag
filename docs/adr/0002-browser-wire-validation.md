@@ -33,6 +33,6 @@ A schema is one declaration serving three consumers — types, runtime validatio
 
 valibot is the browser schema library (alongside lit, lit-localize, dompurify, mermaid, and xstate). ui call sites that consumed raw wire fields change once to domain names. New endpoints must declare a schema before their client function exists — the api-layer review question becomes "where is the schema". Schemas are hand-authored, not generated; if the server later publishes a machine-readable contract, they can be derived instead of written.
 
-## Invariants this decision does not change
+## Scope
 
-REST paths, response payloads, and the SSE protocol stay as they are; the server keeps emitting snake_case and is not asked to change. The answer-submission adapter's stricter hostile-response narrowing remains in place. Streaming resume, cursor, and reconnect behavior are untouched.
+This decision does not freeze REST paths or response shapes. When the server contract changes, the owning api schema, inferred domain type, transform, and callers change together; server-owned snake_case still stops at that boundary. SSE keeps its separate whitelist interpretation and durable cursor/reconnect behavior unless a later decision replaces that boundary explicitly.

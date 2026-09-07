@@ -242,13 +242,14 @@ def _make_ctx(doc_ids: set[str] | None = None) -> DeletionContext:
 
 def _make_lightrag_for_delete() -> MagicMock:
     lr = MagicMock()
-    lr.adelete_by_doc_id = AsyncMock(return_value=None)
+    lr.adelete_by_doc_id = AsyncMock(return_value={"status": "success"})
     return lr
 
 
 def _make_metadata_index(page_count: int = 0) -> MagicMock:
     mi = MagicMock()
     mi.get = AsyncMock(return_value={"page_count": page_count})
+    mi.upsert = AsyncMock(return_value=None)
     mi.delete = AsyncMock(return_value=None)
     return mi
 
@@ -267,12 +268,13 @@ class TestCascadeDelete:
             metadata_index=mi,
         )
 
+        mi.upsert.assert_awaited_once_with("doc-1", {"_dlightrag_finalization_complete": False})
         lr.adelete_by_doc_id.assert_awaited_once_with("doc-1", delete_llm_cache=True)
         mi.delete.assert_awaited_once_with("doc-1")
         assert stats["docs_deleted"] == 1
         assert stats["errors"] == []
 
-    async def test_cascade_delete_lightrag_failure_continues_to_metadata(self) -> None:
+    async def test_cascade_delete_lightrag_failure_preserves_hidden_metadata(self) -> None:
         ctx = _make_ctx(doc_ids={"doc-2"})
         lr = _make_lightrag_for_delete()
         lr.adelete_by_doc_id = AsyncMock(side_effect=RuntimeError("connection lost"))
@@ -284,9 +286,9 @@ class TestCascadeDelete:
             metadata_index=mi,
         )
 
-        assert any("Layer 1" in e for e in stats["errors"])
+        assert any("ambiguous" in e for e in stats["errors"])
         assert stats["docs_deleted"] == 0
-        mi.delete.assert_awaited_once_with("doc-2")
+        mi.delete.assert_not_awaited()
 
     async def test_cascade_delete_empty_context(self) -> None:
         ctx = _make_ctx(doc_ids=set())

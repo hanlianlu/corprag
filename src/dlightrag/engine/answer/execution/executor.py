@@ -3,6 +3,7 @@
 
 import asyncio
 import base64
+import datetime
 import hashlib
 import hmac
 import logging
@@ -40,7 +41,6 @@ from dlightrag.application.answer_runs.mode import ModeResource, ResolvedMode, r
 from dlightrag.application.answer_runs.results import store_answer_result
 from dlightrag.application.answer_runs.routing import AnswerRoutingStore, decide_resolved_mode
 from dlightrag.application.answer_runs.sources import project_contexts_for_client
-from dlightrag.application.retrieval import RetrievalOptions
 from dlightrag.engine.agent.environment import (
     ExecutionEnvironment,
     resolve_execution_adapter,
@@ -91,6 +91,7 @@ from dlightrag.engine.agent.tools import (
     AgentTool,
 )
 from dlightrag.engine.ai.capacity import CONTEXT_POLICY, CONTEXT_POLICY_REVISION, ModelProfile
+from dlightrag.engine.ai.catalog import current_model_catalog_revision
 from dlightrag.engine.ai.fingerprints import ModelFingerprint
 from dlightrag.engine.ai.scheduler import model_call_scope
 from dlightrag.engine.ai.settings import MODEL_ROLE_NAMES, ModelRole
@@ -116,7 +117,6 @@ from dlightrag.engine.answer.publication import (
 from dlightrag.engine.answer.research.runtime import (
     AnswerRuntimeControls,
     FetchedResourceBuffer,
-    IncompatibleActiveRunError,
     ResearchRuntimeEffects,
     _answer_runtime_event_sink,
     _async_store_method,
@@ -153,23 +153,32 @@ from dlightrag.engine.answer.workspace import (
     WorkspaceRecoveryFailed,
     bind_run_workspace,
 )
+from dlightrag.engine.dependencies import (
+    DependencyComponent,
+    classify_transient_dependency,
+    dependency_component_from_checkpoint,
+    next_dependency_retry,
+)
 from dlightrag.engine.public_http import fetch_public_http
 from dlightrag.engine.rag.corpus.sources.source_contract import safe_source_filename
 from dlightrag.engine.rag.retrieval import (
     MetadataFilter,
     RetrievalContexts,
+    RetrievalOptions,
     RetrievalResult,
 )
 from dlightrag.engine.rag.workspace.lifecycle import defer_cancellation
 from dlightrag.engine.rag.workspace.pool import WorkspacePool
 from dlightrag.engine.runtime import (
     AlreadyCommittedTerminal,
-    CoordinatorOwnedSuccess,
+    Deferred,
+    IncompatibleActiveRunError,
     LeaseLostError,
-    RunCancelledError,
+    RunCancellationObserved,
     RunExecutionError,
     RunExecutionOutcome,
     RunSession,
+    Succeeded,
 )
 from dlightrag.engine.runtime.records import (
     PendingPublication,
@@ -183,6 +192,10 @@ from dlightrag.engine.runtime.settlements import (
 
 logger = logging.getLogger(__name__)
 _FAST_COMPACTION_ATTEMPT_LIMIT = 3
+_DEPENDENCY_DEFER_BASE_SECONDS = 5
+_DEPENDENCY_DEFER_MAX_SECONDS = 60
+
+type DependencyStateCallback = Callable[[DependencyComponent], None]
 
 
 def _scoped_secret(secret: bytes | None, scope: str | None) -> bytes | None:
@@ -191,10 +204,10 @@ def _scoped_secret(secret: bytes | None, scope: str | None) -> bytes | None:
     return hmac.new(secret, scope.encode("utf-8"), hashlib.sha256).digest()
 
 
-class ArtifactReader(Protocol):
-    """Stream one owner-scoped blob by digest (executor store surface)."""
+class RunBlobReader(Protocol):
+    """Stream one owner-scoped opaque Run blob by digest."""
 
-    def stream_artifact(
+    def stream(
         self,
         *,
         owner_id: str,
@@ -202,6 +215,11 @@ class ArtifactReader(Protocol):
         offset: int = 0,
         length: int | None = None,
     ) -> AsyncIterator[bytes]: ...
+
+
+class ArtifactReader(Protocol):
+    """Read Answer-owned artifact metadata without owning blob bytes."""
+
     async def list_run_artifacts(self, *, owner_id: str, run_id: str) -> tuple[Any, ...]: ...
     async def list_artifact_attachments(
         self, *, owner_id: str, run_id: str
@@ -675,6 +693,7 @@ class AnswerExecutor:
         self,
         *,
         store: AnswerExecutionStore,
+        blob_store: RunBlobReader,
         pool: WorkspacePool,
         warm: WorkspaceWarmer,
         retrieve: RawRetrieval,
@@ -693,8 +712,12 @@ class AnswerExecutor:
         memory_capability_current: Callable[..., Awaitable[bool]] | None = None,
         external_tools: tuple[AgentTool, ...] = (),
         skills_bundle_factory: SkillsBundleFactory | None = None,
+        now: Callable[[], datetime.datetime] | None = None,
+        on_dependency_unavailable: DependencyStateCallback | None = None,
+        on_dependency_recovered: DependencyStateCallback | None = None,
     ) -> None:
         self._store = store
+        self._blob_store = blob_store
         self._pool = pool
         self._warm = warm
         self._retrieve_result = retrieve
@@ -714,6 +737,9 @@ class AnswerExecutor:
         self._memory_capability_current = memory_capability_current
         self._external_tools = external_tools
         self._skills_bundle_factory = skills_bundle_factory
+        self._now = now or (lambda: datetime.datetime.now(datetime.UTC))
+        self._on_dependency_unavailable = on_dependency_unavailable
+        self._on_dependency_recovered = on_dependency_recovered
         if execution_environment not in {"disabled", "trust", "sandbox"}:
             raise ValueError(f"unknown agent execution mode: {execution_environment}")
         self._execution_adapter = resolve_execution_adapter(
@@ -781,16 +807,38 @@ class AnswerExecutor:
     async def execute(self, session: RunSession) -> RunExecutionOutcome:
         with model_call_scope((session.owner_id, session.run_id)):
             try:
-                return await self._execute(session)
+                outcome = await self._execute(session)
             except (
                 asyncio.CancelledError,
-                RunCancelledError,
+                RunCancellationObserved,
                 LeaseLostError,
                 RunExecutionError,
             ):
                 raise
             except Exception as exc:
-                logger.warning("Answer run %s execution failed", session.run_id, exc_info=True)
+                component = classify_transient_dependency(exc, component_hint="providers")
+                if component is not None:
+                    await session.check_cancelled()
+                    # Clear any durable optimistic draft before releasing the
+                    # Query permit. The same Run and Agent Session resume from
+                    # their fenced durable state after the bounded delay.
+                    await session.reset_output()
+                    checkpoint, delay = next_dependency_retry(
+                        session.checkpoint,
+                        component,
+                        base_seconds=_DEPENDENCY_DEFER_BASE_SECONDS,
+                        max_seconds=_DEPENDENCY_DEFER_MAX_SECONDS,
+                    )
+                    self._notify_dependency(self._on_dependency_unavailable, component)
+                    return Deferred(
+                        checkpoint=checkpoint,
+                        next_attempt_at=self._now() + datetime.timedelta(seconds=delay),
+                    )
+                logger.warning(
+                    "Answer run %s execution failed",
+                    session.run_id,
+                    extra={"error_type": type(exc).__name__},
+                )
                 message = (
                     exc.public_message
                     if isinstance(exc, AnswerInputError | InvalidToolConfigurationError)
@@ -798,6 +846,18 @@ class AnswerExecutor:
                     else "Answer run failed."
                 )
                 raise RunExecutionError(classify_answer_error(exc), message) from exc
+            recovered = dependency_component_from_checkpoint(session.checkpoint)
+            if recovered is not None:
+                self._notify_dependency(self._on_dependency_recovered, recovered)
+            return outcome
+
+    @staticmethod
+    def _notify_dependency(
+        callback: DependencyStateCallback | None,
+        component: DependencyComponent,
+    ) -> None:
+        if callback is not None:
+            callback(component)
 
     async def _ensure_resolved_mode(
         self,
@@ -1009,6 +1069,13 @@ class AnswerExecutor:
         agent_session_id = SessionId(request.agent_session_id)
         agent_lane_id = LaneId(request.agent_lane_id)
         repository = session.execution.session_repository
+        progress_store = session.execution.progress_store
+        workspace_store = session.execution.workspace_store
+        if repository is None or progress_store is None:
+            raise RunExecutionError(
+                "run_execution_failed",
+                "Answer execution state is unavailable.",
+            )
         loaded_snapshot = await repository.load(agent_session_id)
         canonical_snapshot = await _reserve_agent_session_boundary(
             repository,
@@ -1144,7 +1211,7 @@ class AnswerExecutor:
                             run_id=session.run_id,
                             fencing_epoch=session.execution.fencing_epoch,
                             recorded_epoch=session.workspace_epoch,
-                            store=session.execution.workspace_store,
+                            store=workspace_store,
                             execution_adapter=self._execution_adapter,
                         )
                     except WorkspaceRecoveryFailed as exc:
@@ -1360,7 +1427,7 @@ class AnswerExecutor:
             else:
                 fast_boundaries = FastRunBoundaries(
                     session=session,
-                    progress=session.execution.progress_store,
+                    progress=progress_store,
                     run_id=session.run_id,
                     initial_progress_version=session.durable_progress_version,
                     plan={
@@ -1675,7 +1742,7 @@ class AnswerExecutor:
                         result_digest=canonical_json(stored),
                     )
                     return AlreadyCommittedTerminal(terminal)
-                return CoordinatorOwnedSuccess(stored)
+                return Succeeded(stored)
         except BaseException:
             if fast_session_host is not None and fast_reservation_active:
                 try:
@@ -1864,7 +1931,7 @@ class AnswerExecutor:
             run_id=run_id,
         ):
             pieces: list[bytes] = []
-            async for piece in self._store.stream_artifact(
+            async for piece in self._blob_store.stream(
                 owner_id=owner_id,
                 digest=resource.digest,
             ):
@@ -1931,7 +1998,7 @@ class AnswerExecutor:
 
         async def load(digest: str) -> bytes:
             pieces: list[bytes] = []
-            async for piece in self._store.stream_artifact(owner_id=owner_id, digest=digest):
+            async for piece in self._blob_store.stream(owner_id=owner_id, digest=digest):
                 pieces.append(piece)
             if not pieces:
                 raise RunExecutionError(
@@ -2015,6 +2082,8 @@ class AnswerExecutor:
             )
         if request.context_policy_revision != CONTEXT_POLICY_REVISION:
             raise IncompatibleActiveRunError("answer run uses another context policy revision")
+        if request.model_catalog_revision != current_model_catalog_revision():
+            raise IncompatibleActiveRunError("answer run uses another model catalog revision")
         if any(
             pinned[role].fingerprint != self._model_fingerprint_for_role(role)
             for role in MODEL_ROLE_NAMES
@@ -2350,7 +2419,6 @@ __all__ = [
     "AnswerExecutorSettings",
     "AnswerResourceResolver",
     "AnswerResourceSettings",
-    "IncompatibleActiveRunError",
     "OrchestratorRun",
     "ResolvedAnswerResources",
     "answer_trace_output",

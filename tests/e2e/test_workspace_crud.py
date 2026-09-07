@@ -1,5 +1,5 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
-"""E2E tests for workspace CRUD: create, open, delete workspaces."""
+"""E2E tests for workspace creation, selection, and identity-preserving reset."""
 
 import pytest
 from playwright.sync_api import expect
@@ -181,40 +181,19 @@ def test_workspace_selector_auto_all_keeps_last_explicit_primary(page):
 
 
 @pytest.mark.e2e
-def test_workspace_create_delete_server_round_trip(page):
-    """Create and delete through the real Web routes, with deterministic cleanup."""
-    name = "E2E Round Trip"
-    created = False
+def test_workspace_corpus_reset_server_round_trip(page):
+    """Reset corpus through the real Web route without deleting Workspace identity."""
     page.goto("/web/")
     page.wait_for_selector("#workspace-selector", timeout=10000)
 
-    try:
-        page.locator("#workspace-selector").click()
-        workspace_popover = page.get_by_role("dialog", name="Workspaces")
-        workspace_popover.get_by_label("New workspace name").fill(name)
-        with page.expect_response("**/web/api/workspaces/create") as create_response:
-            workspace_popover.get_by_label("Create workspace").click()
-        assert create_response.value.ok
-        created = True
-        expect(page.locator("#workspace-label")).to_have_text(name)
+    page.locator("#workspace-selector").click()
+    page.get_by_label("Reset Corpus Research").click()
+    dialog = page.get_by_role("dialog", name="Reset Corpus")
+    dialog.get_by_label("Type Research to confirm").fill("Research")
+    with page.expect_response("**/web/api/workspaces/reset") as reset_response:
+        dialog.get_by_role("button", name="Reset Corpus", exact=True).click()
+    assert reset_response.value.ok
 
-        page.locator("#workspace-selector").click()
-        page.get_by_label(f"Delete workspace {name}").click()
-        dialog = page.get_by_role("dialog", name="Delete workspace")
-        dialog.get_by_label(f"Type {name} to confirm").fill(name)
-        with page.expect_response("**/web/api/workspaces/delete") as delete_response:
-            dialog.get_by_role("button", name="Delete", exact=True).click()
-        assert delete_response.value.ok
-        created = False
-
-        expect(dialog).to_be_hidden()
-        expect(page.locator("#workspace-label")).to_have_text("Default")
-        page.locator("#workspace-selector").click()
-        expect(page.get_by_label(f"Delete workspace {name}")).to_have_count(0)
-    finally:
-        if created:
-            cleanup = page.request.post(
-                "/web/api/workspaces/delete",
-                form={"workspace_name": name, "confirm_name": name},
-            )
-            assert cleanup.ok
+    expect(dialog).to_be_hidden()
+    page.locator("#workspace-selector").click()
+    expect(page.get_by_label("Reset Corpus Research")).to_have_count(1)

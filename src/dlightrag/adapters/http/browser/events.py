@@ -11,12 +11,12 @@ from typing import Any, Literal
 from pydantic import Field
 
 from dlightrag.adapters.http.browser.presentation import AnswerPresentation
-from dlightrag.application.answer_runs import AnswerRunPhase
 from dlightrag.application.answer_runs.client_contracts import ClientContractModel
+from dlightrag.application.runs import RunPhase
 
 
 class AnswerProgressEvent(ClientContractModel):
-    phase: AnswerRunPhase
+    phase: RunPhase
 
 
 class AnswerDoneEvent(ClientContractModel):
@@ -27,8 +27,8 @@ class AnswerDoneEvent(ClientContractModel):
 
 
 class AnswerErrorEvent(ClientContractModel):
+    kind: str
     message: str
-    error_kind: str
 
 
 __all__ = [

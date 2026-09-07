@@ -2,7 +2,7 @@
 """PostgreSQL composition adapter for one LightRAG corpus backend."""
 
 import asyncio
-import hashlib
+import importlib
 import logging
 import os
 import random
@@ -21,7 +21,6 @@ from dlightrag.adapters.postgres.core._version import (
     ensure_postgres_extensions,
     ensure_postgres_major,
 )
-from dlightrag.adapters.postgres.core.identifiers import pg_qualified_identifier
 from dlightrag.adapters.postgres.corpus._corpus_schema import CHUNK_DOCUMENT_SCOPE_INDEX
 from dlightrag.adapters.postgres.corpus.corpus_bm25 import (
     create_postgres_bm25,
@@ -31,11 +30,9 @@ from dlightrag.adapters.postgres.corpus.corpus_chunks import PGCorpusChunkStore
 from dlightrag.adapters.postgres.corpus.corpus_vectors import PGFilteredVectorSearch
 from dlightrag.adapters.postgres.corpus.doc_status_lookup import PGDocStatusLookup
 from dlightrag.adapters.postgres.corpus.file_panel import PGFilePanelStore
-from dlightrag.adapters.postgres.corpus.ingest_jobs import PGIngestJobStore
 from dlightrag.adapters.postgres.corpus.lightrag_contract import PGLightRAGContractGuard
 from dlightrag.adapters.postgres.corpus.lightrag_readonly import (
     attach_lightrag_storages_read_only,
-    verify_reader_corpus_session,
 )
 from dlightrag.adapters.postgres.corpus.partition_foundation import (
     PartitionedTableSpec,
@@ -66,22 +63,15 @@ _INIT_WAIT_SECONDS = 180.0
 _PROCESS_COUNT_ENV_VARS = ("WEB_CONCURRENCY", "UVICORN_WORKERS", "GUNICORN_WORKERS")
 _ORPHAN_TABLES = """SELECT tablename FROM pg_tables
 WHERE schemaname = 'public'
-  AND (tablename LIKE 'lightrag_%' OR tablename LIKE 'dlightrag_%')
+  AND (
+      tablename LIKE 'lightrag_%'
+      OR tablename IN ('dlightrag_doc_metadata', 'dlightrag_metadata_field_stats')
+  )
 ORDER BY tablename
 """
 _HAS_WORKSPACE_COLUMN = """SELECT 1 FROM information_schema.columns
 WHERE table_schema = 'public' AND table_name = $1 AND column_name = 'workspace'
 """
-_RESET_ARTIFACT_RELATIONS = """
-SELECT c.relname
-FROM pg_class c
-JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE n.nspname = 'public'
-  AND c.relkind IN ('r', 'p')
-  AND (c.relname LIKE 'p\\_%' ESCAPE '\\' OR c.relname LIKE 's\\_%' ESCAPE '\\')
-ORDER BY c.relname
-"""
-
 _CHUNKS_REQUIRED_COLUMNS = ("id", "workspace", "full_doc_id", "content", "file_path")
 _VECTOR_REQUIRED_COLUMNS = (
     "id",
@@ -91,6 +81,42 @@ _VECTOR_REQUIRED_COLUMNS = (
     "content_vector",
     "file_path",
 )
+_STORAGE_SELECTIONS = (
+    ("KV_STORAGE", "kv_storage"),
+    ("VECTOR_STORAGE", "vector_storage"),
+    ("GRAPH_STORAGE", "graph_storage"),
+    ("DOC_STATUS_STORAGE", "doc_status_storage"),
+)
+
+
+def verify_lightrag_storage_configuration(config: DlightragConfig) -> None:
+    """Validate all four deployment-static names through LightRAG's public contract."""
+    from lightrag.kg import verify_storage_implementation
+
+    selected = config.storage.lightrag
+    for storage_type, field_name in _STORAGE_SELECTIONS:
+        verify_storage_implementation(storage_type, str(getattr(selected, field_name)))
+
+    if selected.vector_storage != "MilvusVectorDBStorage":
+        return
+    if config.is_reader:
+        raise ValueError(
+            "service_role='reader' cannot use MilvusVectorDBStorage because LightRAG "
+            "does not expose a nonmutating external-vector reader attach lifecycle"
+        )
+    _verify_milvus_dependency()
+
+
+def _verify_milvus_dependency() -> None:
+    """Fail before LightRAG's Milvus module can attempt runtime installation."""
+    try:
+        importlib.import_module("grpc")
+        importlib.import_module("pymilvus")
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise RuntimeError(
+            "MilvusVectorDBStorage requires the optional Milvus client; "
+            "install DlightRAG with the 'milvus' extra"
+        ) from exc
 
 
 def lightrag_retrieval_table_specs(
@@ -368,67 +394,48 @@ class PGCorpusMaintenanceStore:
             await conn.close()
 
     async def clean_orphan_rows(self, workspace: str, *, dry_run: bool) -> int:
+        """Clear corpus-owned rows and maintenance counters, never Workspace identity."""
         async with self._connection() as conn:
-            rows = await conn.fetch(_ORPHAN_TABLES)
-            cleaned = 0
-            for row in rows:
-                table = str(row["tablename"])
-                if await conn.fetchrow(_HAS_WORKSPACE_COLUMN, table) is None:
-                    continue
-                quoted = await conn.fetchval("SELECT quote_ident($1)", table)
-                qualified = f"public.{quoted}"
-                count_row = await conn.fetchrow(
-                    f"SELECT COUNT(*) as count FROM {qualified} WHERE workspace = $1",  # noqa: S608
-                    workspace,
-                )
-                count = int(count_row["count"]) if count_row else 0
-                if count <= 0:
-                    continue
-                if not dry_run:
-                    await conn.execute(
-                        f"DELETE FROM {qualified} WHERE workspace = $1",  # noqa: S608
+            async with conn.transaction():
+                rows = await conn.fetch(_ORPHAN_TABLES)
+                cleaned = 0
+                for row in rows:
+                    table = str(row["tablename"])
+                    if await conn.fetchrow(_HAS_WORKSPACE_COLUMN, table) is None:
+                        continue
+                    quoted = await conn.fetchval("SELECT quote_ident($1)", table)
+                    qualified = f"public.{quoted}"
+                    count_row = await conn.fetchrow(
+                        f"SELECT COUNT(*) as count FROM {qualified} WHERE workspace = $1",  # noqa: S608
                         workspace,
                     )
-                cleaned += 1
-            return cleaned
-
-    async def delete_workspace_record(self, workspace: str) -> bool:
-        """Delete registry/control rows and deterministic partition artifacts.
-
-        A deleted workspace must never keep retrying promotion work or leave
-        dedicated/staging relations behind. The registry row, promotion jobs,
-        and artifact drops commit together or not at all. The caller must hold
-        the workspace write gate, so no promotion cutover can race this
-        transaction.
-        """
-        workspace_id = str(workspace).strip()
-        if not workspace_id:
-            raise ValueError("workspace cannot be empty")
-
-        workspace_digest = hashlib.sha256(workspace_id.encode("utf-8")).hexdigest()[:16]
-        artifact_suffix = f"_w_{workspace_digest}"
-
-        async def _operation(conn: Any) -> bool:
-            async with conn.transaction():
-                await conn.execute(
-                    "DELETE FROM dlightrag_promotion_jobs WHERE workspace = $1",
-                    workspace_id,
-                )
-                result = await conn.execute(
-                    "DELETE FROM dlightrag_workspace_meta WHERE workspace = $1",
-                    workspace_id,
-                )
-                relations = await conn.fetch(_RESET_ARTIFACT_RELATIONS)
-                for row in relations:
-                    relation = str(row["relname"])
-                    if not relation.endswith(artifact_suffix):
+                    count = int(count_row["count"]) if count_row else 0
+                    if count <= 0:
                         continue
+                    if not dry_run:
+                        await conn.execute(
+                            f"DELETE FROM {qualified} WHERE workspace = $1",  # noqa: S608
+                            workspace,
+                        )
+                    cleaned += 1
+                if not dry_run:
                     await conn.execute(
-                        f"DROP TABLE IF EXISTS {pg_qualified_identifier(relation)}"  # noqa: S608
+                        "DELETE FROM dlightrag_promotion_jobs WHERE workspace = $1",
+                        workspace,
                     )
-            return result != "DELETE 0"
-
-        return await self._workspace_registry._run_once(_operation)
+                    await conn.execute(
+                        """UPDATE dlightrag_workspace_meta
+                           SET ingested_docs_total = 0,
+                               ingested_chunks_total = 0,
+                               promotion_state = 'none',
+                               promotion_retry_count = 0,
+                               promotion_last_error = NULL,
+                               promotion_next_retry_at = NULL,
+                               updated_at = NOW()
+                           WHERE workspace = $1""",
+                        workspace,
+                    )
+                return cleaned
 
     async def list_workspace_records(self) -> tuple[dict[str, Any], ...]:
         return tuple(await self._workspace_registry.list())
@@ -479,10 +486,14 @@ class PGCorpusRuntimeBinder:
         self._config = config
 
     def create(self, *, models: CorpusRuntimeModels, settings: RagSettings) -> Any:
-        """Construct LightRAG after the factory translated backend environment."""
+        """Construct LightRAG after validating its four public storage contracts."""
+        config = self._config
+        verify_lightrag_storage_configuration(config)
+
+        # Import only after the Milvus preflight. LightRAG's Milvus module may
+        # otherwise invoke its package installer during import.
         from lightrag import LightRAG
 
-        config = self._config
         vector_kwargs: dict[str, Any] = {
             "cosine_better_than_threshold": DEFAULT_COSINE_THRESHOLD,
             **config.storage.lightrag.vector_db_kwargs,
@@ -520,7 +531,10 @@ class PGCorpusRuntimeBinder:
             await attach_lightrag_storages_read_only(lightrag, config=config)
         else:
             await lightrag.initialize_storages()
-        await guard.verify_all()
+        if config.storage.lightrag.vector_storage == "PGVectorStorage":
+            await guard.verify_all()
+        else:
+            await guard.verify_all(vector_storage=config.storage.lightrag.vector_storage)
         foundation = PGPartitionFoundation()
         if config.is_reader:
             # Readers never issue DDL: validate the complete partitioned
@@ -560,6 +574,7 @@ class PGCorpusRuntimeBinder:
                 exact_threshold=config.corpus.retrieval.metadata_filter_exact_vector_threshold,
             )
             if lightrag.chunks_vdb is not None
+            and config.storage.lightrag.vector_storage == "PGVectorStorage"
             else None
         )
         if filtered_vectors is not None and not config.is_reader:
@@ -614,7 +629,10 @@ def build_pg_corpus_backend(config: DlightragConfig) -> WorkspaceCorpusBackend:
             connection_kwargs=connection_kwargs,
             workspace=config.deployment.workspace,
             reader=config.is_reader,
-            require_halfvec=config.storage.lightrag.vector_index_type == "HNSW_HALFVEC",
+            require_halfvec=(
+                config.storage.lightrag.vector_storage == "PGVectorStorage"
+                and config.storage.lightrag.vector_index_type == "HNSW_HALFVEC"
+            ),
             required_extensions=required_extensions,
             lightrag_pool_max_size=config.storage.postgres.lightrag_pool_max_size,
             domain_pool_max_size=config.storage.postgres.pool_max_size,
@@ -622,10 +640,6 @@ def build_pg_corpus_backend(config: DlightragConfig) -> WorkspaceCorpusBackend:
         ),
         maintenance=PGCorpusMaintenanceStore(connection_kwargs),
         runtime=PGCorpusRuntimeBinder(config),
-        ingest_jobs=PGIngestJobStore(
-            promotion_doc_threshold=config.corpus.promotion.doc_threshold,
-            promotion_chunk_threshold=config.corpus.promotion.chunk_threshold,
-        ),
         promotion=_build_promotion_worker(config),
     )
 
@@ -637,7 +651,7 @@ def _build_promotion_worker(config: DlightragConfig) -> PGPromotionWorker | None
     expired leases and finishes reconciliations, but nothing enqueues new
     jobs in that configuration.
     """
-    if config.is_reader:
+    if config.is_reader or config.storage.lightrag.vector_storage != "PGVectorStorage":
         return None
     promotion = config.corpus.promotion
     return PGPromotionWorker(
@@ -650,10 +664,12 @@ def _build_promotion_worker(config: DlightragConfig) -> PGPromotionWorker | None
 
 
 class PGReadinessProbe:
-    """Project operational and reader-corpus PostgreSQL readiness."""
+    """Probe only the writable PostgreSQL Operational State authority."""
 
     def __init__(self, config: DlightragConfig) -> None:
-        self._reader = bool(config.is_reader)
+        # Keep the config parameter as the composition contract; corpus role is
+        # intentionally irrelevant to control-plane readiness.
+        self._service_role = config.deployment.service_role
 
     async def __call__(self) -> str | None:
         try:
@@ -666,13 +682,6 @@ class PGReadinessProbe:
             logger.warning("Domain PostgreSQL readiness probe failed", exc_info=True)
             return "DlightRAG domain database session is not writable"
 
-        if not self._reader:
-            return None
-        try:
-            await verify_reader_corpus_session()
-        except Exception:
-            logger.warning("Reader corpus PostgreSQL readiness probe failed", exc_info=True)
-            return "Reader corpus database session is not read-only or is unavailable"
         return None
 
 
@@ -684,4 +693,5 @@ __all__ = [
     "PGCorpusRuntimeBinder",
     "PGReadinessProbe",
     "apply_lightrag_environment",
+    "verify_lightrag_storage_configuration",
 ]

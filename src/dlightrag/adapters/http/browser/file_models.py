@@ -1,7 +1,8 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
-"""Typed browser contracts for the Files panel and ingest polling."""
+"""Typed browser contracts for Files and durable Corpus Mutation acceptance."""
 
-from typing import Literal
+import datetime
+from typing import Any
 
 from dlightrag.application.answer_runs.client_contracts import ClientContractModel
 
@@ -11,28 +12,37 @@ class WebFileItem(ClientContractModel):
     file_path: str
 
 
-class WebIngestStatus(ClientContractModel):
-    busy: bool = False
-    message: str = ""
-    progress_percent: int | None = None
-    current_batch: int | None = None
-    total_batches: int | None = None
-    documents: int | None = None
-    pending_enqueues: int = 0
-
-
 class WebFilePanelSnapshot(ClientContractModel):
     workspace: str
     files: list[WebFileItem]
-    ingest: WebIngestStatus
     next_cursor: str | None = None
 
 
-class WebUploadReceipt(ClientContractModel):
+class WebCorpusRunReceipt(ClientContractModel):
+    run_id: str
+    run_kind: str
+    lane: str
+    status: str
+    status_url: str
+    events_url: str
+    cancel_url: str
+    resume_url: str
     workspace: str
-    file_count: int
-    queued: bool
-    ingest: WebIngestStatus
+    file_count: int | None = None
+
+
+class WebCorpusRunStatus(WebCorpusRunReceipt):
+    phase: str | None = None
+    durable_progress_version: int = 0
+    cancel_requested: bool = False
+    result: dict[str, Any] | None = None
+    error_kind: str | None = None
+    error_message: str | None = None
+    repair_reason: str | None = None
+    repair_remedy: str | None = None
+    created_at: datetime.datetime | None = None
+    started_at: datetime.datetime | None = None
+    finished_at: datetime.datetime | None = None
 
 
 class WebFailedFileItem(ClientContractModel):
@@ -42,32 +52,17 @@ class WebFailedFileItem(ClientContractModel):
     updated_at: str
 
 
-type WebFailedRecoveryStatus = Literal["queued", "running", "succeeded", "partial", "failed"]
-
-
-class WebFailedRecoveryJob(ClientContractModel):
-    job_id: str
-    workspace: str
-    status: WebFailedRecoveryStatus
-    retried: int = 0
-    succeeded: int = 0
-    failed: int = 0
-
-
 class WebFailedFilesPage(ClientContractModel):
     workspace: str
     failed: list[WebFailedFileItem]
     next_cursor: str | None = None
-    active_recovery: WebFailedRecoveryJob | None = None
 
 
 __all__ = [
+    "WebCorpusRunReceipt",
+    "WebCorpusRunStatus",
     "WebFailedFileItem",
     "WebFailedFilesPage",
-    "WebFailedRecoveryJob",
-    "WebFailedRecoveryStatus",
     "WebFileItem",
     "WebFilePanelSnapshot",
-    "WebIngestStatus",
-    "WebUploadReceipt",
 ]

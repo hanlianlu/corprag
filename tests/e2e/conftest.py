@@ -57,6 +57,7 @@ from dlightrag.application.corpus_admin import (
     WorkspaceCatalogPage,
     WorkspaceCatalogPageRequest,
 )
+from dlightrag.application.runs import RunEvent, RunStatus, RunView
 from dlightrag.application.web_conversations import (
     ConversationCursor,
     ConversationCursorCodec,
@@ -83,7 +84,6 @@ from dlightrag.engine.ai.settings import (
     ModelRoleSettings,
     ModelSettings,
 )
-from dlightrag.engine.runtime import AnswerRunEvent, AnswerRunRecord
 from tests.config_helpers import mutate_config
 
 MOCK_WORKSPACES = [
@@ -145,36 +145,32 @@ def _run_record(
     run_id: str,
     request: dict[str, Any],
     *,
-    status: str,
+    status: RunStatus,
     result: dict[str, Any] | None = None,
     cancel_requested: bool = False,
-) -> AnswerRunRecord:
+) -> RunView:
     now = datetime.now(UTC)
     terminal = status in ("succeeded", "failed", "cancelled")
-    return AnswerRunRecord(
-        owner_id="e2e",
+    return RunView(
         run_id=run_id,
-        idempotency_key=None,
-        prepared_input=request,
-        status=status,  # type: ignore[arg-type]
+        run_kind="answer",
+        lane="query",
+        submitted_by="e2e",
+        access_scope_kind="owner",
+        access_scope_id="e2e",
+        status=status,
         phase=None,
-        stop_reason=None,
-        cancel_requested_at=now if cancel_requested else None,
-        lease_owner=None,
-        lease_expires_at=None,
-        fencing_epoch=0,
         durable_progress_version=0,
-        last_reclaim_progress_version=0,
-        reclaims_without_progress=0,
         next_event_sequence=1,
         events_trimmed_at=None,
+        cancel_requested=cancel_requested,
         result=result,
         error_kind=None,
         error_message=None,
         created_at=now,
-        updated_at=now,
         started_at=None,
         finished_at=now if terminal else None,
+        request=request,
     )
 
 
@@ -439,7 +435,7 @@ class E2EConversationService:
             return None
         return next((turn for turn in value["turns"] if turn.run.run_id == run_id), None)
 
-    def finish_run(self, run_id: str, *, status: str = "succeeded") -> None:
+    def finish_run(self, run_id: str, *, status: RunStatus = "succeeded") -> None:
         """Record the terminal state a worker would have committed."""
         with self._lock:
             entry = self._runs.get(run_id)
@@ -468,7 +464,7 @@ class E2EConversationService:
                     turn_number=turn.turn_number,
                     submission_id=turn.submission_id,
                     created_at=turn.created_at,
-                    run=_run_record(run_id, turn.run.prepared_input, status=status, result=result),
+                    run=_run_record(run_id, dict(turn.run.request), status=status, result=result),
                 )
 
     async def attachment(self, _user: Any, run_id: str, ordinal: int) -> Any:
@@ -481,9 +477,7 @@ class E2EConversationService:
                 return None
             content, _mime = entry["bytes"][ordinal]
         reference = next(
-            item
-            for item in _request_attachments(turn.run.prepared_input or {})
-            if item["ordinal"] == ordinal
+            item for item in _request_attachments(turn.run.request) if item["ordinal"] == ordinal
         )
         return AnswerInputArtifact(
             reference_kind="current_attachment",
@@ -564,8 +558,8 @@ def _request_attachments(request: Mapping[str, Any]) -> list[dict[str, Any]]:
     return list(request.get("attachments") or [])
 
 
-def _event(sequence: int, event_type: str, payload: dict[str, Any]) -> AnswerRunEvent:
-    return AnswerRunEvent(
+def _event(sequence: int, event_type: str, payload: dict[str, Any]) -> RunEvent:
+    return RunEvent(
         sequence=sequence,
         event_type=event_type,  # type: ignore[arg-type]
         payload=payload,
@@ -631,7 +625,7 @@ def e2e_base_url(
         del owner_id
 
         async def _iterate() -> Any:
-            log: list[AnswerRunEvent] = [
+            log: list[RunEvent] = [
                 _event(1, "progress", {"phase": "planning"}),
                 _event(2, "progress", {"phase": "generating"}),
                 *(
@@ -664,9 +658,12 @@ def e2e_base_url(
         model="test-model",
         failure_kind=None,
     )
-    application_double.answers = SimpleNamespace(
-        subscribe=MagicMock(side_effect=_events),
+    application_double.runs = SimpleNamespace(
         cancel=AsyncMock(),
+        get_global=AsyncMock(return_value=None),
+        subscribe=MagicMock(side_effect=_events),
+    )
+    application_double.answers = SimpleNamespace(
         capabilities=AsyncMock(
             return_value=AnswerCapabilities(
                 answer=answer_image_capability,
@@ -725,12 +722,36 @@ def e2e_base_url(
             }
         )
 
-    async def _reset_workspaces(*, workspace_ids: tuple[str, ...]) -> None:
-        removed = set(workspace_ids)
-        workspace_records[:] = [
-            record for record in workspace_records if record["workspace"] not in removed
-        ]
+    async def _create_reset_run(*, workspace: str, submitted_by: str) -> SimpleNamespace:
+        now = datetime.now(UTC)
+        run_id = str(uuid4())
+        return SimpleNamespace(
+            run=RunView(
+                run_id=run_id,
+                run_kind="corpus_mutation",
+                lane="corpus_mutation",
+                submitted_by=submitted_by,
+                access_scope_kind="workspace",
+                access_scope_id=workspace,
+                status="succeeded",
+                phase="completed",
+                durable_progress_version=1,
+                next_event_sequence=2,
+                events_trimmed_at=None,
+                cancel_requested=False,
+                result={"action": "reset", "document_count": 0, "documents": []},
+                error_kind=None,
+                error_message=None,
+                created_at=now,
+                started_at=now,
+                finished_at=now,
+                request={"action": "reset", "workspace": workspace},
+            )
+        )
 
+    application_double.corpus_mutations = SimpleNamespace(
+        create_reset=AsyncMock(side_effect=_create_reset_run)
+    )
     application_double.corpora.list_workspaces.side_effect = _list_workspaces
     application_double.corpora.alist_workspace_records.side_effect = _list_workspace_records
     application_double.corpora.list_workspace_records_page.side_effect = (
@@ -742,14 +763,8 @@ def e2e_base_url(
         b"e2e-workspaces"
     )
     application_double.corpora.create_workspace.side_effect = _create_workspace
-    application_double.corpora.reset.side_effect = _reset_workspaces
-    application_double.corpora.get_pipeline_status.return_value = {
-        "busy": False,
-        "pending_enqueues": 0,
-    }
     application_double.corpora.file_panel_snapshot.return_value = {
         "files": [],
-        "pipeline_status": {"busy": False, "pending_enqueues": 0},
         "next_cursor": None,
         "fetched_rows": 0,
     }

@@ -198,34 +198,33 @@ def test_answer_cli_renders_typed_evidence_images(
     assert "References (1):" in output
 
 
-async def test_ingest_workspace_override_reaches_the_backend(
+async def test_ingest_workspace_override_uses_the_durable_rest_facade(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from dlightrag.application import config as config_module
-    from dlightrag.application.config import DeploymentSettings, DlightragConfig
-    from dlightrag.engine.rag.workspace.workspace_rag import WorkspaceRag
-
     captured: dict[str, Any] = {}
 
-    class FakeWorkspaceRag:
-        async def aingest(self, **_kwargs):
-            return {"status": "ok"}
+    async def fake_ingest(self, payload, *, replace=False, idempotency_key=None):
+        captured.update(payload=payload, replace=replace, idempotency_key=idempotency_key)
+        return {"action": "ingest", "document_count": 1}
 
-        async def aclose(self) -> None:
-            return None
+    monkeypatch.setattr(_cli.AnswerRunClient, "ingest", fake_ingest)
+    monkeypatch.setattr(_cli.sdk_http, "api_url", lambda: "https://rag.example")
+    monkeypatch.setattr(_cli.sdk_http, "auth_headers", lambda: {})
+    monkeypatch.setattr(_cli.sdk_http, "client_timeout", lambda: 15)
 
-    async def fake_acreate(**kwargs):
-        captured.update(kwargs)
-        return FakeWorkspaceRag()
+    result = await _run_ingest(_parse_ingest(["./docs", "--workspace", "finance"]))
 
-    config = DlightragConfig(deployment=DeploymentSettings(workspace="default"))
-    monkeypatch.setattr(config_module, "get_config", lambda: config)
-    monkeypatch.setattr(WorkspaceRag, "acreate", staticmethod(fake_acreate))
-
-    await _run_ingest(_parse_ingest(["./docs", "--workspace", "finance"]))
-
-    assert captured["workspace_id"] == "finance"
-    assert captured["backend"].workspace_id == "finance"
+    assert result == {"action": "ingest", "document_count": 1}
+    assert captured == {
+        "payload": {
+            "source_type": "local",
+            "path": "./docs",
+            "replace": False,
+            "workspace": "finance",
+        },
+        "replace": False,
+        "idempotency_key": None,
+    }
 
 
 def test_ingest_kwargs_support_document_metadata_options() -> None:

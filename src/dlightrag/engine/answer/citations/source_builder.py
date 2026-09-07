@@ -206,4 +206,6 @@ def _chunk_image_urls(
 
 def _is_visual_chunk(chunk: dict[str, Any]) -> bool:
     sidecar = chunk.get("sidecar")
-    return isinstance(sidecar, dict) and sidecar.get("type") == "drawing"
+    return bool(chunk.get("_has_visual_asset")) or (
+        isinstance(sidecar, dict) and sidecar.get("type") == "drawing"
+    )

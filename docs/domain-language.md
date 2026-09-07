@@ -12,12 +12,38 @@ _Avoid_: Manager, service locator
 The default owner-visible terminal prose of an Answer Run, shown in the conversation surface. It directly satisfies the request unless a separate deliverable is warranted; when a Published Artifact carries the complete deliverable, the Answer is a concise orientation and handoff rather than a second copy.
 _Avoid_: Answer Run, Published Artifact, parallel report body
 
+**Run**:
+A durable submitted operation with one common identity, lifecycle, event log, cancellation path, and terminal result. `run_kind` and `lane` are data on this record rather than subclasses.
+_Avoid_: job, task, `QueryRun`, per-operation lifecycle record
+
+**RunRuntime**:
+The single operation-neutral lifecycle coordinator and store contract. It dispatches Retrieval and Answer executors on the Query Lane and Corpus Mutation executors on the Corpus Mutation Lane by `run_kind`.
+_Avoid_: Query runtime, Answer runtime, Ingest Job coordinator, generic workflow engine
+
+**Query Lane**:
+The execution and capacity lane for retrieval and answer kinds. It is not an aggregate, class, module, or separate runtime.
+_Avoid_: QueryRun, query service
+
+**Corpus Mutation Lane**:
+The bounded execution and capacity lane for Workspace-scoped ingest, replace,
+exact delete, retry, and reset Runs. Runs are FIFO within one Corpus Workspace
+and may execute concurrently across Workspaces; the lane has a separate fuse
+from the Query Lane.
+_Avoid_: Ingest Job queue, per-action coordinator, Workspace Delete
+
+**Corpus Mutation Run**:
+A Workspace-scoped Run with `run_kind=corpus_mutation` and
+`lane=corpus_mutation`. It keeps a stable `track_id`, records the upstream
+handoff before non-idempotent corpus effects, and retains its terminal row for
+at least seven days.
+_Avoid_: Ingest Job, corpus task, per-action lifecycle
+
 **Answer Run**:
-An owner-scoped durable execution accepted once and observable through status, events, cancellation, and a terminal result.
-_Avoid_: Request, job, task
+An owner-scoped Run with `run_kind=answer` and `lane=query`.
+_Avoid_: separate Answer lifecycle, request
 
 **Answer Service**:
-The product capability that owns start, status, events, steer, follow-up, cancel, resume, fork, transcript tail, child roster, and terminal projection through one transport-neutral interface.
+The product capability that validates and accepts Answer input and owns Answer-specific steer, follow-up, fork, transcript, child roster, and terminal projection. Common status, events, cancellation, and listing belong to the Run service.
 _Avoid_: Answer manager, transport-specific runtime service
 
 **Continuation**:
@@ -25,8 +51,8 @@ A new durable Answer Run with `parent_run_id` and kind `follow_up` or `fork`. Fo
 _Avoid_: in-place run mutation, session checkout, hidden conversation copy
 
 **Retrieval**:
-A caller-awaited corpus-evidence use case implemented with asynchronous I/O that returns one result without creating an Answer Run.
-_Avoid_: Fast Answer
+An owner-scoped Run with `run_kind=retrieval` and `lane=query` that returns corpus Evidence without generating an Answer. Top-level Retrieval is durable; retrieval inside an Answer is an internal Retrieval Stage, never a nested Run.
+_Avoid_: Fast Answer, inline Retrieval, `QueryRun`
 
 **Fast Answer**:
 A durable Answer Run that plans, retrieves, and generates without an Agent Operation or research workspace. Its Host turn still commits User and Assistant Entries to the routed Agent Session.
@@ -53,8 +79,28 @@ The durable `fast` or `research` value written once after routing; crash recover
 _Avoid_: Answer Mode when the request was `auto`
 
 **Corpus Administration**:
-The product capability for corpus workspace lifecycle, ingestion, files, metadata, visual assets, and reset.
-_Avoid_: Workspace manager
+The product capability for corpus workspace lifecycle, ingestion, files, metadata, visual assets, and reset. Product mutation acceptance belongs to the Corpus Mutation Service; common observation and cancellation belong to Run Service.
+_Avoid_: Workspace manager, direct WorkspaceRag call from an interface
+
+**Upstream Handoff**:
+The durable Corpus Mutation boundary committed before a destructive or otherwise
+non-idempotent LightRAG effect. Recovered work after handoff proceeds only after
+authoritative public reconciliation or explicit repair confirmation.
+_Avoid_: checkpoint-only hint, private status mailbox
+
+**Waiting For Repair**:
+The nonterminal `waiting_for_repair` phase of the same Corpus Mutation Run when
+public reconciliation cannot prove a safe repeat. Public `repair_reason` and
+`repair_remedy` guide an authorized operator, who repairs upstream state and
+explicitly resumes that same Run.
+_Avoid_: failed replacement Run, automatic destructive replay, new retry job
+
+**Reset Supersession**:
+An authorized full Corpus Reset may explicitly supersede one
+`waiting_for_repair` mutation. The old Run becomes terminal with its superseding
+Run identity; reset preserves Corpus Workspace identity and history rather than
+recreating the Workspace.
+_Avoid_: Workspace Delete, hidden repair abandonment
 
 **Authorized Workspace Set**:
 The concrete canonical Corpus Workspace ids a caller may use after authentication and access expansion are complete.
@@ -76,6 +122,17 @@ _Avoid_: Role record, user role, permission group
 **Corpus Workspace**:
 A named, authorized corpus scope whose ingestion and retrieval state is owned by one corpus runtime.
 _Avoid_: Workspace when it could mean an agent filesystem
+
+**Product Document**:
+One directly visible corpus consistency unit: a LightRAG document plus required
+DlightRAG metadata/source locator, BM25 labels, retained source/sidecar effects,
+and enabled visual fusion. It is published only while
+`_dlightrag_finalization_complete` is exactly true. A LightRAG `PROCESSED` row
+whose product finalizers are incomplete stays upstream `PROCESSED`, remains
+hidden through this marker, and retries only the same idempotent finalization
+path; DlightRAG does not rewrite upstream status. Shared graph summaries remain
+eventually consistent rather than document-snapshot isolated.
+_Avoid_: LightRAG processed row, metadata row, graph snapshot
 
 **Agent Session**:
 The owner-scoped durable parent-linked Entry Tree shared by routed Fast and Research Answer Runs. Stable Lane heads select branches, and the tree remains durable only while at least one Answer Run routing row names it; a Web Conversation identity alone is not a second history authority.
@@ -136,7 +193,7 @@ _Avoid_: Answer Event Log, Agent Journal, browser cache, out-of-band undo snapsh
 _Avoid_: state rollback, silent transcript promotion, confidence score
 
 **Retention Floor**:
-The single deployment clock bounding terminal Answer runs, event logs, routed Agent Session history, and superseded Memory history. Reclamation may happen later, never earlier.
+The selected per-Run clock bounding terminal Run rows and event logs. Answer uses the configured selection (365 days by default), which also bounds routed Agent Session history and superseded Memory history; top-level Retrieval and Corpus Mutation each use seven days. Reclamation may happen later, never earlier.
 _Avoid_: deadline, SLA, per-aggregate TTL, inactivity expiry
 
 **Conversation History Page**:
@@ -144,7 +201,10 @@ One signed turn-number keyset page from Web history. It bounds one read, not ret
 _Avoid_: snapshot, max_turns, trim window, retention window
 
 **File Panel Page**:
-One workspace-bound signed keyset page of processed files in durable server order. It bounds presentation/read work, not inventory or retention.
+One workspace-bound signed keyset page of finalized Product Documents whose
+LightRAG status is processed, in durable server order. It bounds
+presentation/read work, not inventory or retention; failed-file administration
+is a separate repair view.
 _Avoid_: full file snapshot, OFFSET page, workspace catalog scan, retention window
 
 ## Web Conversation Streaming
@@ -296,7 +356,7 @@ _Avoid_: application default, product setting, secret
 ## Operations
 
 **Fencing Epoch**:
-The monotonically increasing write-generation of one Answer Run lease; every durable write is predicated on the current epoch and a live lease.
+The monotonically increasing write-generation of one Run lease; every durable write is predicated on the current epoch and a live lease.
 _Avoid_: Workspace Epoch, Durable Progress
 
 **Full Development Reset**:

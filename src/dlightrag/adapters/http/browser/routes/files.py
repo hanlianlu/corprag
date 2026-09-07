@@ -2,32 +2,29 @@
 """Web routes for file management."""
 
 import logging
-import shutil
 from pathlib import Path
-from typing import Annotated, Any, NoReturn, cast
+from typing import Annotated, Any, NoReturn
+from uuid import uuid7
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse
 
 from dlightrag.adapters.http.browser.deps import enforce_web_access, get_application, get_workspace
 from dlightrag.adapters.http.browser.file_models import (
+    WebCorpusRunReceipt,
     WebFailedFileItem,
     WebFailedFilesPage,
-    WebFailedRecoveryJob,
-    WebFailedRecoveryStatus,
     WebFileItem,
     WebFilePanelSnapshot,
-    WebIngestStatus,
-    WebUploadReceipt,
 )
+from dlightrag.adapters.http.browser.routes.corpus_runs import corpus_run_receipt
 from dlightrag.adapters.http.source_download import source_download_response
-from dlightrag.application.access import AccessAction
+from dlightrag.application.access import AccessAction, owner_id_from_user
 from dlightrag.application.corpus_admin import (
     FILE_PANEL_PAGE_DEFAULT_LIMIT,
     FILE_PANEL_PAGE_MAX_LIMIT,
     FilePanelCursorError,
     FilePanelPageRequest,
-    IngestSpec,
     UnsafeUploadNameError,
     UploadTooLargeError,
     safe_log_text,
@@ -37,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 _FAILED_PAGE_DEFAULT_LIMIT = 5
-_FAILED_DOCUMENT_RETRY_JOB_TYPE = "retry_failed"
+_MAX_BROWSER_UPLOAD_FILES = 100
 
 
 @router.get("/files/raw/{document_id:path}", response_model=None)
@@ -133,40 +130,6 @@ def _failed_file_view_models(files: list[dict[str, Any]]) -> list[WebFailedFileI
     return rows
 
 
-def _failed_recovery_job(job: dict[str, Any]) -> WebFailedRecoveryJob:
-    result_value = job.get("result")
-    result = result_value if isinstance(result_value, dict) else {}
-    status = str(job.get("status") or "failed")
-    if status not in {"queued", "running", "succeeded", "partial", "failed"}:
-        status = "failed"
-    return WebFailedRecoveryJob(
-        job_id=str(job.get("job_id") or ""),
-        workspace=str(job.get("workspace") or ""),
-        status=cast(WebFailedRecoveryStatus, status),
-        retried=max(0, int(result.get("retried") or job.get("total_items") or 0)),
-        succeeded=max(0, int(result.get("succeeded") or job.get("processed_items") or 0)),
-        failed=max(0, int(result.get("failed") or job.get("failed_items") or 0)),
-    )
-
-
-def _ingest_status(status: dict[str, Any], *, message: str = "") -> WebIngestStatus:
-    pending = max(0, int(status.get("pending_enqueues") or 0))
-    busy = bool(status.get("busy")) or pending > 0
-    batches = max(0, int(status.get("batchs") or 0))
-    current = max(0, int(status.get("cur_batch") or 0))
-    documents = max(0, int(status.get("docs") or 0))
-    progress = min(100, int(current / batches * 100)) if documents and batches else None
-    return WebIngestStatus(
-        busy=busy,
-        message=str(status.get("latest_message") or message or ("Ingesting..." if busy else "")),
-        progress_percent=progress,
-        current_batch=current if documents and batches else None,
-        total_batches=batches if documents and batches else None,
-        documents=documents if documents and batches else None,
-        pending_enqueues=pending,
-    )
-
-
 # ---------------------------------------------------------------------------
 # GET /web/api/files — file list panel content
 # ---------------------------------------------------------------------------
@@ -224,7 +187,6 @@ async def _file_panel_snapshot(
     return WebFilePanelSnapshot(
         workspace=workspace,
         files=_file_view_models(list(snapshot.get("files") or [])),
-        ingest=_ingest_status(dict(snapshot.get("pipeline_status") or {})),
         next_cursor=(
             application.corpora.file_panel_cursor_codec.encode(next_cursor)
             if next_cursor is not None
@@ -234,7 +196,7 @@ async def _file_panel_snapshot(
 
 
 # ---------------------------------------------------------------------------
-# Failed-document recovery — bounded listing + durable background retry
+# Failed-document recovery — bounded listing + durable Corpus Mutation Run
 # ---------------------------------------------------------------------------
 
 
@@ -271,7 +233,6 @@ async def failed_file_list(
             selected_workspace,
             page=page,
         )
-        active = await application.corpora.get_active_retry_failed_docs(selected_workspace)
     except Exception:
         logger.exception(
             "Could not read failed files for workspace %s",
@@ -291,74 +252,55 @@ async def failed_file_list(
             if next_cursor is not None
             else None
         ),
-        active_recovery=_failed_recovery_job(active) if active is not None else None,
     )
 
 
-@router.post("/files/retry", response_model=WebFailedRecoveryJob, status_code=202)
+@router.post("/files/retry", response_model=WebCorpusRunReceipt, status_code=202)
 async def start_failed_file_retry(
     request: Request,
     workspace: str = Depends(get_workspace),
     workspace_name: str | None = Query(default=None, alias="workspace"),
-) -> WebFailedRecoveryJob:
+) -> WebCorpusRunReceipt:
     selected_workspace = _resolve_workspace(workspace_name, workspace)
     if not await _workspace_is_registered(request, selected_workspace):
         _stale_workspace()
     await enforce_web_access(request, AccessAction.WORKSPACE_INGEST, selected_workspace)
     try:
-        job = await get_application(request).corpora.start_retry_failed_docs(selected_workspace)
-    except PermissionError:
-        raise
+        creation = await get_application(request).corpus_mutations.create_retry(
+            workspace=selected_workspace,
+            document_ids=None,
+            selector="all_retryable",
+            submitted_by=owner_id_from_user(getattr(request.state, "user_context", None)),
+        )
     except Exception:
         logger.exception(
-            "Could not start failed-document retry for workspace %s",
+            "Could not accept failed-document retry for workspace %s",
             safe_log_text(selected_workspace),
         )
         raise HTTPException(
-            status_code=503, detail="Document recovery could not be started"
+            status_code=503, detail="Document recovery could not be accepted"
         ) from None
-    return _failed_recovery_job(job)
-
-
-@router.get("/files/retry/{job_id}", response_model=WebFailedRecoveryJob)
-async def failed_file_retry_status(
-    job_id: str,
-    request: Request,
-    workspace: str = Depends(get_workspace),
-    workspace_name: str | None = Query(default=None, alias="workspace"),
-) -> WebFailedRecoveryJob:
-    selected_workspace = _resolve_workspace(workspace_name, workspace)
-    selected_workspace = await _resolve_registered_workspace(request, selected_workspace)
-    if selected_workspace is None:
-        _stale_workspace()
-    await enforce_web_access(request, AccessAction.WORKSPACE_LIST_FILES, selected_workspace)
-    job = await get_application(request).corpora.get_ingest_job(job_id)
-    if (
-        job is None
-        or str(job.get("workspace") or "") != selected_workspace
-        or str(job.get("source_type") or "") != _FAILED_DOCUMENT_RETRY_JOB_TYPE
-    ):
-        raise HTTPException(status_code=404, detail="Document recovery job not found")
-    return _failed_recovery_job(job)
+    return corpus_run_receipt(creation.run, workspace=selected_workspace)
 
 
 # ---------------------------------------------------------------------------
-# POST /web/api/files/upload — non-blocking upload + background ingest
+# POST /web/api/files/upload — upload staging + durable Corpus Mutation Run
 # ---------------------------------------------------------------------------
 
 
-@router.post("/files/upload", response_model=WebUploadReceipt)
+@router.post("/files/upload", response_model=WebCorpusRunReceipt, status_code=202)
 async def upload_files(
     request: Request,
     files: list[UploadFile] = File(...),
     workspace_name: str | None = Form(default=None, alias="workspace"),
+    content_sha256: str | None = Form(default=None),
     workspace: str = Depends(get_workspace),
 ):
-    """Upload files and start background ingest.  Returns immediately."""
+    """Stage uploaded files and accept one durable Corpus Mutation Run."""
     application = get_application(request)
     cfg = application.config
     # Per-file document cap is the single shared limit used by every ingest
-    # path (REST /ingest/blob, URL, web upload): one document may not exceed it.
+    # path (Run upload, URL, web upload): one document may not exceed it.
     # The larger per-request cap is a temp-directory guard for multi-file
     # (folder) uploads.
     per_file_max_bytes = cfg.corpus.ingestion.max_upload_bytes
@@ -370,32 +312,57 @@ async def upload_files(
         _stale_workspace()
     await enforce_web_access(request, AccessAction.WORKSPACE_INGEST, selected_workspace)
 
-    # Detect whether the pipeline is already busy so the UI can show a
-    # "queued" state instead of "starting" — LightRAG's request_pending
-    # mechanism picks up new enqueues automatically after the current batch.
-    already_busy = False
+    run_id = str(uuid7())
+    stage_owned = True
+    staged = []
+    total_bytes = 0
     try:
-        ps = await application.corpora.get_pipeline_status(selected_workspace)
-        already_busy = bool(ps.get("busy"))
-    except Exception:
-        logger.debug(
-            "Could not read pipeline status before upload for workspace %s",
-            safe_log_text(selected_workspace),
-            exc_info=True,
-        )
-
-    upload_dir: Path | None = None
-    try:
-        upload_dir, saved_paths = await application.corpora.stage_upload_batch(
-            selected_workspace,
-            [(f.filename or "", f) for f in files],
-            per_file_max_bytes=per_file_max_bytes,
-            batch_max_bytes=batch_max_bytes,
-        )
-        if not saved_paths:
-            if upload_dir is not None:
-                shutil.rmtree(upload_dir, ignore_errors=True)
+        if not files:
             raise HTTPException(status_code=400, detail="No valid files selected")
+        if len(files) > _MAX_BROWSER_UPLOAD_FILES:
+            raise HTTPException(status_code=413, detail="Too many upload files")
+        if content_sha256 is not None and len(files) != 1:
+            raise HTTPException(
+                status_code=400,
+                detail="content_sha256 is supported only for a single upload",
+            )
+        for upload in files:
+            remaining = batch_max_bytes - total_bytes
+            if remaining <= 0:
+                raise UploadTooLargeError("upload batch exceeds configured maximum")
+            item = await application.corpus_mutations.stage_upload(
+                run_id=run_id,
+                workspace=selected_workspace,
+                filename=upload.filename or "",
+                reader=upload,
+                max_bytes=min(per_file_max_bytes, remaining),
+                content_sha256=content_sha256,
+            )
+            staged.append(item)
+            total_bytes += item.size_bytes
+        if total_bytes > batch_max_bytes:
+            raise UploadTooLargeError("upload batch exceeds configured maximum")
+        try:
+            creation = await application.corpus_mutations.create_staged_batch(
+                workspace=selected_workspace,
+                staged=staged,
+                submitted_by=owner_id_from_user(getattr(request.state, "user_context", None)),
+            )
+        except Exception:
+            logger.exception(
+                "Failed to accept ingest Run for workspace %s",
+                safe_log_text(selected_workspace),
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Upload could not be accepted. Please retry.",
+            ) from None
+        stage_owned = False
+        return corpus_run_receipt(
+            creation.run,
+            workspace=selected_workspace,
+            file_count=len(staged),
+        )
     except UnsafeUploadNameError as exc:
         logger.warning("Rejected upload with unsafe filename: %s", exc)
         raise HTTPException(status_code=400, detail="Upload contains an unsafe filename") from None
@@ -407,68 +374,22 @@ async def upload_files(
                 f"{cfg.interfaces.max_upload_size_mb} MB per request)"
             ),
         ) from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    except HTTPException:
+        raise
     except Exception:
         logger.exception("Upload staging failed")
-        if upload_dir is not None:
-            shutil.rmtree(upload_dir, ignore_errors=True)
         raise HTTPException(status_code=500, detail="Upload failed. Please try again.") from None
-
-    try:
-        await application.corpora.start_ingest_job(
-            selected_workspace,
-            IngestSpec(source_type="local", path=str(upload_dir)),
-        )
-    except Exception:
-        logger.exception(
-            "Failed to start ingest job for workspace %s",
-            safe_log_text(selected_workspace),
-        )
-        if upload_dir is not None:
-            shutil.rmtree(upload_dir, ignore_errors=True)
-        raise HTTPException(
-            status_code=500,
-            detail="Upload staged but ingest did not start. Please retry.",
-        ) from None
-
-    return WebUploadReceipt(
-        workspace=selected_workspace,
-        file_count=len(saved_paths),
-        queued=already_busy,
-        ingest=WebIngestStatus(
-            busy=True,
-            message=(
-                "Queued — processing after current batch" if already_busy else "Starting ingest..."
-            ),
-        ),
-    )
-
-
-# ---------------------------------------------------------------------------
-# GET /web/api/ingest-status — browser polling endpoint
-# ---------------------------------------------------------------------------
-
-
-@router.get("/ingest-status", response_model=WebIngestStatus)
-async def ingest_status(
-    request: Request,
-    workspace: str = Depends(get_workspace),
-    workspace_name: str | None = Query(default=None, alias="workspace"),
-) -> WebIngestStatus:
-    """Return one typed ingest status for browser polling."""
-    selected_workspace = _resolve_workspace(workspace_name, workspace)
-    selected_workspace = await _resolve_registered_workspace(request, selected_workspace)
-    if selected_workspace is None:
-        _stale_workspace()
-    await enforce_web_access(request, AccessAction.WORKSPACE_LIST_FILES, selected_workspace)
-    try:
-        status = await get_application(request).corpora.get_pipeline_status(selected_workspace)
-    except Exception:
-        logger.exception(
-            "Could not read ingest status for workspace %s",
-            safe_log_text(selected_workspace),
-        )
-        raise HTTPException(status_code=503, detail="Ingest status is unavailable") from None
-    return _ingest_status(dict(status or {}))
+    finally:
+        if stage_owned:
+            try:
+                await application.corpus_mutations.discard_staged_run(
+                    workspace=selected_workspace,
+                    run_id=run_id,
+                )
+            except Exception:
+                logger.exception("Failed to discard rejected browser upload stage")
 
 
 # ---------------------------------------------------------------------------
@@ -476,12 +397,12 @@ async def ingest_status(
 # ---------------------------------------------------------------------------
 
 
-@router.delete("/files", response_model=WebFilePanelSnapshot)
+@router.delete("/files", response_model=WebCorpusRunReceipt, status_code=202)
 async def delete_files(
     request: Request,
     workspace: str = Depends(get_workspace),
 ):
-    """Delete files from workspace."""
+    """Accept an exact file deletion as a durable Corpus Mutation Run."""
     file_path = request.query_params.get("file_path", "")
     file_paths = [file_path] if file_path else []
     application = get_application(request)
@@ -490,14 +411,16 @@ async def delete_files(
         _stale_workspace()
     await enforce_web_access(request, AccessAction.WORKSPACE_DELETE_FILES, selected_workspace)
 
+    if not file_paths:
+        raise HTTPException(status_code=422, detail="file_path is required")
     try:
-        await application.corpora.delete_files(selected_workspace, file_paths=file_paths)
+        creation = await application.corpus_mutations.create_delete(
+            workspace=selected_workspace,
+            file_paths=file_paths,
+            submitted_by=owner_id_from_user(getattr(request.state, "user_context", None)),
+        )
     except Exception:
-        logger.exception("Delete failed")
-        raise HTTPException(status_code=500, detail="Delete failed. Please try again.") from None
+        logger.exception("Delete Run acceptance failed")
+        raise HTTPException(status_code=503, detail="Delete could not be accepted") from None
 
-    return await _file_panel_snapshot(
-        request,
-        selected_workspace,
-        page=FilePanelPageRequest(),
-    )
+    return corpus_run_receipt(creation.run, workspace=selected_workspace)

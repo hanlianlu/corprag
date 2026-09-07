@@ -85,10 +85,10 @@ test('tool events drive the trace and sawChildren', () => {
 test('errors fail the turn', () => {
   const view = applyAnswerEvent(turn(), {
     kind: 'error',
-    payload: {error_kind: 'run_cancelled', error_message: 'x'},
+    payload: {kind: 'run_abandoned', message: 'Run could not be recovered.'},
   });
   assert.equal(view.state, 'failed');
-  assert.notEqual(view.error, '');
+  assert.equal(view.error, 'Run could not be recovered.');
 });
 
 test('done settles succeeded, cancelled, and malformed payloads', () => {

@@ -1,7 +1,7 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
 """Single boundary for LightRAG private storage access.
 
-**LightRAG coupling surface (lightrag-hku>=1.5.6):**
+**LightRAG coupling surface (lightrag-hku>=1.5.7):**
 
 This module depends on the following LightRAG internals that are NOT part
 of the public API.  A LightRAG major-version bump may break these:

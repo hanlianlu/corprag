@@ -131,6 +131,7 @@ class WriterCorpus:
     lightrag: Any
     stores: Any
     vector_table: str
+    settings: Any
 
 
 @pytest.fixture(scope="module")
@@ -232,6 +233,7 @@ async def writer_corpus() -> AsyncIterator[WriterCorpus]:
             lightrag=lightrag,
             stores=stores,
             vector_table=str(lightrag.chunks_vdb.table_name),
+            settings=settings,
         )
     finally:
         try:
@@ -282,7 +284,8 @@ async def test_finalization_marker_round_trips_and_partial_updates_preserve_true
     try:
         await conn.execute(
             "DELETE FROM dlightrag_schema_migrations "
-            "WHERE scope = 'doc_metadata' AND version = 'column_finalization_complete'"
+            "WHERE scope = 'doc_metadata' AND version IN "
+            "('column_finalization_complete', 'product_document_visibility')"
         )
         await conn.execute(
             "ALTER TABLE dlightrag_doc_metadata DROP COLUMN _dlightrag_finalization_complete"
@@ -315,6 +318,7 @@ async def test_field_schema_stats_follow_writes_deletes_clear_and_workspace_unio
                 "filename_stem": "report",
                 "file_extension": "pdf",
                 "custom_metadata": {"department": "finance"},
+                "_dlightrag_finalization_complete": True,
             },
         )
         await first.upsert(
@@ -323,6 +327,7 @@ async def test_field_schema_stats_follow_writes_deletes_clear_and_workspace_unio
                 "title": "Quarterly report",
                 "author": "Ada",
                 "custom_metadata": {"department": "finance", "team": "core"},
+                "_dlightrag_finalization_complete": True,
             },
         )
         await second.upsert(
@@ -330,6 +335,7 @@ async def test_field_schema_stats_follow_writes_deletes_clear_and_workspace_unio
             {
                 "creation_date": datetime.datetime(2026, 1, 2),
                 "custom_metadata": {"jurisdiction": "eu"},
+                "_dlightrag_finalization_complete": True,
             },
         )
 
@@ -405,7 +411,10 @@ async def test_field_schema_stats_follow_writes_deletes_clear_and_workspace_unio
             *(
                 first.upsert(
                     f"concurrent-{index}",
-                    {"custom_metadata": {"shared": index}},
+                    {
+                        "custom_metadata": {"shared": index},
+                        "_dlightrag_finalization_complete": True,
+                    },
                 )
                 for index in range(12)
             )
@@ -426,7 +435,13 @@ async def test_field_schema_stats_follow_writes_deletes_clear_and_workspace_unio
 
         many_keys = {f"key_{index:03d}": index for index in range(130)}
         await second.clear()
-        await second.upsert("doc-many", {"custom_metadata": many_keys})
+        await second.upsert(
+            "doc-many",
+            {
+                "custom_metadata": many_keys,
+                "_dlightrag_finalization_complete": True,
+            },
+        )
         bounded = await second.get_field_schema()
         assert bounded["filters"] == ["custom"]
         assert bounded["custom_keys"] == list(many_keys)[:128]
@@ -453,16 +468,18 @@ async def seeded(writer_corpus: WriterCorpus) -> AsyncIterator[None]:
     try:
         await conn.execute("DELETE FROM dlightrag_doc_metadata WHERE workspace = $1", _WORKSPACE)
         await conn.execute("DELETE FROM lightrag_doc_chunks WHERE workspace = $1", _WORKSPACE)
+        await conn.execute("DELETE FROM lightrag_doc_status WHERE workspace = $1", _WORKSPACE)
         await conn.execute(
             f"DELETE FROM {writer_corpus.vector_table} WHERE workspace = $1", _WORKSPACE
         )
         await conn.execute(
             """
             INSERT INTO dlightrag_doc_metadata
-                (workspace, doc_id, filename, filename_stem, custom_metadata)
+                (workspace, doc_id, filename, filename_stem, custom_metadata,
+                 _dlightrag_finalization_complete)
             VALUES
-                ($1, 'doc-in', 'report.pdf', 'report', '{"Team": " Core "}'),
-                ($1, 'doc-out', 'other.pdf', 'other', '{"Team": "Other"}')
+                ($1, 'doc-in', 'report.pdf', 'report', '{"Team": " Core "}', TRUE),
+                ($1, 'doc-out', 'other.pdf', 'other', '{"Team": "Other"}', TRUE)
             """,
             _WORKSPACE,
         )
@@ -510,6 +527,7 @@ async def seeded(writer_corpus: WriterCorpus) -> AsyncIterator[None]:
     finally:
         await conn.execute("DELETE FROM dlightrag_doc_metadata WHERE workspace = $1", _WORKSPACE)
         await conn.execute("DELETE FROM lightrag_doc_chunks WHERE workspace = $1", _WORKSPACE)
+        await conn.execute("DELETE FROM lightrag_doc_status WHERE workspace = $1", _WORKSPACE)
         await conn.execute(
             f"DELETE FROM {writer_corpus.vector_table} WHERE workspace = $1", _WORKSPACE
         )
@@ -561,6 +579,34 @@ def _sql_literals(params: list[Any]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Bounded metadata subset
+# ---------------------------------------------------------------------------
+
+
+async def test_metadata_subset_applies_publication_and_scope_to_only_caller_ids(
+    seeded: None,
+) -> None:
+    from dlightrag.adapters.postgres.corpus.pg_metadata_index import PGMetadataIndex
+
+    conn = await asyncpg.connect(**_kwargs(_TEST_DB))
+    try:
+        await conn.execute(
+            "INSERT INTO dlightrag_doc_metadata "
+            "(workspace, doc_id, filename, filename_stem, _dlightrag_finalization_complete) "
+            "VALUES ($1, 'doc-hidden-report', 'report.pdf', 'report', FALSE)",
+            _WORKSPACE,
+        )
+    finally:
+        await conn.close()
+
+    metadata = PGMetadataIndex(workspace=_WORKSPACE)
+    assert await metadata.visible_subset(
+        ["doc-out", "doc-hidden-report", "doc-in", "doc-missing", "doc-in"],
+        scope=_scope(candidate_count=5),
+    ) == frozenset({"doc-in"})
+
+
+# ---------------------------------------------------------------------------
 # Bounded scope preflight
 # ---------------------------------------------------------------------------
 
@@ -591,8 +637,9 @@ async def test_preflight_is_bounded_and_never_exact_counts_the_whole_match(
     conn = await asyncpg.connect(**_kwargs(_TEST_DB))
     try:
         await conn.execute(
-            "INSERT INTO dlightrag_doc_metadata (workspace, doc_id, filename, filename_stem) "
-            "VALUES ($1, 'doc-empty', 'empty.pdf', 'empty')",
+            "INSERT INTO dlightrag_doc_metadata "
+            "(workspace, doc_id, filename, filename_stem, _dlightrag_finalization_complete) "
+            "VALUES ($1, 'doc-empty', 'empty.pdf', 'empty', TRUE)",
             _WORKSPACE,
         )
         await conn.execute(
@@ -827,6 +874,160 @@ async def test_graph_guard_reads_scoped_chunks_in_one_query(
     assert isinstance(rows[1]["sidecar"], dict)
 
 
+async def test_unscoped_product_reads_hide_incomplete_and_metadata_less_rows(
+    writer_corpus: WriterCorpus,
+    seeded: None,
+) -> None:
+    """Every direct PostgreSQL read surface applies the same visibility rule."""
+    from dlightrag.adapters.postgres.corpus.corpus_chunks import PGCorpusChunkStore
+    from dlightrag.adapters.postgres.corpus.corpus_vectors import PGFilteredVectorSearch
+    from dlightrag.adapters.postgres.corpus.file_panel import PGFilePanelStore
+    from dlightrag.adapters.postgres.corpus.pg_metadata_index import PGMetadataIndex
+    from dlightrag.adapters.postgres.corpus.pg_metadata_search import PGMetadataSearchStore
+    from dlightrag.application.corpus_admin import FilePanelPageRequest, MetadataSearchPageRequest
+    from dlightrag.engine.rag.corpus.downloads import (
+        RedirectDownloadTarget,
+        SourceDownloadNotFoundError,
+        SourceDownloadService,
+    )
+    from dlightrag.engine.rag.corpus.visual_assets import VisualAssetResolver
+
+    conn = await asyncpg.connect(**_kwargs(_TEST_DB))
+    try:
+        # Simulate an interrupted commit and a low-level bypass whose corpus
+        # artifacts exist without any metadata row at all.
+        await conn.execute(
+            "UPDATE dlightrag_doc_metadata "
+            "SET _dlightrag_finalization_complete = FALSE, "
+            "download_locator = 'https://example.com/hidden.pdf' "
+            "WHERE workspace = $1 AND doc_id = 'doc-in'",
+            _WORKSPACE,
+        )
+        await conn.execute(
+            "UPDATE dlightrag_doc_metadata "
+            "SET download_locator = 'https://example.com/ready.pdf' "
+            "WHERE workspace = $1 AND doc_id = 'doc-out'",
+            _WORKSPACE,
+        )
+        await conn.execute(
+            "INSERT INTO lightrag_doc_chunks "
+            "(workspace, id, full_doc_id, content, dlightrag_bm25_language) "
+            "VALUES ($1, 'c-bypass', 'doc-bypass', 'alpha beta bypass', 'en')",
+            _WORKSPACE,
+        )
+        await conn.execute(
+            f"INSERT INTO {writer_corpus.vector_table} "
+            "(workspace, id, full_doc_id, content, content_vector) "
+            "VALUES ($1, 'c-bypass', 'doc-bypass', 'alpha beta bypass', "
+            "'[0,0.1,0.2,0.3,0.4,0.5,0.6,0.7]'::vector)",
+            _WORKSPACE,
+        )
+        await conn.executemany(
+            "INSERT INTO lightrag_doc_status "
+            "(workspace, id, status, file_path) VALUES ($1, $2, 'processed', $3)",
+            [
+                (_WORKSPACE, "doc-in", "/tmp/hidden.pdf"),
+                (_WORKSPACE, "doc-out", "/tmp/ready.pdf"),
+                (_WORKSPACE, "doc-bypass", "/tmp/bypass.pdf"),
+            ],
+        )
+    finally:
+        await conn.close()
+
+    metadata = PGMetadataIndex(workspace=_WORKSPACE)
+    assert await metadata.visible_subset(["doc-in", "doc-out", "doc-bypass"]) == {"doc-out"}
+    assert await metadata.query(MetadataFilter()) == ["doc-out"]
+
+    metadata_page = await PGMetadataSearchStore().search_metadata_page(
+        _WORKSPACE,
+        MetadataFilter(),
+        page=MetadataSearchPageRequest(limit=10),
+    )
+    assert metadata_page.document_ids == ("doc-out",)
+
+    vectors = await PGFilteredVectorSearch(writer_corpus.lightrag.chunks_vdb).search(
+        [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7],
+        scope=None,
+        top_k=20,
+    )
+    assert vectors
+    assert {str(row["full_doc_id"]) for row in vectors} == {"doc-out"}
+
+    bm25 = await writer_corpus.stores.bm25.search("alpha beta", scope=None, top_k=20)
+    assert {str(row["full_doc_id"]) for row in bm25} <= {"doc-out"}
+
+    chunks = PGCorpusChunkStore(writer_corpus.lightrag)
+    graph_rows = await chunks.read_scoped(
+        None,
+        ["c-in-0", "c-out-0", "c-bypass"],
+    )
+    assert graph_rows[0] is None
+    assert graph_rows[1] is not None and graph_rows[1]["full_doc_id"] == "doc-out"
+    assert graph_rows[2] is None
+
+    files = await PGFilePanelStore().list_processed_files(
+        _WORKSPACE,
+        page=FilePanelPageRequest(limit=10),
+    )
+    assert tuple(item.doc_id for item in files.items) == ("doc-out",)
+
+    # Stats/schema are trigger-maintained from visible rows only. The hidden
+    # transition must decrement counts, and the metadata-less bypass adds none.
+    stat_conn = await asyncpg.connect(**_kwargs(_TEST_DB))
+    try:
+        filename_count = await stat_conn.fetchval(
+            "SELECT document_count FROM dlightrag_metadata_field_stats "
+            "WHERE workspace = $1 AND field_id = 'filename'",
+            _WORKSPACE,
+        )
+    finally:
+        await stat_conn.close()
+    assert filename_count == 1
+    assert "filename" in (await metadata.get_field_schema())["filters"]
+
+    downloads = SourceDownloadService(
+        settings=writer_corpus.settings,
+        metadata_index=metadata,
+        workspace_id=_WORKSPACE,
+    )
+    with pytest.raises(SourceDownloadNotFoundError):
+        await downloads.prepare("doc-in")
+    with pytest.raises(SourceDownloadNotFoundError):
+        await downloads.prepare("doc-bypass")
+    ready = await downloads.prepare("doc-out")
+    assert isinstance(ready, RedirectDownloadTarget)
+    assert ready.url == "https://example.com/ready.pdf"
+
+    class VisualStores:
+        async def context_chunks_by_ids(self, chunk_ids: list[str]) -> list[dict[str, Any]]:
+            doc_ids = {
+                "image-hidden": "doc-in",
+                "image-ready": "doc-out",
+                "image-bypass": "doc-bypass",
+            }
+            return [
+                {
+                    "chunk_id": chunk_id,
+                    "full_doc_id": doc_ids[chunk_id],
+                    "image_data": "cmVhZHk=",
+                    "image_mime_type": "image/png",
+                }
+                for chunk_id in chunk_ids
+            ]
+
+        async def get_text_chunks(self, chunk_ids: list[str]) -> list[None]:
+            return [None for _ in chunk_ids]
+
+        async def get_full_docs(self, doc_ids: list[str]) -> list[None]:
+            return [None for _ in doc_ids]
+
+    visuals = VisualAssetResolver(stores=VisualStores(), visibility_lookup=metadata)
+    assert await visuals.resolve("image-hidden") is None
+    assert await visuals.resolve("image-bypass") is None
+    ready_image = await visuals.resolve("image-ready")
+    assert ready_image is not None and ready_image.data == b"ready"
+
+
 # ---------------------------------------------------------------------------
 # Canonical custom containment
 # ---------------------------------------------------------------------------
@@ -843,8 +1044,9 @@ async def test_custom_containment_matches_numbers_bools_and_nulls_like_storage(
         await conn.execute(
             """
             INSERT INTO dlightrag_doc_metadata
-                (workspace, doc_id, filename, filename_stem, custom_metadata)
-            VALUES ($1, 'doc-shapes', 'shapes.pdf', 'shapes', $2::jsonb)
+                (workspace, doc_id, filename, filename_stem, custom_metadata,
+                 _dlightrag_finalization_complete)
+            VALUES ($1, 'doc-shapes', 'shapes.pdf', 'shapes', $2::jsonb, TRUE)
             """,
             _WORKSPACE,
             json.dumps(

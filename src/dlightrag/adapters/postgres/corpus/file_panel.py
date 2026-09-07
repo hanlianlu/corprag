@@ -4,6 +4,10 @@
 from typing import Any
 
 from dlightrag.adapters.postgres.core._operations import PostgresOperationRunner
+from dlightrag.adapters.postgres.corpus.pg_metadata_index import (
+    METADATA_TABLE,
+    metadata_visibility_condition,
+)
 from dlightrag.application.corpus_admin import (
     FailedFileRow,
     FailedFileRowPage,
@@ -24,36 +28,44 @@ ON LIGHTRAG_DOC_STATUS (workspace, updated_at DESC NULLS FIRST, id ASC)
 WHERE status = 'failed'
 """
 
-_LIST_FIRST_PAGE = """
-SELECT id, file_path, updated_at
-FROM LIGHTRAG_DOC_STATUS
-WHERE workspace = $1 AND status = 'processed'
-ORDER BY updated_at DESC NULLS FIRST, id ASC
+_VISIBLE_PROCESSED_FROM = f"""
+FROM LIGHTRAG_DOC_STATUS s
+INNER JOIN {METADATA_TABLE} m
+  ON m.workspace = s.workspace
+ AND m.doc_id = s.id
+ AND {metadata_visibility_condition("m")}
+"""
+
+_LIST_FIRST_PAGE = f"""
+SELECT s.id, s.file_path, s.updated_at
+{_VISIBLE_PROCESSED_FROM}
+WHERE s.workspace = $1 AND s.status = 'processed'
+ORDER BY s.updated_at DESC NULLS FIRST, s.id ASC
 LIMIT $2
 """
 
-_LIST_AFTER_NULL = """
-SELECT id, file_path, updated_at
-FROM LIGHTRAG_DOC_STATUS
-WHERE workspace = $1 AND status = 'processed'
+_LIST_AFTER_NULL = f"""
+SELECT s.id, s.file_path, s.updated_at
+{_VISIBLE_PROCESSED_FROM}
+WHERE s.workspace = $1 AND s.status = 'processed'
   AND (
-    (updated_at IS NULL AND id > $2)
-    OR updated_at IS NOT NULL
+    (s.updated_at IS NULL AND s.id > $2)
+    OR s.updated_at IS NOT NULL
   )
-ORDER BY updated_at DESC NULLS FIRST, id ASC
+ORDER BY s.updated_at DESC NULLS FIRST, s.id ASC
 LIMIT $3
 """
 
-_LIST_AFTER_TIMESTAMP = """
-SELECT id, file_path, updated_at
-FROM LIGHTRAG_DOC_STATUS
-WHERE workspace = $1 AND status = 'processed'
-  AND updated_at IS NOT NULL
+_LIST_AFTER_TIMESTAMP = f"""
+SELECT s.id, s.file_path, s.updated_at
+{_VISIBLE_PROCESSED_FROM}
+WHERE s.workspace = $1 AND s.status = 'processed'
+  AND s.updated_at IS NOT NULL
   AND (
-    updated_at < $2::timestamp
-    OR (updated_at = $2::timestamp AND id > $3)
+    s.updated_at < $2::timestamp
+    OR (s.updated_at = $2::timestamp AND s.id > $3)
   )
-ORDER BY updated_at DESC NULLS FIRST, id ASC
+ORDER BY s.updated_at DESC NULLS FIRST, s.id ASC
 LIMIT $4
 """
 

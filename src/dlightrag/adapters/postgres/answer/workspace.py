@@ -23,7 +23,7 @@ from dlightrag.engine.runtime.workspace import (
 
 _LEASE = """
 SELECT 1
-FROM dlightrag_answer_runs
+FROM dlightrag_runs
 WHERE owner_id = $1 AND run_id = $2
   AND lease_owner = $3 AND fencing_epoch = $4
   AND status = 'running' AND lease_expires_at > NOW()
@@ -76,7 +76,7 @@ class PGWorkspaceStore:
                 ):
                     return HandoffLeaseLost()
                 current = await conn.fetchval(
-                    "SELECT workspace_epoch FROM dlightrag_answer_runs"
+                    "SELECT workspace_epoch FROM dlightrag_runs"
                     " WHERE owner_id = $1 AND run_id = $2 FOR UPDATE",
                     self._owner_id,
                     self._run_id,
@@ -87,7 +87,7 @@ class PGWorkspaceStore:
                         expected_epoch=expected_epoch, current_epoch=current_epoch
                     )
                 updated = await conn.fetchval(
-                    "UPDATE dlightrag_answer_runs SET workspace_epoch = $3, updated_at = NOW()"
+                    "UPDATE dlightrag_runs SET workspace_epoch = $3, updated_at = NOW()"
                     " WHERE owner_id = $1 AND run_id = $2 AND workspace_epoch IS NOT DISTINCT FROM $4"
                     " RETURNING workspace_epoch",
                     self._owner_id,

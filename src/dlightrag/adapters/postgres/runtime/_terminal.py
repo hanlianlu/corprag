@@ -13,7 +13,7 @@ type TerminalStatus = Literal["succeeded", "failed", "cancelled"]
 # event. Prepared input is cleared on every terminal transition.
 _FINISH_RUN_SQL = """
 WITH bumped AS (
-    UPDATE dlightrag_answer_runs
+    UPDATE dlightrag_runs
     SET status = $5::text,
         stop_reason = $6::text,
         result_json = $7::jsonb,
@@ -23,7 +23,9 @@ WITH bumped AS (
         prepared_input_json = NULL,
         lease_owner = NULL,
         lease_expires_at = NULL,
+        active_permit = FALSE,
         finished_at = NOW(),
+        purge_after = NOW() + make_interval(secs => retention_seconds::double precision),
         updated_at = NOW(),
         next_event_sequence = next_event_sequence + 1
     WHERE owner_id = $1 AND run_id = $2
@@ -32,7 +34,7 @@ WITH bumped AS (
       AND (NOT $12::boolean OR cancel_requested_at IS NULL)
     RETURNING next_event_sequence - 1 AS event_sequence
 ), inserted AS (
-    INSERT INTO dlightrag_answer_run_events (
+    INSERT INTO dlightrag_run_events (
         owner_id, run_id, event_sequence, event_type, payload
     )
     SELECT $1, $2, event_sequence, $10::text, $11::jsonb FROM bumped
@@ -43,7 +45,7 @@ SELECT event_sequence FROM inserted
 
 _SELECT_CANCELLATION = """
 SELECT cancel_requested_at IS NOT NULL
-FROM dlightrag_answer_runs
+FROM dlightrag_runs
 WHERE owner_id = $1 AND run_id = $2
 """
 
@@ -65,12 +67,12 @@ async def finish_fenced_run(
     withhold_on_cancel: bool,
     cancel_requested: bool | None = None,
 ) -> TerminalOutcome:
-    """Commit one terminal, allowing an earlier cancellation to win success.
+    """Commit one terminal, allowing an earlier cancellation to win.
 
     ``cancel_requested`` may be supplied by a caller that already holds the run
-    row. A caller without that lock leaves it unknown; after a withheld success,
-    this helper re-reads cancellation and attempts the same fenced primitive for
-    the cancelled terminal.
+    row. A caller without that lock leaves it unknown; after any withheld
+    terminal outcome, this helper re-reads cancellation and attempts the same
+    fenced primitive for the exact cancelled terminal.
     """
 
     async def commit(
@@ -109,7 +111,7 @@ async def finish_fenced_run(
             event_sequence=int(sequence),
         )
 
-    if status == "succeeded" and withhold_on_cancel and cancel_requested is True:
+    if withhold_on_cancel and cancel_requested is True:
         return await commit(
             "cancelled",
             terminal_stop_reason=None,
@@ -131,7 +133,7 @@ async def finish_fenced_run(
         terminal_payload=payload,
         withhold=withhold_on_cancel,
     )
-    if outcome.committed or status != "succeeded" or not withhold_on_cancel:
+    if outcome.committed or not withhold_on_cancel:
         return outcome
 
     if cancel_requested is None:

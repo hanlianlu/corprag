@@ -53,7 +53,7 @@ from dlightrag.engine.answer.resources.registry import (
 )
 from dlightrag.engine.answer.tools.artifacts import attach_artifact_tool
 from dlightrag.engine.rag.retrieval import RetrievalResult
-from dlightrag.engine.runtime import RunCancelledError
+from dlightrag.engine.runtime import RunCancellationObserved
 from dlightrag.engine.runtime.settlements import EffectHostUpdate
 from tests.unit.conftest import answer_model_profile
 
@@ -224,7 +224,7 @@ async def test_cancellation_during_a_provider_delta_cancels_without_retry() -> N
     class _CancellingSession(_StreamingSession):
         async def emit_token(self, token: str) -> None:
             self.tokens.append(token)
-            raise RunCancelledError
+            raise RunCancellationObserved
 
     session = _CancellingSession()
     prepared = SimpleNamespace(

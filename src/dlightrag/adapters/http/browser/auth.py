@@ -302,7 +302,9 @@ class WebAuthMiddleware(BaseHTTPMiddleware):
 @router.get("/login", response_class=FileResponse)
 async def login_page(request: Request, next: str = "/web/"):
     """Serve the static paste-token form when global auth is enabled."""
-    cfg = request.app.state.application.config
+    from dlightrag.adapters.http.application import get_application
+
+    cfg = get_application(request).config
     target = _safe_next_path(next)
     if cfg.access.auth_mode == "none" or cfg.access.web_identity.edge is not None:
         # The edge owns login; the paste form is the no-edge development hatch.
@@ -317,7 +319,9 @@ async def login(
     next: str = Form(default="/web/"),
 ):
     """Validate a bearer token and store it in an HttpOnly web cookie."""
-    cfg = request.app.state.application.config
+    from dlightrag.adapters.http.application import get_application
+
+    cfg = get_application(request).config
     target = _safe_next_path(next)
     if cfg.access.auth_mode == "none" or cfg.access.web_identity.edge is not None:
         return RedirectResponse(target, status_code=303)

@@ -5,8 +5,8 @@ from typing import Any
 
 import pytest
 
-from dlightrag.adapters.postgres.answer._blobs import BlobSizeConflict, write_complete_blob
-from dlightrag.adapters.postgres.answer.answer_runs import PGAnswerRunStore
+from dlightrag.adapters.postgres.runtime.run_blob_store import BlobSizeConflict, write_complete_blob
+from dlightrag.adapters.postgres.runtime.run_store import PGRunStore
 from dlightrag.engine.runtime.records import PendingArtifact
 
 
@@ -72,15 +72,15 @@ async def test_run_store_acquires_blob_identities_in_digest_order(
     observed: list[str] = []
 
     async def record_blob(
-        _self: PGAnswerRunStore,
+        _self: PGRunStore,
         _conn: Any,
         _owner: str,
         blob: PendingArtifact,
     ) -> None:
         observed.append(blob.digest)
 
-    monkeypatch.setattr(PGAnswerRunStore, "_write_blob", record_blob)
-    store = object.__new__(PGAnswerRunStore)
+    monkeypatch.setattr(PGRunStore, "_write_blob", record_blob)
+    store = object.__new__(PGRunStore)
     blobs = (
         PendingArtifact(content=b"canonical-b"),
         PendingArtifact(content=b"canonical-a"),

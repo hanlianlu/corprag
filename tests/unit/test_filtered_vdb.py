@@ -1,6 +1,7 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
 """Tests for strict metadata in-filtering context."""
 
+from collections.abc import Sequence
 from unittest.mock import AsyncMock
 
 from dlightrag.adapters.postgres.corpus.corpus_vectors import PGFilteredVectorSearch
@@ -72,7 +73,7 @@ async def test_empty_scope_is_active_filter() -> None:
         assert _active_filter.get() == empty
 
 
-async def test_none_scope_is_no_filter() -> None:
+async def test_none_scope_has_no_user_metadata_filter() -> None:
     async with metadata_filter_scope(None):
         assert _active_filter.get() is None
 
@@ -94,6 +95,7 @@ async def test_filtered_query_uses_query_embedding_context() -> None:
     wrapper = FilteredVectorStorage(
         original=storage,
         embedding_func=embedding_func,
+        visibility_lookup=AsyncMock(),
         filtered_search=filtered_search,
     )
 
@@ -144,34 +146,83 @@ class _FakeScopedReader:
 
     def __init__(self, rows: dict[str, dict[str, object]]) -> None:
         self._rows = rows
-        self.calls: list[tuple[MetadataScope, list[str]]] = []
+        self.calls: list[tuple[MetadataScope | None, list[str]]] = []
 
     async def read_scoped(
         self,
-        scope: MetadataScope,
+        scope: MetadataScope | None,
         chunk_ids: list[str],
     ) -> list[dict[str, object] | None]:
         self.calls.append((scope, list(chunk_ids)))
         return [self._rows.get(chunk_id) for chunk_id in chunk_ids]
 
 
+class _VisibleLookup:
+    def __init__(self, visible: set[str], *, scoped_visible: set[str] | None = None) -> None:
+        self.visible = visible
+        self.scoped_visible = visible if scoped_visible is None else scoped_visible
+        self.calls: list[tuple[list[str], MetadataScope | None]] = []
+
+    async def is_visible(self, doc_id: str) -> bool:
+        return doc_id in self.visible
+
+    async def visible_subset(
+        self,
+        doc_ids: Sequence[str],
+        *,
+        scope: MetadataScope | None = None,
+    ) -> frozenset[str]:
+        self.calls.append((list(doc_ids), scope))
+        eligible = self.visible if scope is None else self.scoped_visible
+        return frozenset(eligible.intersection(doc_ids))
+
+
 def _chunk(chunk_id: str, doc_id: str | None) -> dict[str, object]:
     return {"id": chunk_id, "content": chunk_id, "full_doc_id": doc_id}
 
 
-async def test_chunk_store_passes_through_without_scope() -> None:
+async def test_chunk_store_passes_through_outside_product_retrieval() -> None:
     kv = _FakeChunkKV({"c1": _chunk("c1", "doc-1"), "c2": _chunk("c2", "doc-2")})
-    store = FilteredChunkStore(original=kv, scoped_reader=_FakeScopedReader({}))
+    reader = _FakeScopedReader({"c1": _chunk("c1", "doc-1")})
+    store = FilteredChunkStore(
+        original=kv,
+        visibility_lookup=_VisibleLookup({"doc-1"}),
+        scoped_reader=reader,
+    )
 
     rows = await store.get_by_ids(["c1", "c2"])
 
-    assert [r["id"] for r in rows if r is not None] == ["c1", "c2"]
+    assert rows == [_chunk("c1", "doc-1"), _chunk("c2", "doc-2")]
+    assert kv.requested == [["c1", "c2"]]
+    assert reader.calls == []
+
+
+async def test_chunk_store_uses_visibility_reader_without_user_filter() -> None:
+    kv = _FakeChunkKV({"c1": _chunk("c1", "doc-1"), "c2": _chunk("c2", "doc-2")})
+    reader = _FakeScopedReader({"c1": _chunk("c1", "doc-1")})
+    store = FilteredChunkStore(
+        original=kv,
+        visibility_lookup=_VisibleLookup({"doc-1"}),
+        scoped_reader=reader,
+    )
+
+    async with metadata_filter_scope(None):
+        rows = await store.get_by_ids(["c1", "c2"])
+
+    assert rows[0] is not None and rows[0]["id"] == "c1"
+    assert rows[1] is None
+    assert reader.calls == [(None, ["c1", "c2"])]
+    assert kv.requested == []
 
 
 async def test_chunk_store_nulls_out_of_scope_rows() -> None:
     reader = _FakeScopedReader({"c1": _chunk("c1", "doc-1")})
     kv = _FakeChunkKV({"c1": _chunk("c1", "doc-1"), "c2": _chunk("c2", "doc-2")})
-    store = FilteredChunkStore(original=kv, scoped_reader=reader)
+    store = FilteredChunkStore(
+        original=kv,
+        visibility_lookup=_VisibleLookup({"doc-1"}),
+        scoped_reader=reader,
+    )
     scope = _scope(candidate_count=1)
 
     async with metadata_filter_scope(scope) as stats:
@@ -187,8 +238,12 @@ async def test_chunk_store_nulls_out_of_scope_rows() -> None:
 
 async def test_chunk_store_drops_rows_without_document_attribution() -> None:
     kv = _FakeChunkKV({"c1": _chunk("c1", None)})
-    reader = _FakeScopedReader({})  # no row for c1: missing/out-of-scope
-    store = FilteredChunkStore(original=kv, scoped_reader=reader)
+    reader = _FakeScopedReader({})
+    store = FilteredChunkStore(
+        original=kv,
+        visibility_lookup=_VisibleLookup(set()),
+        scoped_reader=reader,
+    )
 
     async with metadata_filter_scope(_scope(candidate_count=1)):
         rows = await store.get_by_ids(["c1"])
@@ -200,7 +255,11 @@ async def test_chunk_store_still_requests_every_id() -> None:
     """Filtering must not shorten the request: callers zip results against their ids."""
     kv = _FakeChunkKV({"c1": _chunk("c1", "doc-1"), "c2": _chunk("c2", "doc-2")})
     reader = _FakeScopedReader({"c1": _chunk("c1", "doc-1")})
-    store = FilteredChunkStore(original=kv, scoped_reader=reader)
+    store = FilteredChunkStore(
+        original=kv,
+        visibility_lookup=_VisibleLookup({"doc-1"}),
+        scoped_reader=reader,
+    )
 
     async with metadata_filter_scope(_scope(candidate_count=1)):
         rows = await store.get_by_ids(["c1", "c2"])
@@ -210,27 +269,87 @@ async def test_chunk_store_still_requests_every_id() -> None:
     assert len(rows) == 2
 
 
-async def test_chunk_store_requires_a_reader_under_scope() -> None:
-    kv = _FakeChunkKV({"c1": _chunk("c1", "doc-1")})
-    store = FilteredChunkStore(original=kv)
+async def test_chunk_store_without_pushdown_postfilters_bounded_requested_ids() -> None:
+    kv = _FakeChunkKV(
+        {
+            "c1": _chunk("c1", "doc-1"),
+            "c2": _chunk("c2", "doc-2"),
+            "c3": _chunk("c3", None),
+        }
+    )
+    lookup = _VisibleLookup({"doc-1"})
+    store = FilteredChunkStore(original=kv, visibility_lookup=lookup)
 
-    async with metadata_filter_scope(_scope(candidate_count=1)):
-        try:
-            await store.get_by_ids(["c1"])
-        except RuntimeError as exc:
-            assert "scoped chunk reader" in str(exc)
-        else:
-            raise AssertionError("a scoped read without a reader must fail loudly")
+    async with metadata_filter_scope(None):
+        rows = await store.get_by_ids(["c1", "c2", "c3"])
+
+    assert rows == [_chunk("c1", "doc-1"), None, None]
+    assert lookup.calls == [(["doc-1", "doc-2"], None)]
+
+
+async def test_chunk_store_without_pushdown_applies_scope_and_preserves_positions() -> None:
+    kv = _FakeChunkKV(
+        {
+            "c-match": _chunk("c-match", "doc-match"),
+            "c-wrong": _chunk("c-wrong", "doc-wrong-metadata"),
+            "c-false": _chunk("c-false", "doc-false-marker"),
+            "c-missing": _chunk("c-missing", "doc-missing-marker"),
+        }
+    )
+    lookup = _VisibleLookup(
+        {"doc-match", "doc-wrong-metadata"},
+        scoped_visible={"doc-match"},
+    )
+    store = FilteredChunkStore(original=kv, visibility_lookup=lookup)
+    scope = _scope(candidate_count=1)
+    requested = ["missing-chunk", "c-wrong", "c-match", "c-false", "c-missing", "c-match"]
+
+    async with metadata_filter_scope(scope):
+        rows = await store.get_by_ids(requested)
+
+    assert rows == [
+        None,
+        None,
+        _chunk("c-match", "doc-match"),
+        None,
+        None,
+        _chunk("c-match", "doc-match"),
+    ]
+    assert kv.requested == [requested]
+    assert lookup.calls == [
+        (
+            [
+                "doc-wrong-metadata",
+                "doc-match",
+                "doc-false-marker",
+                "doc-missing-marker",
+            ],
+            scope,
+        )
+    ]
+
+
+async def test_chunk_store_empty_scope_skips_candidate_read_and_returns_aligned_none() -> None:
+    kv = _FakeChunkKV({"c1": _chunk("c1", "doc-1")})
+    lookup = _VisibleLookup({"doc-1"})
+    store = FilteredChunkStore(original=kv, visibility_lookup=lookup)
+
+    async with metadata_filter_scope(_scope(candidate_count=0, doc_exists=False)):
+        rows = await store.get_by_ids(["c1", "missing", "c1"])
+
+    assert rows == [None, None, None]
+    assert kv.requested == []
+    assert lookup.calls == []
 
 
 async def test_chunk_store_proxies_unknown_attributes() -> None:
     kv = _FakeChunkKV({})
-    store = FilteredChunkStore(original=kv)
+    store = FilteredChunkStore(original=kv, visibility_lookup=_VisibleLookup(set()))
 
     assert store.workspace == "default"
 
 
-async def test_stats_stay_zero_without_scope() -> None:
+async def test_stats_stay_zero_when_no_retrieval_leg_runs() -> None:
     async with metadata_filter_scope(None) as stats:
         assert stats.kg_chunks_dropped == 0
         assert stats.graph_strategy is False

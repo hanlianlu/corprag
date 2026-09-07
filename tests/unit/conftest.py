@@ -22,7 +22,8 @@ from dlightrag.application.answer_runs.execution import (
     PinnedModelProfile,
 )
 from dlightrag.application.config import DlightragConfig
-from dlightrag.engine.ai.capacity import ModelProfile
+from dlightrag.engine.ai.capacity import CONTEXT_POLICY_REVISION, ModelProfile
+from dlightrag.engine.ai.catalog import current_model_catalog_revision
 from dlightrag.engine.ai.fingerprints import ModelFingerprint
 from dlightrag.engine.ai.media import MODEL_IMAGE_MAX_PIXELS
 from dlightrag.engine.answer.images import AnswerImagePolicy
@@ -99,8 +100,8 @@ async def prepare_test_answer_run_input(
                 profile=answer_model_profile(),
             ),
         ),
-        context_policy_revision="m1-v1",
-        model_catalog_revision="2026-08-14",
+        context_policy_revision=CONTEXT_POLICY_REVISION,
+        model_catalog_revision=current_model_catalog_revision(),
         idempotency_fingerprint=idempotency_fingerprint,
     )
 

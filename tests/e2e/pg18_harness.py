@@ -215,10 +215,20 @@ def fake_embedding_func(*, dim: int = 8) -> Any:
 
 
 async def fake_lightrag_llm(prompt: str, **_: Any) -> str:
-    """Return a valid empty LightRAG extraction payload."""
+    """Return deterministic local extraction and query-keyword payloads."""
     if re.search(r"keyword", prompt, re.IGNORECASE):
         return '{"high_level_keywords": ["image"], "low_level_keywords": ["native image"]}'
-    return "<|COMPLETE|>"
+    return (
+        '{"entities":['
+        '{"name":"LightRAG","type":"Artifact",'
+        '"description":"LightRAG provides the document graph path."},'
+        '{"name":"PostgreSQL","type":"Artifact",'
+        '"description":"PostgreSQL stores the document graph."}'
+        '],"relationships":['
+        '{"source":"LightRAG","target":"PostgreSQL","keywords":"storage",'
+        '"description":"LightRAG uses PostgreSQL storage."}'
+        "]}"
+    )
 
 
 def install_fake_model_functions(monkeypatch: Any, *, dim: int = 8) -> FakeMultimodalEmbedder:

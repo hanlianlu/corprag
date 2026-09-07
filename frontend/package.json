@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "test": "npm run check:generated && node --experimental-strip-types --test api/*.test.ts stores/*.test.ts lib/*.test.ts tokens/*.test.ts naming.structure.test.ts ui/*.structure.test.ts design-system/testing/architecture.test.ts",
+    "test:coverage": "npm run check:generated && node --experimental-strip-types --experimental-test-coverage --test api/*.test.ts stores/*.test.ts lib/*.test.ts tokens/*.test.ts naming.structure.test.ts ui/*.structure.test.ts design-system/testing/architecture.test.ts",
     "test:browser": "web-test-runner --config web-test-runner.config.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "npm run lint:ts && npm run lint:css",

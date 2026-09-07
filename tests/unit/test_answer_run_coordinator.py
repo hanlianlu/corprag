@@ -9,7 +9,7 @@ event. Subscribers replay durable events and detach without touching the run.
 
 import asyncio
 import datetime
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, cast
 
 import pytest
@@ -18,19 +18,21 @@ import dlightrag.engine.runtime.coordinator as coordinator_module
 from dlightrag.engine.runtime import (
     MAX_RECLAIMS_WITHOUT_PROGRESS,
     AlreadyCommittedTerminal,
-    AnswerRunEvent,
-    AnswerRunRecord,
     ClaimedRun,
-    CoordinatorOwnedSuccess,
+    Failed,
     LeaseLostError,
     LeaseRenewal,
-    RunCancelledError,
+    RunAccessScope,
+    RunCancellationObserved,
     RunCoordinator,
     RunDeletion,
+    RunEvent,
     RunExecutionError,
     RunExecutionOutcome,
+    RunRecord,
     RunSession,
     ShutdownOutcome,
+    Succeeded,
     SweepOutcome,
     TerminalOutcome,
 )
@@ -43,7 +45,7 @@ class _MemoryStore:
 
     def __init__(self) -> None:
         self.runs: dict[str, dict[str, Any]] = {}
-        self.events: dict[str, list[AnswerRunEvent]] = {}
+        self.events: dict[str, list[RunEvent]] = {}
         self.sweeps = 0
         self.claims = 0
         self.trims = 0
@@ -83,12 +85,16 @@ class _MemoryStore:
         }
         self.events.setdefault(run_id, [])
 
-    def _record(self, row: Mapping[str, Any]) -> AnswerRunRecord:
+    def _record(self, row: Mapping[str, Any]) -> RunRecord:
         now = datetime.datetime.now(datetime.UTC)
-        return AnswerRunRecord(
-            owner_id=_OWNER,
+        return RunRecord(
             run_id=str(row["run_id"]),
-            idempotency_key=None,
+            run_kind="answer",
+            lane="query",
+            submitted_by=_OWNER,
+            access_scope=RunAccessScope(kind="owner", scope_id=_OWNER),
+            submission_key=None or str(str(row["run_id"])),
+            request_fingerprint="test-fingerprint",
             prepared_input=row.get("prepared_input"),
             status=row["status"],
             phase=None,
@@ -123,7 +129,7 @@ class _MemoryStore:
         sequence = int(row["next_event_sequence"])
         row["next_event_sequence"] = sequence + 1
         self.events[str(row["run_id"])].append(
-            AnswerRunEvent(
+            RunEvent(
                 sequence=sequence,
                 event_type=event_type,  # type: ignore[arg-type]
                 payload=dict(payload),
@@ -133,7 +139,10 @@ class _MemoryStore:
         return sequence
 
     # -- store surface -------------------------------------------------
-    async def claim_next(self, *, worker_id: str) -> ClaimedRun | None:
+    async def accept_run(self, *, envelope: Any, run_id: str) -> Any:
+        raise NotImplementedError("coordinator tests do not exercise admission")
+
+    async def claim_next(self, *, worker_id: str, **_filters: Any) -> ClaimedRun | None:
         if self.claim_gate is not None:
             self.claim_gate.set()
         self.claims += 1
@@ -235,41 +244,66 @@ class _MemoryStore:
             return None
         return self._append(row, "progress", {"phase": phase})
 
-    async def append_token_batch(
-        self, *, owner_id: str, run_id: str, worker_id: str, fencing_epoch: int, text: str
-    ) -> int | None:
-        self.token_append_calls += 1
-        self.token_append_started.set()
-        if self.token_append_gate is not None:
-            await self.token_append_gate.wait()
-        if self.token_append_failure is not None:
-            raise self.token_append_failure
-        row = self.runs[run_id]
-        if not self._owns(row, worker_id, fencing_epoch):
-            return None
-        return self._append(row, "token", {"text": text})
-
-    async def append_reset(
-        self, *, owner_id: str, run_id: str, worker_id: str, fencing_epoch: int
-    ) -> int | None:
-        row = self.runs[run_id]
-        if not self._owns(row, worker_id, fencing_epoch):
-            return None
-        return self._append(row, "reset", {})
-
-    async def append_tool_event(
+    async def write_checkpoint(
         self,
         *,
         owner_id: str,
         run_id: str,
         worker_id: str,
         fencing_epoch: int,
+        checkpoint: Mapping[str, object],
+        phase: str | None = None,
+    ) -> bool:
+        row = self.runs[run_id]
+        if not self._owns(row, worker_id, fencing_epoch):
+            return False
+        row["checkpoint"] = dict(checkpoint)
+        if phase is not None:
+            row["phase"] = phase
+        row["durable_progress_version"] = int(row["durable_progress_version"]) + 1
+        return True
+
+    async def start_handoff(
+        self,
+        *,
+        owner_id: str,
+        run_id: str,
+        worker_id: str,
+        fencing_epoch: int,
+        checkpoint: Mapping[str, object],
+    ) -> bool:
+        return await self.write_checkpoint(
+            owner_id=owner_id,
+            run_id=run_id,
+            worker_id=worker_id,
+            fencing_epoch=fencing_epoch,
+            checkpoint=checkpoint,
+            phase="handed_off",
+        )
+
+    async def append_event(
+        self,
+        *,
+        owner_id: str,
+        run_id: str,
+        worker_id: str,
+        fencing_epoch: int,
+        phase: str | None,
         event_type: str,
         payload: Mapping[str, object],
     ) -> int | None:
+        if event_type == "token":
+            self.token_append_calls += 1
+            self.token_append_started.set()
+            if self.token_append_gate is not None:
+                await self.token_append_gate.wait()
+            if self.token_append_failure is not None:
+                raise self.token_append_failure
         row = self.runs[run_id]
         if not self._owns(row, worker_id, fencing_epoch):
             return None
+        if phase is not None:
+            row["phase"] = phase
         return self._append(row, event_type, dict(payload))
 
     async def finish_success(
@@ -309,18 +343,77 @@ class _MemoryStore:
         fencing_epoch: int,
         error_kind: str,
         error_message: str,
+        result: Mapping[str, object] | None = None,
     ) -> TerminalOutcome:
         row = self.runs[run_id]
+        if row["cancel_requested"]:
+            return await self.finish_cancelled(
+                owner_id=owner_id,
+                run_id=run_id,
+                worker_id=worker_id,
+                fencing_epoch=fencing_epoch,
+            )
         row["error_kind"] = error_kind
         return self._finish(
             row,
             worker_id,
             fencing_epoch,
             status="failed",
-            result=None,
+            result=None if result is None else dict(result),
             event_type="error",
-            payload={"error_kind": error_kind, "message": error_message},
+            payload={"kind": error_kind, "message": error_message},
         )
+
+    async def defer(
+        self,
+        *,
+        owner_id: str,
+        run_id: str,
+        worker_id: str,
+        fencing_epoch: int,
+        checkpoint: Mapping[str, object],
+        next_attempt_at: datetime.datetime,
+    ) -> bool:
+        row = self.runs[run_id]
+        if row["lease_owner"] != worker_id or row["fencing_epoch"] != fencing_epoch:
+            return False
+        row.update(
+            status="queued",
+            phase="deferred",
+            checkpoint=dict(checkpoint),
+            next_attempt_at=next_attempt_at,
+            lease_owner=None,
+            lease_expires_at=None,
+        )
+        return True
+
+    async def resume_repair(self, *, owner_id: str, run_id: str) -> bool:
+        row = self.runs[run_id]
+        if row.get("phase") != "waiting_for_repair":
+            return False
+        row.update(status="queued", phase="deferred", next_attempt_at=None)
+        return True
+
+    async def wait_for_repair(
+        self,
+        *,
+        owner_id: str,
+        run_id: str,
+        worker_id: str,
+        fencing_epoch: int,
+        checkpoint: Mapping[str, object],
+    ) -> bool:
+        row = self.runs[run_id]
+        if row["lease_owner"] != worker_id or row["fencing_epoch"] != fencing_epoch:
+            return False
+        row.update(
+            phase="waiting_for_repair",
+            checkpoint=dict(checkpoint),
+            next_attempt_at=None,
+            lease_owner=None,
+            lease_expires_at=None,
+        )
+        return True
 
     async def finish_cancelled(
         self, *, owner_id: str, run_id: str, worker_id: str, fencing_epoch: int
@@ -395,18 +488,22 @@ class _MemoryStore:
 
     async def read_event_page(
         self, *, owner_id: str, run_id: str, after_sequence: int = 0
-    ) -> tuple[AnswerRunEvent, ...]:
+    ) -> tuple[RunEvent, ...]:
         return tuple(
             event for event in self.events.get(run_id, []) if event.sequence > after_sequence
         )
 
-    async def get_run(self, *, owner_id: str, run_id: str) -> AnswerRunRecord | None:
+    async def get_run(self, *, owner_id: str, run_id: str) -> RunRecord | None:
+        row = self.runs.get(run_id)
+        return self._record(row) if row is not None else None
+
+    async def get_run_global(self, *, run_id: str) -> RunRecord | None:
         row = self.runs.get(run_id)
         return self._record(row) if row is not None else None
 
     async def list_runs(
         self, *, owner_id: str, after_run_id: str | None = None, limit: int = 50
-    ) -> tuple[AnswerRunRecord, ...]:
+    ) -> tuple[RunRecord, ...]:
         return ()
 
     async def list_run_artifacts(self, *, owner_id: str, run_id: str) -> tuple[Any, ...]:
@@ -417,22 +514,6 @@ class _MemoryStore:
 
     async def request_cancellation(self, *, owner_id: str, run_id: str) -> Any:
         self.runs[run_id]["cancel_requested"] = True
-        return None
-
-    async def stream_artifact(
-        self,
-        *,
-        owner_id: str,
-        digest: str,
-        offset: int = 0,
-        length: int | None = None,
-    ) -> AsyncIterator[bytes]:
-        del owner_id, digest, offset, length
-        if False:  # pragma: no cover - never yields for this double
-            yield b""
-
-    async def blob_size(self, *, owner_id: str, digest: str) -> int | None:
-        del owner_id, digest
         return None
 
 
@@ -507,7 +588,7 @@ def _coordinator(
     store: _MemoryStore,
     executor: _Executor,
     *,
-    answer_worker_concurrency: int = 2,
+    query_worker_concurrency: int = 2,
     token_flush_sleep: Callable[[float], Awaitable[None]] | None = None,
 ):
     kwargs: dict[str, Any] = {}
@@ -515,8 +596,8 @@ def _coordinator(
         kwargs["_token_flush_sleep"] = token_flush_sleep
     return RunCoordinator(
         store=store,
-        executor=executor,
-        answer_worker_concurrency=answer_worker_concurrency,
+        executors={"answer": executor},
+        query_worker_concurrency=query_worker_concurrency,
         **kwargs,
     )
 
@@ -537,9 +618,9 @@ class TestSchedulingAndLease:
 
         async def body(session: RunSession) -> RunExecutionOutcome:
             await release.wait()
-            return CoordinatorOwnedSuccess({"answer": "done"})
+            return Succeeded({"answer": "done"})
 
-        coordinator = _coordinator(store, _Executor(body), answer_worker_concurrency=1)
+        coordinator = _coordinator(store, _Executor(body), query_worker_concurrency=1)
         store.add_run("run-a")
         store.add_run("run-b")
         await coordinator.start()
@@ -566,12 +647,12 @@ class TestSchedulingAndLease:
                 await asyncio.sleep(5)
             finally:
                 stopped.set()
-            return CoordinatorOwnedSuccess({"answer": "unreachable"})
+            return Succeeded({"answer": "unreachable"})
 
         coordinator = RunCoordinator(
             store=store,
-            executor=_Executor(body),
-            answer_worker_concurrency=1,
+            executors={"answer": _Executor(body)},
+            query_worker_concurrency=1,
             heartbeat_seconds=0.01,
         )
         store.add_run("run-a")
@@ -598,9 +679,9 @@ class TestSchedulingAndLease:
             except LeaseLostError as exc:
                 outcome["raised"] = exc
                 raise
-            return CoordinatorOwnedSuccess({"answer": "no"})
+            return Succeeded({"answer": "no"})
 
-        coordinator = _coordinator(store, _Executor(body), answer_worker_concurrency=1)
+        coordinator = _coordinator(store, _Executor(body), query_worker_concurrency=1)
         store.add_run("run-a")
         await coordinator.start()
         try:
@@ -617,10 +698,13 @@ class TestSchedulingAndLease:
 
         async def body(session: RunSession) -> RunExecutionOutcome:
             await hold.wait()
-            return CoordinatorOwnedSuccess({"answer": "done"})
+            return Succeeded({"answer": "done"})
 
         coordinator = RunCoordinator(
-            store=store, executor=_Executor(body), answer_worker_concurrency=1, sweep_seconds=0.01
+            store=store,
+            executors={"answer": _Executor(body)},
+            query_worker_concurrency=1,
+            sweep_seconds=0.01,
         )
         store.add_run("run-a")
         await coordinator.start()
@@ -638,10 +722,10 @@ class TestRetentionMaintenance:
     async def _running(self, store: _MemoryStore, **kwargs: Any) -> RunCoordinator:
         coordinator = RunCoordinator(
             store=store,
-            executor=_Executor(
-                lambda session: asyncio.sleep(0, CoordinatorOwnedSuccess({"answer": "x"}))
-            ),
-            answer_worker_concurrency=1,
+            executors={
+                "answer": _Executor(lambda session: asyncio.sleep(0, Succeeded({"answer": "x"})))
+            },
+            query_worker_concurrency=1,
             sweep_seconds=60.0,
             **kwargs,
         )
@@ -662,10 +746,10 @@ class TestRetentionMaintenance:
         store.prune_batches = [200, 0]
         coordinator = RunCoordinator(
             store=store,
-            executor=_Executor(
-                lambda session: asyncio.sleep(0, CoordinatorOwnedSuccess({"answer": "x"}))
-            ),
-            answer_worker_concurrency=1,
+            executors={
+                "answer": _Executor(lambda session: asyncio.sleep(0, Succeeded({"answer": "x"})))
+            },
+            query_worker_concurrency=1,
         )
 
         await coordinator._maintain_once()
@@ -722,12 +806,12 @@ class TestWallClockTokenFlush:
             await session.emit_token("small")
             executor_blocked.set()
             await release.wait()
-            return CoordinatorOwnedSuccess({"answer": "small"})
+            return Succeeded({"answer": "small"})
 
         coordinator = _coordinator(
             store,
             _Executor(body),
-            answer_worker_concurrency=1,
+            query_worker_concurrency=1,
             token_flush_sleep=scheduler,
         )
         store.add_run("run-a")
@@ -755,9 +839,9 @@ class TestWallClockTokenFlush:
             started_at = asyncio.get_running_loop().time()
             await session.emit_token("clocked")
             await release.wait()
-            return CoordinatorOwnedSuccess({"answer": "clocked"})
+            return Succeeded({"answer": "clocked"})
 
-        coordinator = _coordinator(store, _Executor(body), answer_worker_concurrency=1)
+        coordinator = _coordinator(store, _Executor(body), query_worker_concurrency=1)
         store.add_run("run-a")
         await coordinator.start()
         try:
@@ -787,12 +871,12 @@ class TestWallClockTokenFlush:
             await session.emit_token(" three")
             buffered.set()
             await release.wait()
-            return CoordinatorOwnedSuccess({"answer": "one two three"})
+            return Succeeded({"answer": "one two three"})
 
         coordinator = _coordinator(
             store,
             _Executor(body),
-            answer_worker_concurrency=1,
+            query_worker_concurrency=1,
             token_flush_sleep=scheduler,
         )
         store.add_run("run-a")
@@ -822,12 +906,12 @@ class TestWallClockTokenFlush:
             await session.emit_token("a")
             exposed.set_result(session)
             await release.wait()
-            return CoordinatorOwnedSuccess({"answer": "done"})
+            return Succeeded({"answer": "done"})
 
         coordinator = _coordinator(
             store,
             _Executor(body),
-            answer_worker_concurrency=1,
+            query_worker_concurrency=1,
             token_flush_sleep=scheduler,
         )
         store.add_run("run-a")
@@ -865,12 +949,12 @@ class TestWallClockTokenFlush:
             await session.emit_token("a")
             exposed.set_result(session)
             await release.wait()
-            return CoordinatorOwnedSuccess({"answer": "done"})
+            return Succeeded({"answer": "done"})
 
         coordinator = _coordinator(
             store,
             _Executor(body),
-            answer_worker_concurrency=1,
+            query_worker_concurrency=1,
             token_flush_sleep=scheduler,
         )
         store.add_run("run-a")
@@ -911,12 +995,12 @@ class TestWallClockTokenFlush:
             await session.emit_tool_event("tool_started", {"name": "search"})
             await session.emit_token("before terminal")
             await asyncio.sleep(0)
-            return CoordinatorOwnedSuccess({"answer": "done"})
+            return Succeeded({"answer": "done"})
 
         coordinator = _coordinator(
             store,
             _Executor(body),
-            answer_worker_concurrency=1,
+            query_worker_concurrency=1,
             token_flush_sleep=scheduler,
         )
         store.add_run("run-a")
@@ -962,13 +1046,13 @@ class TestWallClockTokenFlush:
                 await session.emit_token(" must be rejected")
             except Exception:
                 rejected_late_token.set()
-            return CoordinatorOwnedSuccess({"answer": "must not commit"})
+            return Succeeded({"answer": "must not commit"})
 
         executor = _Executor(body)
         coordinator = _coordinator(
             store,
             executor,
-            answer_worker_concurrency=1,
+            query_worker_concurrency=1,
             token_flush_sleep=scheduler,
         )
         store.add_run("run-a")
@@ -1009,12 +1093,12 @@ class TestWallClockTokenFlush:
             await session.emit_token("discard on requeue")
             blocked.set()
             await asyncio.Event().wait()
-            return CoordinatorOwnedSuccess({"answer": "unreachable"})
+            return Succeeded({"answer": "unreachable"})
 
         coordinator = _coordinator(
             store,
             _Executor(body),
-            answer_worker_concurrency=1,
+            query_worker_concurrency=1,
             token_flush_sleep=scheduler,
         )
         store.add_run("run-a")
@@ -1044,12 +1128,12 @@ class TestWallClockTokenFlush:
             # This boundary cancels and reaps the sleeping timer while holding
             # the session lane. Shutdown then cancels this caller mid-reap.
             await session.enter_phase("generating")
-            return CoordinatorOwnedSuccess({"answer": "must not commit"})
+            return Succeeded({"answer": "must not commit"})
 
         coordinator = _coordinator(
             store,
             _Executor(body),
-            answer_worker_concurrency=1,
+            query_worker_concurrency=1,
             token_flush_sleep=sleeper,
         )
         store.add_run("run-a")
@@ -1078,12 +1162,12 @@ class TestWallClockTokenFlush:
                 await asyncio.Event().wait()
             finally:
                 executor_cancelled.set()
-            return CoordinatorOwnedSuccess({"answer": "unreachable"})
+            return Succeeded({"answer": "unreachable"})
 
         coordinator = _coordinator(
             store,
             _Executor(body),
-            answer_worker_concurrency=1,
+            query_worker_concurrency=1,
             token_flush_sleep=scheduler,
         )
         store.add_run("run-a")
@@ -1139,7 +1223,7 @@ class TestDurableProgress:
             return AlreadyCommittedTerminal(terminal)
 
         executor = _Executor(body)
-        coordinator = _coordinator(store, executor, answer_worker_concurrency=1)
+        coordinator = _coordinator(store, executor, query_worker_concurrency=1)
         store.add_run("run-a")
         with coordinator._broker.waiter(_OWNER, "run-a") as notified:
             await coordinator.start()
@@ -1166,9 +1250,9 @@ class TestDurableProgress:
             await session.enter_phase("generating")
             for token in ("alpha ", "beta ", "gamma"):
                 await session.emit_token(token)
-            return CoordinatorOwnedSuccess({"answer": "alpha beta gamma"})
+            return Succeeded({"answer": "alpha beta gamma"})
 
-        coordinator = _coordinator(store, _Executor(body), answer_worker_concurrency=1)
+        coordinator = _coordinator(store, _Executor(body), query_worker_concurrency=1)
         store.add_run("run-a")
         await coordinator.start()
         try:
@@ -1190,9 +1274,9 @@ class TestDurableProgress:
             attempts.append(1)
             if len(attempts) == 1:
                 raise RuntimeError("process died")
-            return CoordinatorOwnedSuccess({"answer": "resumed"})
+            return Succeeded({"answer": "resumed"})
 
-        coordinator = _coordinator(store, _Executor(body), answer_worker_concurrency=1)
+        coordinator = _coordinator(store, _Executor(body), query_worker_concurrency=1)
         store.add_run("run-a")
         await coordinator.start()
         try:
@@ -1213,9 +1297,9 @@ class TestDurableProgress:
 
         async def body(session: RunSession) -> RunExecutionOutcome:
             await session.emit_token("fresh draft")
-            return CoordinatorOwnedSuccess({"answer": "fresh draft"})
+            return Succeeded({"answer": "fresh draft"})
 
-        coordinator = _coordinator(store, _Executor(body), answer_worker_concurrency=1)
+        coordinator = _coordinator(store, _Executor(body), query_worker_concurrency=1)
         await coordinator.start()
         try:
             await _settle(lambda: store.runs["run-a"]["status"] == "succeeded")
@@ -1234,9 +1318,9 @@ class TestDurableProgress:
 
         async def body(session: RunSession) -> RunExecutionOutcome:
             await session.emit_token("draft")
-            return CoordinatorOwnedSuccess({"answer": "draft"})
+            return Succeeded({"answer": "draft"})
 
-        coordinator = _coordinator(store, _Executor(body), answer_worker_concurrency=1)
+        coordinator = _coordinator(store, _Executor(body), query_worker_concurrency=1)
         await coordinator.start()
         try:
             await _settle(lambda: store.runs["run-a"]["status"] == "succeeded")
@@ -1251,7 +1335,7 @@ class TestDurableProgress:
         async def body(session: RunSession) -> RunExecutionOutcome:
             raise RunExecutionError("evidence_settlement_conflict", "conflict")
 
-        coordinator = _coordinator(store, _Executor(body), answer_worker_concurrency=1)
+        coordinator = _coordinator(store, _Executor(body), query_worker_concurrency=1)
         store.add_run("run-a")
         await coordinator.start()
         try:
@@ -1260,7 +1344,10 @@ class TestDurableProgress:
             await coordinator.aclose()
 
         assert store.runs["run-a"]["error_kind"] == "evidence_settlement_conflict"
-        assert store.events["run-a"][-1].payload.get("error_kind") == "evidence_settlement_conflict"
+        assert store.events["run-a"][-1].payload == {
+            "kind": "evidence_settlement_conflict",
+            "message": "conflict",
+        }
 
     async def test_an_owner_classified_failure_keeps_its_actionable_message(self) -> None:
         store = _MemoryStore()
@@ -1271,7 +1358,7 @@ class TestDurableProgress:
                 "Could not read report.pdf.",
             )
 
-        coordinator = _coordinator(store, _Executor(body), answer_worker_concurrency=1)
+        coordinator = _coordinator(store, _Executor(body), query_worker_concurrency=1)
         store.add_run("run-a")
         await coordinator.start()
         try:
@@ -1280,8 +1367,10 @@ class TestDurableProgress:
             await coordinator.aclose()
 
         payload = store.events["run-a"][-1].payload
-        assert payload["error_kind"] == "CURRENT_DOCUMENT_PARSE_FAILED"
-        assert "report.pdf" in payload["message"]
+        assert payload == {
+            "kind": "CURRENT_DOCUMENT_PARSE_FAILED",
+            "message": "Could not read report.pdf.",
+        }
 
     async def test_an_unclassified_failure_never_leaks_its_exception_text(self) -> None:
         store = _MemoryStore()
@@ -1289,7 +1378,7 @@ class TestDurableProgress:
         async def body(session: RunSession) -> RunExecutionOutcome:
             raise RuntimeError("postgres://user:secret@host/db is unreachable")
 
-        coordinator = _coordinator(store, _Executor(body), answer_worker_concurrency=1)
+        coordinator = _coordinator(store, _Executor(body), query_worker_concurrency=1)
         store.add_run("run-a")
         await coordinator.start()
         try:
@@ -1298,8 +1387,10 @@ class TestDurableProgress:
             await coordinator.aclose()
 
         payload = store.events["run-a"][-1].payload
-        assert payload["error_kind"] == "run_execution_failed"
-        assert payload["message"] == "Run execution failed."
+        assert payload == {
+            "kind": "run_execution_failed",
+            "message": "Run execution failed.",
+        }
 
     async def test_a_foreign_public_message_attribute_never_reaches_a_client(self) -> None:
         """Only the answer taxonomy vets a client-safe message; the shape does not."""
@@ -1311,7 +1402,7 @@ class TestDurableProgress:
         async def body(session: RunSession) -> RunExecutionOutcome:
             raise _Impostor("boom")
 
-        coordinator = _coordinator(store, _Executor(body), answer_worker_concurrency=1)
+        coordinator = _coordinator(store, _Executor(body), query_worker_concurrency=1)
         store.add_run("run-a")
         await coordinator.start()
         try:
@@ -1331,9 +1422,9 @@ class TestDurableProgress:
             executed = True
             if session.prepared_input is None:
                 raise RunExecutionError("run_execution_failed", "no prepared input")
-            return CoordinatorOwnedSuccess({"answer": "never"})
+            return Succeeded({"answer": "never"})
 
-        coordinator = _coordinator(store, _Executor(body), answer_worker_concurrency=1)
+        coordinator = _coordinator(store, _Executor(body), query_worker_concurrency=1)
         await coordinator.start()
         try:
             await _settle(lambda: store.runs["run-a"]["status"] == "failed")
@@ -1355,12 +1446,12 @@ class TestHeartbeatResilience:
         async def body(session: RunSession) -> RunExecutionOutcome:
             await _settle(lambda: store.heartbeats >= 5)
             await session.check_cancelled()
-            return CoordinatorOwnedSuccess({"answer": "survived"})
+            return Succeeded({"answer": "survived"})
 
         coordinator = RunCoordinator(
             store=store,
-            executor=_Executor(body),
-            answer_worker_concurrency=1,
+            executors={"answer": _Executor(body)},
+            query_worker_concurrency=1,
             heartbeat_seconds=0.01,
         )
         await coordinator.start()
@@ -1382,11 +1473,14 @@ class TestHeartbeatResilience:
             row["lease_owner"] = "another-worker"
             row["fencing_epoch"] = int(row["fencing_epoch"]) + 1
             await asyncio.sleep(5)
-            return CoordinatorOwnedSuccess({"answer": "never"})
+            return Succeeded({"answer": "never"})
 
         executor = _Executor(body)
         coordinator = RunCoordinator(
-            store=store, executor=executor, answer_worker_concurrency=1, heartbeat_seconds=0.01
+            store=store,
+            executors={"answer": executor},
+            query_worker_concurrency=1,
+            heartbeat_seconds=0.01,
         )
         await coordinator.start()
         try:
@@ -1409,12 +1503,12 @@ class TestHeartbeatResilience:
             assert task is not None
             executions.append(task)
             await _settle(lambda: store.heartbeats >= 1)
-            return CoordinatorOwnedSuccess({"answer": "kept"})
+            return Succeeded({"answer": "kept"})
 
         coordinator = RunCoordinator(
             store=store,
-            executor=_Executor(body),
-            answer_worker_concurrency=1,
+            executors={"answer": _Executor(body)},
+            query_worker_concurrency=1,
             heartbeat_seconds=0.01,
         )
         await coordinator.start()
@@ -1446,12 +1540,12 @@ class TestCancellationAndShutdown:
             for _ in range(200):
                 await session.check_cancelled()
                 await asyncio.sleep(0.005)
-            return CoordinatorOwnedSuccess({"answer": "unreachable"})
+            return Succeeded({"answer": "unreachable"})
 
         coordinator = RunCoordinator(
             store=store,
-            executor=_Executor(body),
-            answer_worker_concurrency=1,
+            executors={"answer": _Executor(body)},
+            query_worker_concurrency=1,
             heartbeat_seconds=0.01,
         )
         store.add_run("run-a")
@@ -1465,14 +1559,69 @@ class TestCancellationAndShutdown:
 
         assert store.events["run-a"][-1].payload == {"status": "cancelled"}
 
+    async def test_accepted_cancellation_wins_a_returned_executor_failure(self) -> None:
+        store = _MemoryStore()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def body(session: RunSession) -> RunExecutionOutcome:
+            entered.set()
+            await release.wait()
+            return Failed("provider_error", "provider failed", {"partial": True})
+
+        coordinator = _coordinator(store, _Executor(body), query_worker_concurrency=1)
+        store.add_run("run-a")
+        await coordinator.start()
+        try:
+            await entered.wait()
+            await store.request_cancellation(owner_id=_OWNER, run_id="run-a")
+            release.set()
+            await _settle(lambda: store.runs["run-a"]["status"] == "cancelled")
+        finally:
+            release.set()
+            await coordinator.aclose()
+
+        assert store.runs["run-a"]["result"] is None
+        assert store.runs["run-a"]["error_kind"] is None
+        assert [(event.event_type, event.payload) for event in store.events["run-a"]] == [
+            ("done", {"status": "cancelled"})
+        ]
+
+    async def test_accepted_cancellation_wins_a_raised_executor_failure(self) -> None:
+        store = _MemoryStore()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def body(session: RunSession) -> RunExecutionOutcome:
+            entered.set()
+            await release.wait()
+            raise RunExecutionError("provider_error", "provider failed")
+
+        coordinator = _coordinator(store, _Executor(body), query_worker_concurrency=1)
+        store.add_run("run-a")
+        await coordinator.start()
+        try:
+            await entered.wait()
+            await store.request_cancellation(owner_id=_OWNER, run_id="run-a")
+            release.set()
+            await _settle(lambda: store.runs["run-a"]["status"] == "cancelled")
+        finally:
+            release.set()
+            await coordinator.aclose()
+
+        assert store.runs["run-a"]["error_kind"] is None
+        assert [(event.event_type, event.payload) for event in store.events["run-a"]] == [
+            ("done", {"status": "cancelled"})
+        ]
+
     async def test_pending_tokens_are_flushed_before_a_terminal_transition(self) -> None:
         store = _MemoryStore()
 
         async def body(session: RunSession) -> RunExecutionOutcome:
             await session.emit_token("partial")
-            raise RunCancelledError
+            raise RunCancellationObserved
 
-        coordinator = _coordinator(store, _Executor(body), answer_worker_concurrency=1)
+        coordinator = _coordinator(store, _Executor(body), query_worker_concurrency=1)
         store.add_run("run-a")
         await coordinator.start()
         try:
@@ -1489,9 +1638,9 @@ class TestCancellationAndShutdown:
         async def body(session: RunSession) -> RunExecutionOutcome:
             running.set()
             await asyncio.sleep(30)
-            return CoordinatorOwnedSuccess({"answer": "unreachable"})
+            return Succeeded({"answer": "unreachable"})
 
-        coordinator = _coordinator(store, _Executor(body), answer_worker_concurrency=1)
+        coordinator = _coordinator(store, _Executor(body), query_worker_concurrency=1)
         store.add_run("run-a")
         await coordinator.start()
         await running.wait()
@@ -1507,9 +1656,9 @@ class TestCancellationAndShutdown:
         store = _MemoryStore()
 
         async def body(session: RunSession) -> RunExecutionOutcome:
-            return CoordinatorOwnedSuccess({"answer": "done"})
+            return Succeeded({"answer": "done"})
 
-        coordinator = _coordinator(store, _Executor(body), answer_worker_concurrency=1)
+        coordinator = _coordinator(store, _Executor(body), query_worker_concurrency=1)
         store.add_run("run-a")
         before = {task for task in asyncio.all_tasks()}
         await coordinator.start()
@@ -1536,9 +1685,9 @@ class TestCancellationAndShutdown:
         store.finish_success = slow_finish  # type: ignore[method-assign]
 
         async def body(session: RunSession) -> RunExecutionOutcome:
-            return CoordinatorOwnedSuccess({"answer": "done"})
+            return Succeeded({"answer": "done"})
 
-        coordinator = _coordinator(store, _Executor(body), answer_worker_concurrency=1)
+        coordinator = _coordinator(store, _Executor(body), query_worker_concurrency=1)
         store.add_run("run-a")
         before = {task for task in asyncio.all_tasks()}
         await coordinator.start()
@@ -1561,14 +1710,14 @@ class TestSubscriptions:
             await session.emit_token("one")
             await session.flush_tokens()
             await gate.wait()
-            return CoordinatorOwnedSuccess({"answer": "one"})
+            return Succeeded({"answer": "one"})
 
-        coordinator = _coordinator(store, _Executor(body), answer_worker_concurrency=1)
+        coordinator = _coordinator(store, _Executor(body), query_worker_concurrency=1)
         store.add_run("run-a")
         await coordinator.start()
         try:
             await _settle(lambda: len(store.events["run-a"]) == 2)
-            seen: list[AnswerRunEvent] = []
+            seen: list[RunEvent] = []
 
             async def consume() -> None:
                 async for event in coordinator.subscribe(owner_id=_OWNER, run_id="run-a"):
@@ -1592,9 +1741,9 @@ class TestSubscriptions:
             await session.enter_phase("generating")
             await session.emit_token("one")
             await session.flush_tokens()
-            return CoordinatorOwnedSuccess({"answer": "one"})
+            return Succeeded({"answer": "one"})
 
-        coordinator = _coordinator(store, _Executor(body), answer_worker_concurrency=1)
+        coordinator = _coordinator(store, _Executor(body), query_worker_concurrency=1)
         store.add_run("run-a")
         await coordinator.start()
         try:
@@ -1623,9 +1772,9 @@ class TestSubscriptions:
         async def body(session: RunSession) -> RunExecutionOutcome:
             await session.enter_phase("generating")
             await release.wait()
-            return CoordinatorOwnedSuccess({"answer": "still finished"})
+            return Succeeded({"answer": "still finished"})
 
-        coordinator = _coordinator(store, _Executor(body), answer_worker_concurrency=1)
+        coordinator = _coordinator(store, _Executor(body), query_worker_concurrency=1)
         store.add_run("run-a")
         await coordinator.start()
         try:
@@ -1645,9 +1794,9 @@ class TestSubscriptions:
 
         async def body(session: RunSession) -> RunExecutionOutcome:
             await session.emit_token("shared")
-            return CoordinatorOwnedSuccess({"answer": "shared"})
+            return Succeeded({"answer": "shared"})
 
-        coordinator = _coordinator(store, _Executor(body), answer_worker_concurrency=1)
+        coordinator = _coordinator(store, _Executor(body), query_worker_concurrency=1)
         store.add_run("run-a")
         await coordinator.start()
         try:
@@ -1666,7 +1815,7 @@ class TestSubscriptions:
 
     async def test_unknown_run_yields_nothing_and_closes(self) -> None:
         store = _MemoryStore()
-        coordinator = _coordinator(store, _Executor(_noop), answer_worker_concurrency=1)
+        coordinator = _coordinator(store, _Executor(_noop), query_worker_concurrency=1)
 
         events = [event async for event in coordinator.subscribe(owner_id=_OWNER, run_id="missing")]
 
@@ -1674,25 +1823,25 @@ class TestSubscriptions:
 
 
 async def _noop(session: RunSession) -> RunExecutionOutcome:
-    return CoordinatorOwnedSuccess({"answer": ""})
+    return Succeeded({"answer": ""})
 
 
-@pytest.mark.parametrize("answer_worker_concurrency", [1, 4])
+@pytest.mark.parametrize("query_worker_concurrency", [1, 4])
 def test_execution_slots_are_bounded_by_worker_concurrency(
-    answer_worker_concurrency: int,
+    query_worker_concurrency: int,
 ) -> None:
     coordinator = RunCoordinator(
         store=_MemoryStore(),
-        executor=_Executor(_noop),
-        answer_worker_concurrency=answer_worker_concurrency,
+        executors={"answer": _Executor(_noop)},
+        query_worker_concurrency=query_worker_concurrency,
     )
-    assert coordinator.answer_worker_concurrency == answer_worker_concurrency
+    assert coordinator.query_worker_concurrency == query_worker_concurrency
 
 
-def test_answer_worker_concurrency_must_be_positive() -> None:
-    with pytest.raises(ValueError, match="answer_worker_concurrency must be positive"):
+def test_query_worker_concurrency_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="query_worker_concurrency must be positive"):
         RunCoordinator(
             store=_MemoryStore(),
-            executor=_Executor(_noop),
-            answer_worker_concurrency=0,
+            executors={"answer": _Executor(_noop)},
+            query_worker_concurrency=0,
         )

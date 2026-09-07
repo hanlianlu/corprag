@@ -186,13 +186,16 @@ def test_match_conditions_selects_the_filename_clause_by_mode() -> None:
         "finance", filters, filename_mode="contains"
     )
 
-    assert exact_conditions[0] == "workspace = $1"
+    assert exact_conditions[:2] == [
+        "workspace = $1",
+        "_dlightrag_finalization_complete IS TRUE",
+    ]
     assert (
-        exact_conditions[1]
+        exact_conditions[2]
         == _filename_condition("", "Quarterly Report", filename_mode="exact", idx=2)[0]
     )
     assert (
-        contains_conditions[1]
+        contains_conditions[2]
         == _filename_condition("", "Quarterly Report", filename_mode="contains", idx=2)[0]
     )
     assert exact_params == ["finance", "Quarterly Report"]

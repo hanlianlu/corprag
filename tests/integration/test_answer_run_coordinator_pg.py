@@ -26,12 +26,13 @@ import pytest
 
 from dlightrag._compose import _compose
 from dlightrag.adapters.postgres.answer import session_repository as pg_session_repository
-from dlightrag.adapters.postgres.answer.answer_runs import PGAnswerRunStore
 from dlightrag.adapters.postgres.answer.session_repository import PGAgentSessionRepository
+from dlightrag.adapters.postgres.runtime.run_blob_store import PGRunBlobStore
+from dlightrag.adapters.postgres.runtime.run_store import PGRunStore
 from dlightrag.adapters.postgres.web.web_conversations import PGWebConversationStore
 from dlightrag.application import Application
 from dlightrag.application.answer_runs.execution import AnswerRunInput, PinnedModelProfile
-from dlightrag.application.config import DlightragConfig, RuntimeConfig
+from dlightrag.application.config import DlightragConfig, QueryLaneRuntimeConfig, RuntimeConfig
 from dlightrag.application.settings import answer_executor_settings, answer_resource_settings
 from dlightrag.engine.agent.session.effects import canonical_json
 from dlightrag.engine.agent.session.entries import UserMessageEntry
@@ -51,6 +52,7 @@ from dlightrag.engine.agent.session.transactions import (
     TransactionCommit,
 )
 from dlightrag.engine.ai.capacity import CONTEXT_POLICY_REVISION, ModelProfile
+from dlightrag.engine.ai.catalog import current_model_catalog_revision
 from dlightrag.engine.ai.fingerprints import ModelFingerprint
 from dlightrag.engine.ai.messages import AssistantTurn
 from dlightrag.engine.ai.telemetry import NOOP_TELEMETRY
@@ -68,13 +70,13 @@ from dlightrag.engine.answer.resources.models import TextWindowBudget
 from dlightrag.engine.answer.synthesizer import AnswerSynthesizer
 from dlightrag.engine.rag.retrieval import RetrievalResult
 from dlightrag.engine.runtime import (
-    CoordinatorOwnedSuccess,
     RunCoordinator,
     RunExecutionOutcome,
     RunSession,
-    answer_run_request_fingerprint,
+    Succeeded,
+    run_request_fingerprint,
 )
-from tests.conftest import FingerprintingAnswerRunStore
+from tests.conftest import FingerprintingRunStore
 from tests.integration.pg_conn import PG_CONN_KWARGS
 
 pytestmark = [
@@ -91,7 +93,7 @@ _REQUEST: dict[str, Any] = {
     "agent_session_id": "00000000-0000-7000-8000-000000000001",
     "agent_lane_id": "main",
 }
-_REQUEST_FINGERPRINT = answer_run_request_fingerprint(_REQUEST)
+_REQUEST_FINGERPRINT = run_request_fingerprint(_REQUEST)
 _VISUAL_B64 = base64.b64encode(b"\x89PNG\r\n\x1a\nfake-corpus-visual").decode("ascii")
 
 
@@ -112,7 +114,7 @@ def _answer_run_input() -> AnswerRunInput:
             for role in ("extract", "keyword", "query", "vlm")
         ),
         context_policy_revision=CONTEXT_POLICY_REVISION,
-        model_catalog_revision="2026-08-14",
+        model_catalog_revision=current_model_catalog_revision(),
         idempotency_fingerprint="public-request-hash",
         agent_session_id="00000000-0000-7000-8000-000000000001",
         agent_lane_id="main",
@@ -141,7 +143,7 @@ async def _pg_available() -> bool:
 
 
 @pytest.fixture
-async def store() -> AsyncIterator[FingerprintingAnswerRunStore]:
+async def store() -> AsyncIterator[FingerprintingRunStore]:
     if not await _pg_available():
         pytest.skip("PostgreSQL not available")
 
@@ -157,7 +159,7 @@ async def store() -> AsyncIterator[FingerprintingAnswerRunStore]:
     )
     try:
         assert pool is not None
-        created = FingerprintingAnswerRunStore(pool=pool)
+        created = FingerprintingRunStore(pool=pool)
         await created.initialize()
         # Establish the complete operational schema exactly as a real process does.
         await PGWebConversationStore(pool=pool, run_store=created).initialize()
@@ -190,7 +192,7 @@ async def _settle(predicate: Any, *, timeout: float = 10.0) -> None:
     raise AssertionError("condition never became true")
 
 
-def _status_is(store: PGAnswerRunStore, run_id: str, status: str) -> Any:
+def _status_is(store: PGRunStore, run_id: str, status: str) -> Any:
     async def _check() -> bool:
         run = await store.get_run(owner_id=_OWNER, run_id=run_id)
         return run is not None and run.status == status
@@ -198,7 +200,7 @@ def _status_is(store: PGAnswerRunStore, run_id: str, status: str) -> Any:
     return _check
 
 
-async def test_session_turn_survives_a_new_worker(store: FingerprintingAnswerRunStore) -> None:
+async def test_session_turn_survives_a_new_worker(store: FingerprintingRunStore) -> None:
     creation = await store.create_run(
         owner_id=_OWNER,
         request=_REQUEST,
@@ -242,16 +244,18 @@ async def test_session_turn_survives_a_new_worker(store: FingerprintingAnswerRun
             )
             assert committed.__class__.__name__ == "TransactionCommit"
             await asyncio.sleep(30)
-        return CoordinatorOwnedSuccess(
-            {"answer": "second attempt", "turns": snapshot.commit_sequence}
-        )
+        return Succeeded({"answer": "second attempt", "turns": snapshot.commit_sequence})
 
-    first = RunCoordinator(store=store, executor=_Executor(body), answer_worker_concurrency=1)
+    first = RunCoordinator(
+        store=store, executors={"answer": _Executor(body)}, query_worker_concurrency=1
+    )
     await first.start()
     await _settle(_session_committed(store, run_id))
     await first.aclose()
 
-    second = RunCoordinator(store=store, executor=_Executor(body), answer_worker_concurrency=1)
+    second = RunCoordinator(
+        store=store, executors={"answer": _Executor(body)}, query_worker_concurrency=1
+    )
     await second.start()
     try:
         await _settle(_status_is(store, run_id, "succeeded"))
@@ -265,7 +269,7 @@ async def test_session_turn_survives_a_new_worker(store: FingerprintingAnswerRun
     assert seen == [0, 1]
 
 
-def _session_committed(store: PGAnswerRunStore, run_id: str) -> Any:
+def _session_committed(store: PGRunStore, run_id: str) -> Any:
     async def _check() -> bool:
         run = await store.get_run(owner_id=_OWNER, run_id=run_id)
         return run is not None and run.durable_progress_version == 1
@@ -274,7 +278,7 @@ def _session_committed(store: PGAnswerRunStore, run_id: str) -> Any:
 
 
 async def test_the_coordinator_applies_retention_without_an_execution_slot(
-    store: FingerprintingAnswerRunStore,
+    store: FingerprintingRunStore,
 ) -> None:
     """Every run-owning process trims expired event logs and prunes expired runs."""
     expired = await store.create_run(
@@ -286,7 +290,7 @@ async def test_the_coordinator_applies_retention_without_an_execution_slot(
     live = await store.create_run(
         owner_id=_OWNER,
         request=live_request,
-        idempotency_fingerprint=answer_run_request_fingerprint(live_request),
+        idempotency_fingerprint=run_request_fingerprint(live_request),
     )
     for creation in (expired, live):
         claim = await store.claim_next(worker_id="retention-setup")
@@ -302,8 +306,8 @@ async def test_the_coordinator_applies_retention_without_an_execution_slot(
     assert pool is not None
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE dlightrag_answer_runs SET finished_at = NOW() - INTERVAL '370 days' "
-            "WHERE run_id = $1",
+            "UPDATE dlightrag_runs SET finished_at = NOW() - INTERVAL '370 days', "
+            "purge_after = NOW() - INTERVAL '5 days' WHERE run_id = $1",
             uuid.UUID(expired.run.run_id),
         )
 
@@ -311,12 +315,12 @@ async def test_the_coordinator_applies_retention_without_an_execution_slot(
 
     async def body(session: RunSession) -> RunExecutionOutcome:
         await held.wait()
-        return CoordinatorOwnedSuccess({"answer": "held"})
+        return Succeeded({"answer": "held"})
 
     coordinator = RunCoordinator(
         store=store,
-        executor=_Executor(body),
-        answer_worker_concurrency=1,
+        executors={"answer": _Executor(body)},
+        query_worker_concurrency=1,
         maintenance_seconds=0.05,
     )
     await coordinator.start()
@@ -336,7 +340,7 @@ async def test_the_coordinator_applies_retention_without_an_execution_slot(
 
 
 async def test_graceful_shutdown_requeues_without_crash_recovery(
-    store: FingerprintingAnswerRunStore,
+    store: FingerprintingRunStore,
 ) -> None:
     creation = await store.create_run(
         owner_id=_OWNER,
@@ -349,9 +353,11 @@ async def test_graceful_shutdown_requeues_without_crash_recovery(
     async def body(session: RunSession) -> RunExecutionOutcome:
         running.set()
         await asyncio.sleep(30)
-        return CoordinatorOwnedSuccess({"answer": "unreachable"})
+        return Succeeded({"answer": "unreachable"})
 
-    coordinator = RunCoordinator(store=store, executor=_Executor(body), answer_worker_concurrency=1)
+    coordinator = RunCoordinator(
+        store=store, executors={"answer": _Executor(body)}, query_worker_concurrency=1
+    )
     await coordinator.start()
     await asyncio.wait_for(running.wait(), timeout=10)
     await coordinator.aclose()
@@ -364,7 +370,7 @@ async def test_graceful_shutdown_requeues_without_crash_recovery(
 
 
 async def test_reconnecting_subscriber_replays_without_gaps_or_duplicates(
-    store: FingerprintingAnswerRunStore,
+    store: FingerprintingRunStore,
 ) -> None:
     creation = await store.create_run(
         owner_id=_OWNER,
@@ -379,9 +385,11 @@ async def test_reconnecting_subscriber_replays_without_gaps_or_duplicates(
         await session.flush_tokens()
         await session.emit_token("world")
         await session.flush_tokens()
-        return CoordinatorOwnedSuccess({"answer": "hello world"})
+        return Succeeded({"answer": "hello world"})
 
-    coordinator = RunCoordinator(store=store, executor=_Executor(body), answer_worker_concurrency=1)
+    coordinator = RunCoordinator(
+        store=store, executors={"answer": _Executor(body)}, query_worker_concurrency=1
+    )
     await coordinator.start()
     try:
         await _settle(_status_is(store, run_id, "succeeded"))
@@ -406,7 +414,7 @@ async def test_reconnecting_subscriber_replays_without_gaps_or_duplicates(
 
 
 async def test_running_run_observes_cancellation_and_commits_cancelled(
-    store: FingerprintingAnswerRunStore,
+    store: FingerprintingRunStore,
 ) -> None:
     creation = await store.create_run(
         owner_id=_OWNER,
@@ -421,10 +429,13 @@ async def test_running_run_observes_cancellation_and_commits_cancelled(
         for _ in range(2000):
             await session.check_cancelled()
             await asyncio.sleep(0.01)
-        return CoordinatorOwnedSuccess({"answer": "unreachable"})
+        return Succeeded({"answer": "unreachable"})
 
     coordinator = RunCoordinator(
-        store=store, executor=_Executor(body), answer_worker_concurrency=1, heartbeat_seconds=0.05
+        store=store,
+        executors={"answer": _Executor(body)},
+        query_worker_concurrency=1,
+        heartbeat_seconds=0.05,
     )
     await coordinator.start()
     try:
@@ -440,7 +451,50 @@ async def test_running_run_observes_cancellation_and_commits_cancelled(
     assert events[-1].payload == {"status": "cancelled"}
 
 
-async def test_session_round_trips_through_jsonb(store: FingerprintingAnswerRunStore) -> None:
+async def test_accepted_cancellation_wins_coordinator_failure_settlement(
+    store: FingerprintingRunStore,
+) -> None:
+    creation = await store.create_run(
+        owner_id=_OWNER,
+        request=_REQUEST,
+        idempotency_fingerprint=_REQUEST_FINGERPRINT,
+    )
+    run_id = creation.run.run_id
+    started = asyncio.Event()
+    fail = asyncio.Event()
+
+    async def body(session: RunSession) -> RunExecutionOutcome:
+        started.set()
+        await fail.wait()
+        raise RuntimeError("provider internals must not win cancellation")
+
+    coordinator = RunCoordinator(
+        store=store,
+        executors={"answer": _Executor(body)},
+        query_worker_concurrency=1,
+    )
+    await coordinator.start()
+    try:
+        await asyncio.wait_for(started.wait(), timeout=10)
+        outcome = await store.request_cancellation(owner_id=_OWNER, run_id=run_id)
+        assert outcome.outcome == "pending"
+        fail.set()
+        await _settle(_status_is(store, run_id, "cancelled"))
+    finally:
+        fail.set()
+        await coordinator.aclose()
+
+    record = await store.get_run(owner_id=_OWNER, run_id=run_id)
+    assert record is not None
+    assert record.error_kind is None
+    assert record.error_message is None
+    events = await store.read_event_page(owner_id=_OWNER, run_id=run_id)
+    assert [(event.event_type, event.payload) for event in events] == [
+        ("done", {"status": "cancelled"})
+    ]
+
+
+async def test_session_round_trips_through_jsonb(store: FingerprintingRunStore) -> None:
     creation = await store.create_run(
         owner_id=_OWNER,
         request=_REQUEST,
@@ -510,7 +564,7 @@ async def test_session_round_trips_through_jsonb(store: FingerprintingAnswerRunS
 
 
 async def test_accepted_run_executes_and_stores_a_projected_result_without_a_subscriber(
-    store: FingerprintingAnswerRunStore,
+    store: FingerprintingRunStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A descriptor-only caller still gets a finished run and a safe canonical result."""
@@ -606,7 +660,7 @@ async def test_accepted_run_executes_and_stores_a_projected_result_without_a_sub
 
 
 async def test_fast_post_stage_cancellation_replays_without_generation_or_lane_interleaving(
-    store: FingerprintingAnswerRunStore,
+    store: FingerprintingRunStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository_calls = {"load": 0, "refresh": 0}
@@ -743,7 +797,7 @@ async def test_fast_post_stage_cancellation_replays_without_generation_or_lane_i
 
 
 async def test_fast_failure_clears_reservation_and_keeps_unanswered_user(
-    store: FingerprintingAnswerRunStore,
+    store: FingerprintingRunStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository_calls = {"load": 0, "refresh": 0}
@@ -785,7 +839,7 @@ async def test_fast_failure_clears_reservation_and_keeps_unanswered_user(
     creation = await store.create_run(
         owner_id=_OWNER,
         request=request,
-        idempotency_fingerprint=answer_run_request_fingerprint(request),
+        idempotency_fingerprint=run_request_fingerprint(request),
     )
     coordinator.wake()
     try:
@@ -812,7 +866,7 @@ async def test_fast_failure_clears_reservation_and_keeps_unanswered_user(
 
 
 async def test_publication_correction_is_one_linked_agent_operation(
-    store: FingerprintingAnswerRunStore,
+    store: FingerprintingRunStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository_calls = {"load": 0, "refresh": 0}
@@ -961,7 +1015,7 @@ async def test_publication_correction_is_one_linked_agent_operation(
     creation = await store.create_run(
         owner_id=_OWNER,
         request=request,
-        idempotency_fingerprint=answer_run_request_fingerprint(request),
+        idempotency_fingerprint=run_request_fingerprint(request),
     )
     claimed = await store.claim_next(worker_id="history-seed")
     assert claimed is not None
@@ -1076,7 +1130,7 @@ async def test_publication_correction_is_one_linked_agent_operation(
 
 
 async def test_research_empty_canonical_uses_concurrently_advanced_refresh_for_restore(
-    store: FingerprintingAnswerRunStore,
+    store: FingerprintingRunStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     original_load = PGAgentSessionRepository.load
@@ -1186,7 +1240,7 @@ async def test_research_empty_canonical_uses_concurrently_advanced_refresh_for_r
     creation = await store.create_run(
         owner_id=_OWNER,
         request=request,
-        idempotency_fingerprint=answer_run_request_fingerprint(request),
+        idempotency_fingerprint=run_request_fingerprint(request),
     )
     coordinator.wake()
     try:
@@ -1205,16 +1259,20 @@ async def test_research_empty_canonical_uses_concurrently_advanced_refresh_for_r
 
 
 def _answer_runtime(
-    store: FingerprintingAnswerRunStore,
+    store: FingerprintingRunStore,
     *,
     orchestrator: AnswerOrchestrator | None = None,
 ) -> tuple[Application, RunCoordinator]:
     """Compose the final executor and coordinator over the throwaway database."""
     config = DlightragConfig(  # pyright: ignore[reportCallIssue, reportArgumentType]
-        answer={
-            "runtime": RuntimeConfig(answer_worker_concurrency=1),
-            "agent": {"execution_environment": "disabled"},
-        },
+        runtime=RuntimeConfig(
+            query=QueryLaneRuntimeConfig(
+                worker_concurrency=1,
+                max_active_runs=1,
+                max_nonterminal_runs=30_000,
+            )
+        ),
+        answer={"agent": {"execution_environment": "disabled"}},
     )
     components = _compose(config)
     application = Application(config, components)
@@ -1229,6 +1287,7 @@ def _answer_runtime(
 
     executor = AnswerExecutor(
         store=store,
+        blob_store=PGRunBlobStore(),
         pool=components.pool,
         warm=components.retrieval.warm,
         retrieve=components.retrieval.retrieve_result,
@@ -1263,8 +1322,8 @@ def _answer_runtime(
     executor.prepare_orchestrated_run = _prepare  # type: ignore[method-assign]
     coordinator = RunCoordinator(
         store=store,
-        executor=executor,
-        answer_worker_concurrency=1,
+        executors={"answer": executor},
+        query_worker_concurrency=1,
     )
     return application, coordinator
 

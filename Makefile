@@ -12,7 +12,7 @@ LANGFUSE_BOOTSTRAP = $(PYTHON) scripts/langfuse/headless.py --langfuse-env "$(LA
 PYTHON_LINT_PATHS = packages/ src/ tests/ scripts/ prerequisite_setup.py
 PYTHON_SECURITY_PATHS = packages/ src/ scripts/ prerequisite_setup.py
 
-.PHONY: mineru-install mineru-api mineru-gradio mineru-title-aided mineru-service-install mineru-service-start mineru-service-stop mineru-service-status mineru-service-logs mineru-service-uninstall langfuse-stack langfuse-bootstrap langfuse-up langfuse-down langfuse-reset langfuse-restart langfuse-status langfuse-logs langfuse-health hooks sync-dev lint lint-security format-check typecheck architecture-check shellcheck-all frontend-install frontend-typecheck frontend-lint frontend-test frontend-browser-install frontend-browser-test frontend-build frontend-audit frontend-ci release-check workspace-wheels test-unit ci ci-full test-e2e ci-e2e dev-reset
+.PHONY: mineru-install mineru-api mineru-gradio mineru-title-aided mineru-service-install mineru-service-start mineru-service-stop mineru-service-status mineru-service-logs mineru-service-uninstall langfuse-stack langfuse-bootstrap langfuse-up langfuse-down langfuse-reset langfuse-restart langfuse-status langfuse-logs langfuse-health hooks sync-dev lint lint-security format-check typecheck architecture-check shellcheck-all frontend-install frontend-typecheck frontend-lint frontend-test frontend-browser-install frontend-browser-test frontend-build frontend-audit frontend-ci release-check workspace-wheels test-unit runtime-faults runtime-pg18 load-runtime validate-runtime ci ci-full test-e2e ci-e2e dev-reset
 
 mineru-install:
 	scripts/mineru/install.sh
@@ -153,6 +153,30 @@ workspace-wheels: frontend-build
 
 test-unit:
 	uv run pytest tests/unit -q --tb=short
+
+# P0/P1/P2 RunRuntime fault injection. PostgreSQL must be reachable;
+# providers and parsers are controlled fakes. The browser command exercises
+# reconnect and explicit Corpus Mutation repair/resume presentation.
+runtime-faults: frontend-browser-install
+	uv run python -c 'import asyncio; from tests.integration.run_runtime_pg_harness import require_postgres; asyncio.run(require_postgres())'
+	uv run pytest tests/unit tests/integration/test_corpus_mutation_runs_pg.py tests/integration/test_corpus_mutation_phase_faults_pg.py tests/integration/test_run_runtime_lane_independence_pg.py tests/integration/test_run_runtime_query_plans_pg.py tests/integration/test_retrieval_runs_pg.py tests/integration/test_answer_runs_pg.py -q --tb=short
+	npm --prefix frontend test
+	npm --prefix frontend run test:browser
+
+# Public default-storage convergence with fake models and the supported PG18 image.
+runtime-pg18:
+	DLIGHTRAG_RUN_E2E_PG18=1 uv run pytest tests/e2e/test_pg18_lightrag_smoke.py -m e2e_pg18 -q --tb=short
+
+# Expensive deterministic control-plane campaign; intentionally excluded from CI.
+load-runtime:
+	@set +e; \
+	PYTHONHASHSEED=0 DLIGHTRAG_RUN_LOAD=1 uv run pytest tests/load -m load_runtime -q -s --tb=short; \
+	status=$$?; \
+	if [ $$status -ne 0 ]; then echo "RUN_RUNTIME_LOAD FAIL pytest_exit=$$status"; fi; \
+	exit $$status
+
+validate-runtime: runtime-faults runtime-pg18 load-runtime
+	@echo "RunRuntime failure, PG18, and load validation passed; see .test-results/load-runtime/."
 
 dev-reset:
 	uv run scripts/reset_development.py --mode docker $(ARGS)

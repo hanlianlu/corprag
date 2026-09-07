@@ -29,12 +29,15 @@ async def test_readiness_is_single_flight_and_invalidated_by_state_transitions()
     assert await asyncio.gather(first, second) == [None, None]
     assert calls == 1
 
-    health.mark_degraded("workspace unavailable")
-    assert health.is_ready is False
+    health.mark_component_degraded("corpus_storage")
+    assert health.is_ready is True
     assert health.is_degraded is True
-    assert health.warnings == ("workspace unavailable",)
-    assert await health.readiness_detail() == "RAG service is not ready"
+    assert health.warnings == ("Corpus storage unavailable",)
+    assert await health.readiness_detail() is None
+    assert calls == 1
 
+    health.mark_not_ready()
+    assert await health.readiness_detail() == "RAG service is not ready"
     health.mark_ready()
     assert await health.readiness_detail() is None
     assert calls == 2
@@ -74,7 +77,25 @@ def test_closing_preserves_degraded_diagnostics() -> None:
     assert health.is_closed is True
     assert health.is_ready is False
     assert health.is_degraded is True
-    assert health.warnings == ("startup failed",)
+    assert health.warnings == ("Corpus storage unavailable",)
+
+
+def test_component_view_is_bounded_and_recovery_clears_stale_warning() -> None:
+    health = ApplicationHealth(readiness_probe=None)
+    health.mark_ready()
+    health.mark_component_degraded("providers")
+
+    assert health.components["providers"] == {
+        "status": "degraded",
+        "detail": "Model providers unavailable",
+    }
+    assert health.is_ready is True
+
+    health.mark_component_healthy("providers")
+
+    assert health.components["providers"] == {"status": "healthy"}
+    assert "Model providers unavailable" not in health.warnings
+    assert len(health.components) == 7
 
 
 async def test_transition_discards_an_inflight_pre_transition_verdict() -> None:

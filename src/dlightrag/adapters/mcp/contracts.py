@@ -1,7 +1,7 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
 """Pydantic input contracts for DlightRAG MCP tools."""
 
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 from pydantic import Field, model_validator
 
@@ -41,6 +41,7 @@ class RetrieveInput(QueryWorkspaceSelection, RetrieveRequestContract):
         default_factory=list,
         max_length=MAX_QUERY_IMAGES,
     )
+    idempotency_key: str | None = Field(default=None, max_length=255)
 
 
 class AnswerInput(QueryWorkspaceSelection, AnswerRequestContract):
@@ -59,21 +60,12 @@ class AnswerRunInput(MCPInput):
 
 class IngestInput(IngestSpec):
     workspace: str | None = None
-
-
-class IngestJobStatusInput(MCPInput):
-    job_id: str
+    idempotency_key: str | None = Field(default=None, max_length=255)
 
 
 class CreateWorkspaceInput(MCPInput):
     workspace: str
     display_name: str | None = None
-
-
-class DeleteWorkspaceInput(MCPInput):
-    workspace: str
-    keep_files: bool = False
-    dry_run: bool = False
 
 
 class ListFilesInput(MCPInput):
@@ -82,11 +74,31 @@ class ListFilesInput(MCPInput):
     cursor: str | None = None
 
 
-class DeleteFilesInput(MCPInput):
-    filenames: list[str] | None = None
-    file_paths: list[str] | None = None
+class RetryFilesInput(MCPInput):
+    document_ids: list[str] | None = Field(default=None, max_length=100)
+    selector: Literal["all_retryable"] | None = None
     workspace: str | None = None
-    dry_run: bool = False
+    idempotency_key: str | None = Field(default=None, max_length=255)
+
+    @model_validator(mode="after")
+    def _require_selector(self) -> Self:
+        if bool(self.document_ids) == bool(self.selector):
+            raise ValueError("provide document_ids or selector='all_retryable', but not both")
+        return self
+
+
+class DeleteFilesInput(MCPInput):
+    filenames: list[str] | None = Field(default=None, max_length=100)
+    file_paths: list[str] | None = Field(default=None, max_length=100)
+    document_ids: list[str] | None = Field(default=None, max_length=100)
+    workspace: str | None = None
+    idempotency_key: str | None = Field(default=None, max_length=255)
+
+    @model_validator(mode="after")
+    def _require_identifier(self) -> Self:
+        if not self.filenames and not self.file_paths and not self.document_ids:
+            raise ValueError("at least one exact document identifier is required")
+        return self
 
 
 __all__ = [
@@ -95,9 +107,8 @@ __all__ = [
     "ConversationMessage",
     "CreateWorkspaceInput",
     "DeleteFilesInput",
-    "DeleteWorkspaceInput",
     "IngestInput",
-    "IngestJobStatusInput",
     "ListFilesInput",
     "RetrieveInput",
+    "RetryFilesInput",
 ]

@@ -56,7 +56,7 @@ DlightRAG language profiles, `bm25_k1`, or `bm25_b`.
 
 `scripts/reset_development.py` erases the complete development environment:
 PostgreSQL data/migration ledger, LightRAG corpus/KG/vector/status data,
-DlightRAG jobs/answers/Web state, and local runtime/corpus files. It is never
+DlightRAG Runs/answers/Web state, and local runtime/corpus files. It is never
 exposed through REST, Web, or MCP.
 
 ```bash
@@ -82,9 +82,10 @@ creates baseline schema.
 This differs from `scripts/reset_workspace.py`, which resets authorized Corpus
 Workspaces in a running deployment. Neither delegates to the other.
 
-## Durable Answer Runs
+## RunRuntime And Durable Query And Corpus Mutation Runs
 
-- Drain/cancel active and queued pre-3.0 runs; there is no compatibility reader.
+- The current RunRuntime has no legacy Ingest Job or Answer-only compatibility reader.
+  External drain/cutover execution remains operator/infrastructure responsibility.
 - Roll one compatible writer first so it migrates, then readers. Workers sharing
   a database must use compatible model roles, execution mode, MCP allowlists,
   and Answer policy.
@@ -94,14 +95,34 @@ Workspaces in a running deployment. Neither delegates to the other.
   `/home/app/.dlightrag/agent_workspaces`).
 - Graceful shutdown fenced-requeues unfinished work; crash recovery waits for
   lease expiry. Four no-progress reclaims fail as `run_abandoned`.
-- Monitor `dlightrag_blobs`, `dlightrag_blob_chunks`, and
-  `dlightrag_answer_run_events`; accepted work has no queue-capacity rejection.
-- Route traffic with `GET /ready`; use `GET /health` only for liveness.
+- Monitor `dlightrag_runs`, `dlightrag_run_events`, `dlightrag_blobs`, and
+  `dlightrag_blob_chunks`. By default, Query claims stop at 16
+  deployment-wide active Runs and new acceptance is rejected when the 30,000
+  nonterminal Query fuse is full. Corpus Mutation claims stop at the validated
+  bound of two deployment-wide active Runs and reject new mutation acceptance
+  when their separate 1,000-Run fuse is full. These values and their limitations
+  are recorded in the [Slice 6 validation report](validation/run-runtime-slice-6.md).
+- Route traffic with `GET /ready`; it probes only writable Operational State.
+  Use `GET /health` for I/O-free liveness and the bounded corpus/parser/provider
+  degradation view. A corpus or provider outage does not remove readiness:
+  accepted eligible Runs defer durably while their lane fuse has room.
 
-Retention is configured by `answer.runtime.answer_run_retention_days` and runs
-hourly in bounded batches without cron. Event logs may expire before the run,
-after which SSE returns 410 and status still serves the result. Exact lifecycle
-rules are in [Durable Answer Runs](durable-answer-runs.md).
+Run the repository-owned failure matrix, fake-model PG18 convergence gate, and
+opt-in fake-only load campaign with `make validate-runtime`. `runtime-faults`
+fails on any P0/P1/P2 Python or frontend recovery regression; `runtime-pg18`
+requires the supported PostgreSQL 18 image/extensions; `load-runtime` prints
+`RUN_RUNTIME_LOAD PASS` only when every correctness/survival gate passes and
+writes bounded local evidence to `.test-results/load-runtime/`. A reported
+latency percentile is measurement, not a production SLO. The command uses local
+PostgreSQL and LightRAG with fakes, but no paid provider or external parser.
+
+Retention sweeps run hourly in bounded batches without cron. Each terminal Run
+receives `purge_after` from its accepted retention selection: Answer uses
+`runtime.run_retention_days` (default 365 days), while top-level Retrieval and
+Corpus Mutation use seven days. Nonterminal Runs are never retention-pruned. Event logs may expire
+before a retained Run, after which SSE returns 410 and status still serves the
+result. Exact lifecycle rules are in
+[RunRuntime and durable query execution](durable-answer-runs.md).
 
 ## Trusted Publisher Prerequisite
 
@@ -142,7 +163,17 @@ Point its block at `http://docling:5001` with `code_formula_preset: null`. It
 publishes only `127.0.0.1:5001`; do not run it beside a host Docling service on
 the same port. Independently managed Docling endpoints are also supported.
 
-## Failed Ingestion Cleanup
+## Product Document Finalization And Failed Ingestion Cleanup
+
+A LightRAG `processed` status alone does not publish a Product Document.
+DlightRAG's processed file panel, retrieval evidence, metadata surfaces,
+downloads, and image routes require the finalization marker to be exactly true.
+A failure in metadata/source finalization, BM25 labeling, required retained
+source/sidecar work, or enabled visual fusion leaves the marker false while the
+native LightRAG status remains `processed`. DlightRAG never rewrites that status
+to represent product-finalization failure. Re-ingest the same retained source
+to replay only the idempotent same-ID finalizers; do not manually set the marker. Documents written directly through LightRAG have no completion proof
+and remain excluded.
 
 Failed documents are terminal and are not automatically retried. First inspect
 the workspace:
@@ -155,25 +186,46 @@ If the stored source/download locator is still available, retry every failed
 document with the currently configured parser:
 
 ```bash
-curl -X POST 'http://127.0.0.1:8100/files/retry?workspace=personel'
+curl -X POST http://127.0.0.1:8100/runs/corpus/retry \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: retry-personel-failed-1' \
+  -d '{"workspace":"personel","selector":"all_retryable"}'
 ```
 
-If retry is unwanted or the source is unavailable, preview exact deletion by
-filename, then repeat with `dry_run: false`:
+If retry is unwanted or the source is unavailable, accept exact durable
+deletion by filename:
 
 ```bash
-curl -X DELETE http://127.0.0.1:8100/files \
+curl -X POST http://127.0.0.1:8100/runs/corpus/delete \
   -H 'Content-Type: application/json' \
-  -d '{"workspace":"personel","filenames":["failed.pdf"],"dry_run":true}'
-
-curl -X DELETE http://127.0.0.1:8100/files \
-  -H 'Content-Type: application/json' \
-  -d '{"workspace":"personel","filenames":["failed.pdf"],"dry_run":false}'
+  -H 'Idempotency-Key: delete-personel-failed-1' \
+  -d '{"workspace":"personel","filenames":["failed.pdf"]}'
 ```
 
-Deletion cascades the failed status, full document, metadata, chunks/vectors/KG
-when present, source file, and `.parsed`/`.mineru_raw`/`.docling_raw` directories.
-The terminal ingest-job row remains as operational history and is pruned after seven days.
+Deletion writes the false visibility marker before invoking LightRAG, then
+cascades the failed status, full document, metadata, chunks/vectors/KG when
+present, source file, and `.parsed`/`.mineru_raw`/`.docling_raw` directories.
+An ambiguous deletion can therefore reduce recall but cannot leave the document
+directly visible.
+The terminal Corpus Mutation Run remains as operational history for at least
+seven days.
+
+### Repairing An Ambiguous Mutation
+
+If Run status reports `phase=waiting_for_repair`, do not submit a replacement
+mutation and do not manually rewrite the Run row. Inspect `repair_reason` and
+`repair_remedy`, repair or verify authoritative LightRAG public state, then
+resume the same Run:
+
+```bash
+curl -X POST http://127.0.0.1:8100/runs/$RUN_ID/resume
+```
+
+The caller must still hold the action permission implied by that Run. Resume
+keeps the same Run ID and `track_id` and returns the Run to its Workspace FIFO.
+If repair is inappropriate and a full corpus reset is required, accept one reset
+naming `supersedes_run_id`; only reset may terminally supersede a waiting
+mutation while preserving Workspace identity and history.
 
 ## Workspace BM25 Rebuild
 

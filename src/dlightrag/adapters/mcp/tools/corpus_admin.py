@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from mcp.types import ToolAnnotations
 from pydantic import Field
@@ -12,10 +12,9 @@ from dlightrag.adapters.mcp import server as mcp_server
 from dlightrag.adapters.mcp.contracts import (
     CreateWorkspaceInput,
     DeleteFilesInput,
-    DeleteWorkspaceInput,
     IngestInput,
-    IngestJobStatusInput,
     ListFilesInput,
+    RetryFilesInput,
 )
 from dlightrag.adapters.mcp.server import (
     mcp_app,
@@ -154,54 +153,47 @@ async def create_workspace_tool(
 
 
 @mcp_app.tool(
-    name="delete_workspace",
+    name="reset_corpus",
     description=(
-        "Delete/reset one DlightRAG workspace and remove its registry row. Supports "
-        "dry_run and keep_files; response returns normalized workspace id, deleted, "
-        "and result."
+        "Accept a full Corpus Reset while preserving Workspace identity. "
+        "Returns the common durable Run descriptor."
     ),
     annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True),
 )
-async def delete_workspace_tool(
-    workspace: Annotated[str, Field(description="Workspace name to delete.")],
-    keep_files: Annotated[
-        bool,
-        Field(default=False, description="Keep source files on disk."),
-    ] = False,
-    dry_run: Annotated[
-        bool,
-        Field(default=False, description="Report what would be deleted without mutating storage."),
-    ] = False,
+async def reset_corpus_tool(
+    workspace: Annotated[str, Field(description="Workspace whose corpus is reset.")],
+    supersedes_run_id: Annotated[
+        str | None,
+        Field(description="Waiting-for-repair mutation Run explicitly superseded by this Reset."),
+    ] = None,
+    idempotency_key: Annotated[
+        str | None,
+        Field(default=None, max_length=255, description="Stable caller replay key."),
+    ] = None,
 ) -> dict[str, Any]:
-    args = DeleteWorkspaceInput.model_validate(locals())
     application = await mcp_server._ensure_application()
-
-    label = validate_workspace_name(args.workspace)
-    normalized_workspace = normalize_workspace(label)
+    normalized_workspace = normalize_workspace(validate_workspace_name(workspace))
     await mcp_server._enforce_access(
-        AccessAction.WORKSPACE_DELETE,
+        AccessAction.WORKSPACE_RESET,
         normalized_workspace,
         application=application,
     )
-    result = await application.corpora.reset(
-        workspace_ids=(normalized_workspace,),
-        keep_files=args.keep_files,
-        dry_run=args.dry_run,
+    creation = await application.corpus_mutations.create_reset(
+        workspace=normalized_workspace,
+        submitted_by=mcp_server._owner_id(),
+        supersedes_run_id=supersedes_run_id,
+        idempotency_key=idempotency_key,
     )
-    return {
-        "workspace": normalized_workspace,
-        "deleted": not args.dry_run,
-        "result": result,
-    }
+    return mcp_server._run_descriptor(creation.run)
 
 
 @mcp_app.tool(
     name="ingest",
     description=(
-        "Start a durable ingest job for local, URL, Azure Blob, or S3 documents into "
+        "Accept durable local, URL, Azure Blob, or S3 ingestion into "
         "a workspace. URL fetch endpoints, stable source identity, and durable download "
         "locators are separate; signed fetches require retention or a queryless locator. "
-        "Response includes job_id, status, and workspace."
+        "Response is the common Run descriptor; use get_run/cancel_run for lifecycle."
     ),
     annotations=ToolAnnotations(
         read_only_hint=False,
@@ -334,6 +326,10 @@ async def ingest_tool(
             ),
         ),
     ] = None,
+    idempotency_key: Annotated[
+        str | None,
+        Field(default=None, max_length=255, description="Stable caller replay key."),
+    ] = None,
 ) -> dict[str, Any]:
     args = IngestInput.model_validate(locals())
     application = await mcp_server._ensure_application()
@@ -359,56 +355,13 @@ async def ingest_tool(
             workspace=workspace_name,
         )
         ingest_spec = ingest_spec.model_copy(update={"path": path, "documents": managed_documents})
-    return await application.corpora.start_ingest_job(workspace_name, ingest_spec)
-
-
-@mcp_app.tool(
-    name="get_ingest_job",
-    description=(
-        "Return status for an ingest job_id returned by ingest, including the job workspace "
-        "when available."
-    ),
-    annotations=ToolAnnotations(read_only_hint=True),
-)
-async def get_ingest_job_tool(
-    job_id: Annotated[str, Field(description="Ingest job id returned by the ingest tool.")],
-) -> dict[str, Any]:
-    args = IngestJobStatusInput.model_validate(locals())
-    application = await mcp_server._ensure_application()
-    if not args.job_id:
-        raise ValueError("job_id is required")
-    result = await application.corpora.get_ingest_job(args.job_id)
-    if result is None:
-        raise ValueError(f"Ingest job not found: {args.job_id}")
-    workspace = result.get("workspace")
-    workspace_id = normalize_workspace(str(workspace)) if workspace else None
-    await mcp_server._enforce_access(AccessAction.JOB_READ, workspace_id, application=application)
-    return result
-
-
-@mcp_app.tool(
-    name="cancel_ingest_job",
-    description=(
-        "Stop a running ingest job. Documents already ingested are kept; "
-        "unfinished ones end up failed and can be retried."
-    ),
-    annotations=ToolAnnotations(read_only_hint=False, idempotent_hint=True),
-)
-async def cancel_ingest_job_tool(
-    job_id: Annotated[str, Field(description="Ingest job id returned by the ingest tool.")],
-) -> dict[str, Any]:
-    args = IngestJobStatusInput.model_validate(locals())
-    application = await mcp_server._ensure_application()
-    if not args.job_id:
-        raise ValueError("job_id is required")
-    result = await application.corpora.get_ingest_job(args.job_id)
-    if result is None:
-        raise ValueError(f"Ingest job not found: {args.job_id}")
-    workspace = result.get("workspace")
-    workspace_id = normalize_workspace(str(workspace)) if workspace else None
-    await mcp_server._enforce_access(AccessAction.JOB_CANCEL, workspace_id, application=application)
-    cancelled = await application.corpora.cancel_ingest_job(args.job_id)
-    return cancelled if cancelled is not None else result
+    creation = await application.corpus_mutations.create_ingest(
+        workspace=workspace_name,
+        spec=ingest_spec,
+        submitted_by=mcp_server._owner_id(),
+        idempotency_key=args.idempotency_key,
+    )
+    return mcp_server._run_descriptor(creation.run)
 
 
 @mcp_app.tool(
@@ -475,30 +428,78 @@ async def list_files_tool(
 
 
 @mcp_app.tool(
+    name="retry_files",
+    description=(
+        "Accept durable retry of an explicit failed-document cohort, or snapshot all "
+        "currently retryable documents. Response is the common Run descriptor."
+    ),
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True),
+)
+async def retry_files_tool(
+    document_ids: Annotated[
+        list[str] | None,
+        Field(default=None, max_length=100, description="Exact document ids to retry."),
+    ] = None,
+    selector: Annotated[
+        Literal["all_retryable"] | None,
+        Field(default=None, description="Use all_retryable to snapshot the current cohort."),
+    ] = None,
+    workspace: Annotated[
+        str | None,
+        Field(default=None, description="Workspace to retry in. Omit for default."),
+    ] = None,
+    idempotency_key: Annotated[
+        str | None,
+        Field(default=None, max_length=255, description="Stable caller replay key."),
+    ] = None,
+) -> dict[str, Any]:
+    args = RetryFilesInput.model_validate(locals())
+    application = await mcp_server._ensure_application()
+    workspace_name = normalize_workspace(args.workspace or application.config.deployment.workspace)
+    await mcp_server._enforce_access(
+        AccessAction.WORKSPACE_INGEST,
+        workspace_name,
+        application=application,
+    )
+    creation = await application.corpus_mutations.create_retry(
+        workspace=workspace_name,
+        submitted_by=mcp_server._owner_id(),
+        document_ids=args.document_ids or (),
+        selector=args.selector,
+        idempotency_key=args.idempotency_key,
+    )
+    return mcp_server._run_descriptor(creation.run)
+
+
+@mcp_app.tool(
     name="delete_files",
     description=(
-        "Delete or dry_run matching documents from one workspace by filename or file_path. "
-        "Response returns results and workspace."
+        "Accept durable deletion of exact document ids, filenames, or file paths. "
+        "Response is the common Run descriptor."
     ),
     annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True),
 )
 async def delete_files_tool(
     filenames: Annotated[
         list[str] | None,
-        Field(default=None, description="List of filenames to delete."),
+        Field(default=None, max_length=100, description="Exact filenames to delete."),
     ] = None,
     file_paths: Annotated[
         list[str] | None,
-        Field(default=None, description="List of file paths to delete."),
+        Field(default=None, max_length=100, description="Exact file paths to delete."),
+    ] = None,
+    document_ids: Annotated[
+        list[str] | None,
+        Field(default=None, max_length=100, description="Exact document ids to delete."),
     ] = None,
     workspace: Annotated[
         str | None,
         Field(default=None, description="Workspace to delete from. Omit for default."),
     ] = None,
-    dry_run: Annotated[
-        bool,
-        Field(default=False, description="Report matching documents without deleting them."),
-    ] = False,
+    idempotency_key: Annotated[
+        str | None,
+        Field(default=None, max_length=255, description="Stable caller replay key."),
+    ] = None,
 ) -> dict[str, Any]:
     args = DeleteFilesInput.model_validate(locals())
     application = await mcp_server._ensure_application()
@@ -508,10 +509,12 @@ async def delete_files_tool(
         workspace_name,
         application=application,
     )
-    results = await application.corpora.delete_files(
-        workspace_name,
-        filenames=args.filenames,
-        file_paths=args.file_paths,
-        dry_run=args.dry_run,
+    creation = await application.corpus_mutations.create_delete(
+        workspace=workspace_name,
+        submitted_by=mcp_server._owner_id(),
+        filenames=args.filenames or (),
+        file_paths=args.file_paths or (),
+        document_ids=args.document_ids or (),
+        idempotency_key=args.idempotency_key,
     )
-    return {"results": results, "workspace": workspace_name}
+    return mcp_server._run_descriptor(creation.run)

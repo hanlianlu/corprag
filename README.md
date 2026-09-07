@@ -11,6 +11,12 @@ same runtime is available through Web, REST, MCP, and an in-process Python API.
 
 **Runtime:** Python ≥3.14.7 · PostgreSQL 18 ecosystem · Apache-2.0
 
+LightRAG storage defaults are exactly `PGKVStorage`, `PGVectorStorage`,
+`PGTableGraphStorage`, and `PGDocStatusStorage`. Writer deployments may
+explicitly replace only the vector leg with `MilvusVectorDBStorage` (including
+Milvus-compatible Zilliz endpoints) by installing `dlightrag[milvus]`; reader
+processes currently remain PostgreSQL-vector-only.
+
 ## Architecture
 
 <p align="center">
@@ -128,20 +134,26 @@ and automatic browser language modes are available under Settings.
 
 ### REST
 
-Ingestion creates a background job; answers create durable runs and return
-`202 Accepted`.
+Ingestion, Retrieval, and Answer create durable Runs and return `202 Accepted`.
+Corpus mutations require a stable idempotency key.
 
 ```bash
-JOB=$(curl -sS -X POST http://localhost:8100/ingest \
+INGEST_RUN=$(curl -sS -X POST http://localhost:8100/runs/corpus/ingest \
   -H "Content-Type: application/json" \
-  -d '{"source_type":"local","path":"report.pdf"}' | jq -r .job_id)
-curl "http://localhost:8100/ingest/jobs/$JOB"
+  -H "Idempotency-Key: ingest-report-1" \
+  -d '{"source_type":"local","path":"report.pdf"}' | jq -r .run_id)
+curl "http://localhost:8100/runs/$INGEST_RUN"
+
+RETRIEVAL_RUN=$(curl -sS -X POST http://localhost:8100/retrieve \
+  -H "Content-Type: application/json" \
+  -d '{"query":"What are the key findings?"}' | jq -r .run_id)
+curl "http://localhost:8100/runs/$RETRIEVAL_RUN"
 
 RUN=$(curl -sS -X POST http://localhost:8100/answer \
   -H "Content-Type: application/json" \
   -d '{"query":"What are the key findings?"}' | jq -r .run_id)
-curl -N "http://localhost:8100/answer/$RUN/events"
-curl "http://localhost:8100/answer/$RUN"
+curl -N "http://localhost:8100/runs/$RUN/events"
+curl "http://localhost:8100/runs/$RUN"
 ```
 
 See [Interfaces](docs/interfaces.md) for requests, responses, pagination, SSE,
@@ -163,7 +175,7 @@ For a local stdio client:
 ```
 
 The Compose stack also exposes streamable HTTP on port 8101. MCP supports
-retrieval, durable answers, steering, follow-up/fork/resume, child status,
+durable Retrieval and Answer Runs, steering, follow-up/fork, child status,
 corpus administration, and capability discovery. The authoritative tool list
 is in [Interfaces](docs/interfaces.md#mcp-server).
 
@@ -174,18 +186,21 @@ uv add dlightrag
 ```
 
 Create an application with `create_application(config)`, use
-`application.corpora` for ingestion and `application.answers` for durable
-answers, then call `application.aclose()`. Complete typed examples are in
+`application.corpus_mutations` for durable corpus writes,
+`application.retrieval` for durable Retrieval, and `application.answers` for
+durable Answers, then call
+`application.aclose()`. Complete typed examples are in
 [Interfaces](docs/interfaces.md#in-process-application).
 
 ## Core Concepts
 
 | Concept | Meaning | Reference |
 |---|---|---|
-| Workspace | Isolation unit for indexed data, metadata, jobs, files, and queries | [Domain language](docs/domain-language.md) |
+| Workspace | Isolation unit for indexed data, metadata, files, and queries | [Domain language](docs/domain-language.md) |
 | Ingestion | One durable contract for local files, uploads, object storage, URLs, and SDK sources | [Interfaces](docs/interfaces.md#ingestion) |
-| Retrieval | LightRAG mix retrieval plus metadata, BM25, visual fusion, rerank, and packing | [Retrieval and Answer](docs/retrieval-answer.md) |
-| Answer run | One durable lifecycle shared by REST, MCP, Web, Python, and evaluation | [Durable Answer Runs](docs/durable-answer-runs.md) |
+| Retrieval | One durable Query-lane Run returning LightRAG mix plus metadata, BM25, visual fusion, and rerank evidence | [Retrieval and Answer](docs/retrieval-answer.md) |
+| Run | Common durable lifecycle for Retrieval, Answer, and Corpus Mutation across REST, MCP, Web, Python, and evaluation | [RunRuntime](docs/durable-answer-runs.md) |
+| Answer Run | A Query-lane Run that resolves Fast or Research and generates an Answer | [Retrieval and Answer](docs/retrieval-answer.md#answer-orchestration) |
 | Resource | Request-local attachment read deterministically or inspected visually on demand | [Retrieval and Answer](docs/retrieval-answer.md#answer-attachments-and-resources) |
 | Published Artifact | Owner-visible Research output authorized by a settled root attachment and validated at publication | [Domain language](docs/domain-language.md) |
 | Source | Durable provenance and download contract for an ingested document | [Interfaces](docs/interfaces.md#sources) |
@@ -222,7 +237,9 @@ maintenance runbooks. RAGAS evaluation is documented in
 | [Configuration](docs/configuration.md) | Configuration precedence, fields, defaults, examples |
 | [Interfaces](docs/interfaces.md) | Python, REST, MCP, and Web contracts |
 | [Retrieval and Answer](docs/retrieval-answer.md) | Retrieval, fusion, rerank, packing, citations, highlights |
-| [Durable Answer Runs](docs/durable-answer-runs.md) | State machine, leases, events, recovery, retention |
+| [RunRuntime and Durable Execution](docs/durable-answer-runs.md) | Common Query and Corpus Mutation state machine, leases, events, recovery, retention |
+| [RunRuntime and Scaling Target](docs/run-runtime-and-scaling-target.md) | Accepted workload model, lane bounds, lifecycle guarantees, and ownership boundary |
+| [RunRuntime Slice 6 Validation](docs/validation/run-runtime-slice-6.md) | Failure matrix, reproducible commands, 10k control-plane evidence, accepted bounds, limitations |
 | [Security](docs/security.md) | Authentication, authorization, ingress and content boundaries |
 | [PostgreSQL](docs/postgresql.md) | PostgreSQL requirements, schema ownership, tuning |
 | [Operations](docs/operations.md) | Executable runbooks and recovery workflows |

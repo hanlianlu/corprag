@@ -91,7 +91,6 @@ def _corpus_admin(config: Any) -> Any:
         settings=corpus_admin_settings(config),
         pool=cast(Any, SimpleNamespace()),
         maintenance=backend.maintenance,
-        ingest_jobs=cast(Any, SimpleNamespace()),
         file_panel=cast(Any, SimpleNamespace()),
         metadata_search=cast(Any, SimpleNamespace()),
         source_download_for=cast(Any, lambda _workspace: SimpleNamespace()),
@@ -152,24 +151,32 @@ async def test_file_panel_traverses_null_and_timestamp_groups_without_gaps() -> 
     )
     try:
         async with pool.acquire() as conn:
+            # Temporary tables shadow shared development relations while still
+            # exercising the adapter's exact PostgreSQL SQL and indexes.
             await conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS LIGHTRAG_DOC_STATUS (
+                CREATE TEMP TABLE LIGHTRAG_DOC_STATUS (
                     workspace varchar(255) NOT NULL,
                     id varchar(255) NOT NULL,
                     status varchar(64),
                     file_path TEXT,
+                    content_summary TEXT,
+                    error_msg TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    CONSTRAINT LIGHTRAG_DOC_STATUS_PK PRIMARY KEY (workspace, id)
-                )
+                    PRIMARY KEY (workspace, id)
+                ) ON COMMIT PRESERVE ROWS
                 """
             )
             await conn.execute(
-                "ALTER TABLE LIGHTRAG_DOC_STATUS ADD COLUMN IF NOT EXISTS content_summary TEXT"
-            )
-            await conn.execute(
-                "ALTER TABLE LIGHTRAG_DOC_STATUS ADD COLUMN IF NOT EXISTS error_msg TEXT"
+                """
+                CREATE TEMP TABLE dlightrag_doc_metadata (
+                    workspace varchar(255) NOT NULL,
+                    doc_id varchar(255) NOT NULL,
+                    _dlightrag_finalization_complete BOOLEAN NOT NULL DEFAULT FALSE,
+                    PRIMARY KEY (workspace, doc_id)
+                ) ON COMMIT PRESERVE ROWS
+                """
             )
             await conn.execute(
                 "DELETE FROM LIGHTRAG_DOC_STATUS WHERE workspace = ANY($1::varchar[])",
@@ -199,6 +206,20 @@ async def test_file_panel_traverses_null_and_timestamp_groups_without_gaps() -> 
                 ) VALUES ($1, $2, $3, $4, $5)
                 """,
                 rows,
+            )
+            await conn.executemany(
+                """
+                INSERT INTO dlightrag_doc_metadata (
+                    workspace, doc_id, _dlightrag_finalization_complete
+                ) VALUES ($1, $2, TRUE)
+                ON CONFLICT (workspace, doc_id) DO UPDATE
+                SET _dlightrag_finalization_complete = TRUE
+                """,
+                [
+                    (row_workspace, doc_id)
+                    for row_workspace, doc_id, status, _path, _updated_at in rows
+                    if status == "processed"
+                ],
             )
             await conn.execute(
                 """
@@ -259,6 +280,10 @@ async def test_file_panel_traverses_null_and_timestamp_groups_without_gaps() -> 
         async with pool.acquire() as conn:
             await conn.execute(
                 "DELETE FROM LIGHTRAG_DOC_STATUS WHERE workspace = ANY($1::varchar[])",
+                [workspace, other_workspace],
+            )
+            await conn.execute(
+                "DELETE FROM dlightrag_doc_metadata WHERE workspace = ANY($1::varchar[])",
                 [workspace, other_workspace],
             )
         await pool.close()
@@ -457,15 +482,18 @@ async def test_metadata_search_traverses_contains_fallback_without_gaps() -> Non
     )
     try:
         async with pool.acquire() as conn:
+            # Shadow production without creating an incomplete permanent table;
+            # the adapter fixture includes the final fail-closed visibility column.
             await conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS dlightrag_doc_metadata (
+                CREATE TEMP TABLE dlightrag_doc_metadata (
                     workspace VARCHAR(255) NOT NULL,
                     doc_id VARCHAR(255) NOT NULL,
                     filename VARCHAR(512),
                     filename_stem VARCHAR(512),
+                    _dlightrag_finalization_complete BOOLEAN NOT NULL DEFAULT FALSE,
                     PRIMARY KEY (workspace, doc_id)
-                )
+                ) ON COMMIT PRESERVE ROWS
                 """
             )
             await conn.execute(
@@ -502,8 +530,10 @@ async def test_metadata_search_traverses_contains_fallback_without_gaps() -> Non
                 )
             await conn.executemany(
                 """
-                INSERT INTO dlightrag_doc_metadata (workspace, doc_id, filename, filename_stem)
-                VALUES ($1, $2, $3, $4)
+                INSERT INTO dlightrag_doc_metadata
+                    (workspace, doc_id, filename, filename_stem,
+                     _dlightrag_finalization_complete)
+                VALUES ($1, $2, $3, $4, TRUE)
                 """,
                 rows,
             )
@@ -564,7 +594,7 @@ async def test_child_roster_traverses_newest_first_with_timestamp_ties() -> None
 
     import asyncpg
 
-    from dlightrag.adapters.postgres.answer.answer_runs import PGAnswerRunStore
+    from dlightrag.adapters.postgres.runtime.run_store import PGRunStore
     from dlightrag.application.answer_runs import (
         ChildRosterCursor,
         ChildRosterPageRequest,
@@ -582,67 +612,28 @@ async def test_child_roster_traverses_newest_first_with_timestamp_ties() -> None
         max_size=1,
     )
     try:
+        store = PGRunStore(pool=pool)
+        await store.initialize()
         async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS dlightrag_answer_child_sessions (
-                    owner_id TEXT NOT NULL,
-                    run_id UUID NOT NULL,
-                    child_session_id UUID NOT NULL,
-                    parent_session_id UUID NOT NULL,
-                    parent_call_id TEXT NOT NULL,
-                    parent_intent_id UUID,
-                    status TEXT NOT NULL,
-                    summary TEXT,
-                    objective TEXT,
-                    context_mode TEXT,
-                    model_role TEXT,
-                    tools_json JSONB,
-                    usage_json JSONB,
-                    depth INTEGER NOT NULL,
-                    context_snapshot_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-                    plan_json JSONB,
-                    budget_json JSONB,
-                    host_state_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-                    lease_owner TEXT,
-                    lease_expires_at TIMESTAMPTZ,
-                    fencing_epoch BIGINT NOT NULL DEFAULT 0,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    PRIMARY KEY (owner_id, run_id, child_session_id)
-                )
-                """
-            )
             await conn.execute(
                 "DELETE FROM dlightrag_answer_child_sessions WHERE owner_id = $1",
                 owner,
             )
-            # A clean CI database has no application schema, so provision a
-            # minimal runs table here (the development database already owns
-            # the real one with its run foreign key; IF NOT EXISTS makes this
-            # a no-op there).
             await conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS dlightrag_answer_runs (
-                    owner_id TEXT NOT NULL,
-                    run_id UUID NOT NULL,
-                    request_fingerprint TEXT NOT NULL,
-                    prepared_input_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-                    status TEXT NOT NULL,
-                    PRIMARY KEY (owner_id, run_id)
-                )
-                """
-            )
-            await conn.execute(
-                "DELETE FROM dlightrag_answer_runs WHERE owner_id = $1 AND run_id = $2::uuid",
+                "DELETE FROM dlightrag_runs WHERE owner_id = $1 AND run_id = $2::uuid",
                 owner,
                 run_id,
             )
             await conn.execute(
                 """
-                INSERT INTO dlightrag_answer_runs (
-                    owner_id, run_id, request_fingerprint, prepared_input_json, status
-                ) VALUES ($1, $2::uuid, 'child-roster-test', '{}'::jsonb, 'queued')
+                INSERT INTO dlightrag_runs (
+                    owner_id, run_id, run_kind, lane, submitted_by, access_scope_kind,
+                    submission_key, request_fingerprint, prepared_input_json,
+                    accepted_input_json, retention_seconds
+                ) VALUES (
+                    $1, $2::uuid, 'answer', 'query', $1, 'owner', 'child-roster-test',
+                    'child-roster-test', '{}'::jsonb, '{}'::jsonb, 31536000
+                )
                 """,
                 owner,
                 run_id,
@@ -699,7 +690,6 @@ async def test_child_roster_traverses_newest_first_with_timestamp_ties() -> None
                 rows,
             )
 
-        store = PGAnswerRunStore(pool=pool)
         cursor: ChildRosterCursor | None = None
         observed: list[str] = []
         tie_continuations = 0
@@ -763,7 +753,7 @@ async def test_child_roster_traverses_newest_first_with_timestamp_ties() -> None
                 owner,
             )
             await conn.execute(
-                "DELETE FROM dlightrag_answer_runs WHERE owner_id = $1 AND run_id = $2::uuid",
+                "DELETE FROM dlightrag_runs WHERE owner_id = $1 AND run_id = $2::uuid",
                 owner,
                 run_id,
             )

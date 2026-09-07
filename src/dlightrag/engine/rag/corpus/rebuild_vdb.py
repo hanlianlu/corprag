@@ -16,7 +16,10 @@ from lightrag.tools.rebuild_vdb import DEFAULT_BATCH_SIZE, RebuildTool
 from lightrag.utils import get_env_value
 
 from dlightrag.adapters.observability import LangfuseTelemetry
-from dlightrag.adapters.postgres.corpus.corpus import apply_lightrag_environment
+from dlightrag.adapters.postgres.corpus.corpus import (
+    apply_lightrag_environment,
+    verify_lightrag_storage_configuration,
+)
 from dlightrag.application.config import DlightragConfig, get_config, load_config, set_config
 from dlightrag.application.settings import rag_settings
 from dlightrag.engine.ai.embedding import create_embedding_model
@@ -146,6 +149,7 @@ class DlightRAGRebuildTool(RebuildTool):
         self.storage_names = self.resolve_storage_names()
         self.workspace = self.config.deployment.workspace
         apply_lightrag_environment(self.config)
+        verify_lightrag_storage_configuration(self.config)
 
         print("\nChecking configuration...")
         for storage_name in set(self.storage_names.values()):
@@ -302,6 +306,15 @@ async def run_rebuild(
         raise SystemExit("--yes is required for rebuild targets; stop DlightRAG first")
 
     resolved_config = config or get_config()
+    if (
+        restore_sidecar_alignment
+        and target in {"chunks", "all"}
+        and resolved_config.storage.lightrag.vector_storage != "PGVectorStorage"
+    ):
+        raise ValueError(
+            "sidecar fused-vector restoration requires PGVectorStorage; "
+            "use --no-restore-sidecar-alignment for MilvusVectorDBStorage"
+        )
     resolved_embedding = resolved_config.models.embedding
     model_scheduler = ModelScheduler(max_concurrency=resolved_config.models.max_concurrency)
     multimodal_embedder = create_embedding_model(

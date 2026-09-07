@@ -25,6 +25,7 @@ from dlightrag.engine.rag.retrieval.bm25 import (
     ProfiledBM25Search,
     profiles_from_config,
 )
+from dlightrag.engine.rag.retrieval.filtering import metadata_filter_scope
 from dlightrag.engine.rag.retrieval.language import BM25LanguageClassifier
 
 
@@ -312,6 +313,16 @@ async def test_bm25_search_empty_candidate_set_short_circuits() -> None:
 
     assert await bm25.search("query", scope=_scope(doc_exists=False, candidate_count=0)) == []
     searcher.search_profile.assert_not_awaited()
+
+
+async def test_unscoped_bm25_reports_bounded_visibility_pushdown() -> None:
+    searcher = SimpleNamespace(search_profile=AsyncMock(return_value=[]))
+    bm25 = _profiled_bm25(searcher)
+
+    async with metadata_filter_scope(None) as stats:
+        await bm25.search("query", scope=None)
+
+    assert stats.visibility_strategy == "bounded_pushdown"
 
 
 async def test_bm25_search_maps_rows() -> None:

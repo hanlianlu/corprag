@@ -179,6 +179,56 @@ async def test_apply_migrations_runs_only_newly_appended_versions() -> None:
     assert conn.applied == {("example", "create_table"), ("example", "add_name")}
 
 
+async def test_run_event_guard_is_an_append_only_migration_applied_once_in_order() -> None:
+    from dlightrag.adapters.postgres.runtime.run_store import (
+        RUN_MIGRATION_SCOPE,
+        RUN_MIGRATIONS,
+    )
+
+    expected_versions = (
+        "run_runtime_v1",
+        "child_roster_index",
+        "worker_cancel_pending_index",
+        "write_model_published_artifact_kind",
+        "write_model_root_artifact_attachments",
+        "write_model_web_resource_catalog",
+        "corpus_mutation_runtime",
+        "normalize_run_event_constraints",
+    )
+    assert tuple(migration.version for migration in RUN_MIGRATIONS) == expected_versions
+    assert all(
+        "dlightrag_enforce_run_event_constraints" not in statement
+        and "trg_dlightrag_run_events_enforce" not in statement
+        for migration in RUN_MIGRATIONS[:-1]
+        for statement in migration.statements
+    )
+
+    conn = _Conn()
+    await apply_migrations(
+        conn,
+        scope=RUN_MIGRATION_SCOPE,
+        migrations=RUN_MIGRATIONS[:-1],
+    )
+    executed_before_append = len(conn.executed)
+    await apply_migrations(conn, scope=RUN_MIGRATION_SCOPE, migrations=RUN_MIGRATIONS)
+    await apply_migrations(conn, scope=RUN_MIGRATION_SCOPE, migrations=RUN_MIGRATIONS)
+
+    recorded_versions = [
+        str(args[1])
+        for query, args in conn.executed
+        if query.startswith("INSERT INTO dlightrag_schema_migrations")
+        and args[0] == RUN_MIGRATION_SCOPE
+    ]
+    assert recorded_versions == list(expected_versions)
+    guard_statements = RUN_MIGRATIONS[-1].statements
+    assert len(guard_statements) == 2
+    executed_sql = [query for query, _ in conn.executed]
+    assert all(
+        statement not in executed_sql[:executed_before_append] for statement in guard_statements
+    )
+    assert all(executed_sql.count(statement) == 1 for statement in guard_statements)
+
+
 async def test_apply_migrations_does_not_record_failed_versions() -> None:
     conn = _Conn()
     migrations = (
@@ -463,7 +513,7 @@ async def test_web_conversation_migration_creates_only_final_run_links() -> None
         for i, q in enumerate(ddl)
         if "CREATE TABLE IF NOT EXISTS web_conversation_turns" in q and "answer_run_id" in q
     )
-    assert "REFERENCES dlightrag_answer_runs (owner_id, run_id)" in ddl[create_index]
+    assert "REFERENCES dlightrag_runs (owner_id, run_id)" in ddl[create_index]
     assert "ON DELETE CASCADE" in ddl[create_index]
 
     # Nothing outside the Web conversation scope is touched.

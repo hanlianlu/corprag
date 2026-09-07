@@ -12,11 +12,13 @@ from dlightrag.adapters.http.browser.deps import (
     filter_web_workspace_records,
     get_application,
 )
+from dlightrag.adapters.http.browser.file_models import WebCorpusRunReceipt
+from dlightrag.adapters.http.browser.routes.corpus_runs import corpus_run_receipt
 from dlightrag.adapters.http.browser.workspace_models import (
     WebBootstrapWorkspace,
     project_workspace_record,
 )
-from dlightrag.application.access import AccessAction, WorkspaceRecord
+from dlightrag.application.access import AccessAction, WorkspaceRecord, owner_id_from_user
 from dlightrag.application.answer_runs.client_contracts import ClientContractModel
 from dlightrag.application.corpus_admin import (
     WORKSPACE_CATALOG_PAGE_DEFAULT_LIMIT,
@@ -216,13 +218,13 @@ async def create_workspace(
     return response
 
 
-@router.post("/workspaces/delete")
-async def delete_workspace(
+@router.post("/workspaces/reset", response_model=WebCorpusRunReceipt, status_code=202)
+async def reset_workspace(
     request: Request,
     workspace_name: str = Form(default=""),
     confirm_name: str = Form(default=""),
 ):
-    """Delete a workspace after type-to-confirm verification."""
+    """Accept a full Corpus Reset after type-to-confirm verification."""
     application = get_application(request)
     name = workspace_name.strip()
     confirm = confirm_name.strip()
@@ -233,27 +235,17 @@ async def delete_workspace(
         return _error("Confirmation name does not match")
 
     ws = normalize_workspace(name)
-    await enforce_web_access(request, AccessAction.WORKSPACE_DELETE, ws)
+    await enforce_web_access(request, AccessAction.WORKSPACE_RESET, ws)
 
     try:
-        await application.corpora.reset(workspace_ids=(ws,))
-    except Exception:
-        logger.exception("Workspace deletion failed")
-        return _error(
-            "Failed to delete workspace; see server logs for details.",
-            status_code=500,
+        creation = await application.corpus_mutations.create_reset(
+            workspace=ws,
+            submitted_by=owner_id_from_user(getattr(request.state, "user_context", None)),
         )
-
-    visible_workspaces = await _visible_workspace_names(request, application)
-    active = _cookie_active_workspaces(request, visible_workspaces)
-    next_workspace = active[0] if active else _default_workspace(visible_workspaces)
-
-    response = JSONResponse({"workspace": ws, "next_workspace": next_workspace})
-    _set_workspace_cookies(
-        response,
-        request,
-        visible_workspaces,
-        active_workspaces=active or ([next_workspace] if next_workspace else []),
-        primary_workspace=next_workspace,
-    )
-    return response
+    except Exception:
+        logger.exception("Workspace reset Run acceptance failed")
+        return _error(
+            "Failed to accept Corpus Reset; see server logs for details.",
+            status_code=503,
+        )
+    return corpus_run_receipt(creation.run, workspace=ws)

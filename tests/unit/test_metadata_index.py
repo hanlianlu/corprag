@@ -7,7 +7,7 @@ from typing import Any
 
 from dlightrag.adapters.postgres.corpus import pg_metadata_index
 from dlightrag.adapters.postgres.corpus.pg_metadata_index import _SCHEMA_MIGRATIONS, _UPSERT
-from dlightrag.engine.rag.retrieval import MetadataFilter
+from dlightrag.engine.rag.retrieval import MetadataFilter, MetadataScope
 from dlightrag.engine.rag.retrieval.metadata_fields import (
     INGEST_FINALIZATION_COMPLETE_FIELD,
     METADATA_FIELD_IDS,
@@ -169,6 +169,7 @@ class TestMetadataSQL:
         assert "custom_metadata_search = dlightrag_canonical_custom_metadata(" in _UPSERT
         assert "COALESCE(EXCLUDED.custom_metadata::jsonb" in _UPSERT
         assert "custom_metadata_search" in pg_metadata_index._UPDATE
+        assert "_dlightrag_finalization_complete IS TRUE" in pg_metadata_index._UPDATE
 
     def test_custom_search_canonicalizes_every_value_to_comparison_text(self):
         sql = pg_metadata_index._CREATE_CANONICAL_CUSTOM_FN
@@ -251,6 +252,9 @@ class TestMetadataSQL:
         assert "NEW.custom_metadata" in sql
         assert "OLD.custom_metadata" in sql
         assert "TRUNCATE TABLE dlightrag_metadata_field_stats" in sql
+        assert "NEW._dlightrag_finalization_complete IS TRUE" in sql
+        assert "OLD._dlightrag_finalization_complete IS TRUE" in sql
+        assert "metadata._dlightrag_finalization_complete IS TRUE" in sql
 
     def test_metadata_schema_migrations_cover_registry_columns_and_indexes(self):
         versions = {migration.version for migration in _SCHEMA_MIGRATIONS}
@@ -278,6 +282,7 @@ class TestMetadataSQL:
                 "index_custom_metadata_search_gin",
                 "index_filename_trgm",
                 "metadata_field_stats",
+                "product_document_visibility",
             }
             | {f"column_{field_id}" for field_id in declared}
             | {f"index_{field_id}_canonical" for field_id in declared}
@@ -285,13 +290,15 @@ class TestMetadataSQL:
 
         assert {migration.version for migration in _SCHEMA_MIGRATIONS} <= allowed
 
-    def test_metadata_table_migration_declares_workspace_partitioning(self) -> None:
+    def test_metadata_table_migration_declares_complete_fresh_schema(self) -> None:
         sql = "\n".join(stmt for migration in _SCHEMA_MIGRATIONS for stmt in migration.statements)
+        create_table = _SCHEMA_MIGRATIONS[0].statements[0]
 
         assert "PARTITION BY LIST (workspace)" in sql
         assert "PARTITION OF dlightrag_doc_metadata DEFAULT" in sql
         assert "CREATE INDEX IF NOT EXISTS idx_dm_custom_metadata_search" in sql
         assert "USING GIN (custom_metadata_search jsonb_path_ops)" in sql
+        assert "_dlightrag_finalization_complete    BOOLEAN NOT NULL DEFAULT FALSE" in create_table
 
 
 async def test_metadata_index_initializes_schema_with_migrations() -> None:
@@ -428,6 +435,94 @@ async def test_metadata_index_get_many_fetches_doc_ids_in_one_query() -> None:
     }
     assert "doc_id = ANY($2::text[])" in seen["query"]
     assert seen["args"] == ("default", ["doc-1", "doc-2"])
+
+
+async def test_visibility_lookup_uses_true_only_bounded_predicates() -> None:
+    idx = pg_metadata_index.PGMetadataIndex(workspace="finance")
+    seen: list[tuple[str, tuple[Any, ...]]] = []
+
+    class Conn:
+        async def fetchval(self, query: str, *args: Any) -> int:
+            seen.append((query, args))
+            return 1
+
+        async def fetch(self, query: str, *args: Any) -> list[dict[str, str]]:
+            seen.append((query, args))
+            return [{"doc_id": "doc-ready"}]
+
+    async def run(operation):  # noqa: ANN001, ANN202
+        return await operation(Conn())
+
+    idx._run = run  # type: ignore[method-assign]
+
+    assert await idx.is_visible("doc-ready") is True
+    assert await idx.visible_subset(["doc-ready", "doc-hidden", "doc-ready"]) == frozenset(
+        {"doc-ready"}
+    )
+    assert all("_dlightrag_finalization_complete IS TRUE" in query for query, _ in seen)
+    assert seen[0][1] == ("finance", "doc-ready")
+    assert seen[1][1] == (["doc-ready", "doc-hidden"], "finance")
+
+
+async def test_visibility_subset_applies_scope_within_the_caller_ids() -> None:
+    idx = pg_metadata_index.PGMetadataIndex(workspace="finance")
+    seen: dict[str, Any] = {}
+
+    class Conn:
+        async def fetch(self, query: str, *args: Any) -> list[dict[str, str]]:
+            seen["query"] = query
+            seen["args"] = args
+            return [{"doc_id": "doc-ready"}]
+
+    async def run(operation):  # noqa: ANN001, ANN202
+        return await operation(Conn())
+
+    idx._run = run  # type: ignore[method-assign]
+    scope = MetadataScope(
+        filters=MetadataFilter(filename="report.pdf", custom={"team": "core"}),
+        filename_mode="exact",
+        doc_exists=True,
+        candidate_count=1,
+        candidate_count_exact=True,
+    )
+
+    assert await idx.visible_subset(
+        ["doc-ready", "doc-wrong", "doc-ready"],
+        scope=scope,
+    ) == frozenset({"doc-ready"})
+    assert "m.doc_id = ANY($1::text[])" in seen["query"]
+    assert "m.workspace = $2" in seen["query"]
+    assert "m._dlightrag_finalization_complete IS TRUE" in seen["query"]
+    assert "LOWER(TRIM(m.filename)) = LOWER(TRIM($3))" in seen["query"]
+    assert (
+        "m.custom_metadata_search @> dlightrag_canonical_custom_metadata($4::jsonb)"
+        in seen["query"]
+    )
+    assert seen["args"] == (
+        ["doc-ready", "doc-wrong"],
+        "finance",
+        "report.pdf",
+        json.dumps({"team": "core"}),
+    )
+
+
+async def test_empty_visibility_subset_never_queries_storage() -> None:
+    idx = pg_metadata_index.PGMetadataIndex(workspace="finance")
+
+    async def run(_operation):  # noqa: ANN001, ANN202
+        raise AssertionError("empty caller subset must not query PostgreSQL")
+
+    idx._run = run  # type: ignore[method-assign]
+
+    assert await idx.visible_subset([]) == frozenset()
+    empty_scope = MetadataScope(
+        filters=MetadataFilter(filename="missing.pdf"),
+        filename_mode="exact",
+        doc_exists=False,
+        candidate_count=0,
+        candidate_count_exact=True,
+    )
+    assert await idx.visible_subset(["doc-candidate"], scope=empty_scope) == frozenset()
 
 
 async def test_custom_filter_is_one_canonical_jsonb_containment() -> None:

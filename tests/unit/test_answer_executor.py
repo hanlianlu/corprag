@@ -2,6 +2,7 @@
 """Durable Answer executor ownership and failure behavior."""
 
 import asyncio
+import datetime
 import io
 from collections.abc import Mapping
 from pathlib import Path
@@ -28,10 +29,12 @@ from dlightrag.application.answer_runs.execution import (
     build_current_answer_resources,
     in_memory_attachment_loader,
 )
+from dlightrag.application.errors import CorpusUnavailableError
 from dlightrag.engine.agent.session.ids import LaneId, SessionId
 from dlightrag.engine.agent.session.memory import MemoryAgentSessionRepository
 from dlightrag.engine.agent.session.plan import AgentRunPlan
 from dlightrag.engine.ai.capacity import CONTEXT_POLICY_REVISION, ModelProfile
+from dlightrag.engine.ai.catalog import current_model_catalog_revision
 from dlightrag.engine.ai.fingerprints import ModelFingerprint
 from dlightrag.engine.ai.reasoning import best_effort_reasoning_profile
 from dlightrag.engine.ai.scheduler import ModelScheduler
@@ -52,11 +55,13 @@ from dlightrag.engine.answer.highlights import SemanticHighlightSettings
 from dlightrag.engine.answer.publication import prepare_artifact_attachment, validate_publication
 from dlightrag.engine.answer.resources import ResourceInput
 from dlightrag.engine.answer.resources.models import TextWindowBudget
+from dlightrag.engine.dependencies import ProviderUnavailableError
 from dlightrag.engine.runtime import (
-    CoordinatorOwnedSuccess,
+    Deferred,
     RunExecutionError,
     RunExecutionOutcome,
     RunSession,
+    Succeeded,
     artifact_digest,
 )
 from tests.unit.conftest import answer_image_policy
@@ -87,6 +92,7 @@ def _fingerprint(role: str) -> ModelFingerprint:
 def _executor() -> AnswerExecutor:
     return AnswerExecutor(
         store=MagicMock(),
+        blob_store=MagicMock(),
         pool=MagicMock(),
         warm=Mock(),
         retrieve=AsyncMock(),
@@ -188,6 +194,7 @@ def test_acceptance_research_tools_include_every_configured_non_resource_surface
 
     executor = AnswerExecutor(
         store=MagicMock(),
+        blob_store=MagicMock(),
         pool=MagicMock(),
         warm=Mock(),
         retrieve=AsyncMock(),
@@ -235,6 +242,7 @@ def test_acceptance_plan_matches_runtime_tool_composition(tmp_path: Path) -> Non
 
     executor = AnswerExecutor(
         store=MagicMock(),
+        blob_store=MagicMock(),
         pool=MagicMock(),
         warm=Mock(),
         retrieve=AsyncMock(),
@@ -290,7 +298,7 @@ def test_execution_rejects_tools_that_differ_from_the_accepted_agent_plan() -> N
     from pydantic import BaseModel
 
     from dlightrag.engine.agent.tools import AgentTool, ToolResult
-    from dlightrag.engine.answer.execution import IncompatibleActiveRunError
+    from dlightrag.engine.runtime import IncompatibleActiveRunError
 
     class Args(BaseModel):
         value: str
@@ -337,7 +345,7 @@ def test_pinned_model_profile_preserves_unverified_reasoning_semantics() -> None
 
 
 def test_execution_rejects_changed_context_or_model_pins() -> None:
-    from dlightrag.engine.answer.execution import IncompatibleActiveRunError
+    from dlightrag.engine.runtime import IncompatibleActiveRunError
 
     pins = tuple(
         PinnedModelProfile(
@@ -351,9 +359,15 @@ def test_execution_rejects_changed_context_or_model_pins() -> None:
     request = MagicMock(
         pinned_models=pins,
         context_policy_revision=CONTEXT_POLICY_REVISION,
+        model_catalog_revision=current_model_catalog_revision(),
     )
     executor.validate_pinned_model_profiles(request)
 
+    request.model_catalog_revision = "stale-catalog"
+    with pytest.raises(IncompatibleActiveRunError, match="model catalog"):
+        executor.validate_pinned_model_profiles(request)
+
+    request.model_catalog_revision = current_model_catalog_revision()
     request.context_policy_revision = "stale-policy"
     with pytest.raises(IncompatibleActiveRunError, match="context policy"):
         executor.validate_pinned_model_profiles(request)
@@ -530,9 +544,9 @@ async def test_child_model_calls_inherit_run_scheduler_ownership() -> None:
             await asyncio.sleep(0)
             second_queued.set()
             await asyncio.gather(first, second)
-            return CoordinatorOwnedSuccess({"run": "a"})
+            return Succeeded({"run": "a"})
         await scheduler.run(lambda: operation("b1"))
-        return CoordinatorOwnedSuccess({"run": "b"})
+        return Succeeded({"run": "b"})
 
     executor = _executor()
     executor._execute = execute  # type: ignore[method-assign]
@@ -547,8 +561,8 @@ async def test_child_model_calls_inherit_run_scheduler_ownership() -> None:
     release_first.set()
 
     assert await asyncio.gather(run_a, run_b) == [
-        CoordinatorOwnedSuccess({"run": "a"}),
-        CoordinatorOwnedSuccess({"run": "b"}),
+        Succeeded({"run": "a"}),
+        Succeeded({"run": "b"}),
     ]
     assert order == ["a1", "b1", "a2"]
 
@@ -566,6 +580,38 @@ async def test_actionable_answer_errors_keep_their_public_message() -> None:
     assert "report.pdf" in raised.value.public_message
 
 
+@pytest.mark.parametrize(
+    ("error", "checkpoint_key"),
+    [
+        (CorpusUnavailableError("offline"), "corpus_unavailable_attempt"),
+        (ProviderUnavailableError(), "providers_unavailable_attempt"),
+    ],
+)
+async def test_transient_answer_dependency_interruption_defers_same_run(
+    error: Exception,
+    checkpoint_key: str,
+) -> None:
+    now = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
+    executor = _executor()
+    executor._now = lambda: now
+    executor._execute = AsyncMock(side_effect=error)  # type: ignore[method-assign]
+    session = MagicMock(
+        owner_id="owner",
+        run_id="same-run",
+        checkpoint={checkpoint_key: 2},
+    )
+    session.check_cancelled = AsyncMock()
+    session.reset_output = AsyncMock()
+
+    outcome = await executor.execute(cast(RunSession, session))
+
+    assert isinstance(outcome, Deferred)
+    assert outcome.checkpoint == {checkpoint_key: 3}
+    assert (outcome.next_attempt_at - now).total_seconds() == 20
+    session.check_cancelled.assert_awaited_once_with()
+    session.reset_output.assert_awaited_once_with()
+
+
 async def test_unknown_errors_map_to_generic_public_message(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -581,7 +627,7 @@ async def test_unknown_errors_map_to_generic_public_message(
     assert raised.value.kind == "ANSWER_STREAM_FAILED"
     assert raised.value.public_message == "Answer run failed."
     assert "Answer run run-correlated execution failed" in caplog.text
-    assert "postgres://user:secret@host/db" in caplog.text
+    assert "postgres://user:secret@host/db" not in caplog.text
 
 
 async def test_url_current_image_is_pinned_once_for_durable_replay() -> None:

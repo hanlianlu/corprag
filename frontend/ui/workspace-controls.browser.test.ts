@@ -1,6 +1,7 @@
 // Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
 
 import {expect} from '@esm-bundle/chai';
+import {ingestStore} from '../stores/ingest-store.ts';
 import {workspaceStore} from '../stores/workspace-store.ts';
 import type {DlWorkspaceScope} from './workspace-scope.ts';
 import './workspace-scope.ts';
@@ -24,6 +25,20 @@ async function waitFor(predicate: () => boolean): Promise<void> {
   throw new Error('condition did not become true');
 }
 
+function corpusReceipt(runId: string, workspace: string) {
+  return {
+    run_id: runId,
+    run_kind: 'corpus_mutation',
+    lane: 'corpus_mutation',
+    status: 'queued',
+    status_url: `/web/api/corpus-runs/${runId}`,
+    events_url: `/web/api/corpus-runs/${runId}/events`,
+    cancel_url: `/web/api/corpus-runs/${runId}`,
+    resume_url: `/web/api/corpus-runs/${runId}/resume`,
+    workspace,
+  };
+}
+
 function mountScope(): DlWorkspaceScope {
   const scope = document.createElement('dl-workspace-scope') as DlWorkspaceScope;
   document.body.appendChild(scope);
@@ -34,6 +49,7 @@ beforeEach(() => {
   workspaceStore.init([
     {workspace: 'default', displayName: 'Default', embeddingModel: 'embed'},
   ], ['default'], 'default');
+  ingestStore.resetToPrimary();
 });
 
 afterEach(() => {
@@ -96,13 +112,13 @@ it('restores typed-name deletion intent after a failed workspace request', async
   await scope.updateComplete;
   buttonNamed(scope, 'Choose search workspaces')?.click();
   await scope.updateComplete;
-  scope.querySelector<HTMLButtonElement>('[aria-label="Delete workspace Default"]')?.click();
+  scope.querySelector<HTMLButtonElement>('[aria-label="Reset Corpus Default"]')?.click();
   await waitFor(() => Boolean(scope.querySelector<HTMLDialogElement>('dialog')?.open));
   const input = scope.querySelector<HTMLInputElement>('[aria-label="Type Default to confirm"]')!;
   input.value = 'Default';
   input.dispatchEvent(new Event('input'));
   await scope.updateComplete;
-  const submit = buttonNamed(scope, 'Delete')!;
+  const submit = buttonNamed(scope, 'Reset Corpus')!;
   expect(submit.disabled).to.equal(false);
 
   submit.click();
@@ -198,7 +214,7 @@ it('reports a submitted creation failure after its popover is dismissed', async 
     .to.equal(true);
 });
 
-it('keeps a pending deletion modal and isolates the next deletion operation', async () => {
+it('keeps a pending reset modal and isolates the next reset operation', async () => {
   workspaceStore.init([
     {workspace: 'default', displayName: 'Default', embeddingModel: 'embed'},
     {workspace: 'research', displayName: 'Research', embeddingModel: 'embed'},
@@ -210,15 +226,15 @@ it('keeps a pending deletion modal and isolates the next deletion operation', as
   const trigger = buttonNamed(scope, 'Choose search workspaces')!;
   trigger.click();
   await scope.updateComplete;
-  scope.querySelector<HTMLButtonElement>('[aria-label="Delete workspace Default"]')?.click();
+  scope.querySelector<HTMLButtonElement>('[aria-label="Reset Corpus Default"]')?.click();
   await waitFor(() => Boolean(scope.querySelector<HTMLDialogElement>('dialog')?.open));
   let input = scope.querySelector<HTMLInputElement>('[aria-label="Type Default to confirm"]')!;
   input.value = 'Default';
   input.dispatchEvent(new Event('input'));
   await scope.updateComplete;
-  buttonNamed(scope, 'Delete')?.click();
+  buttonNamed(scope, 'Reset Corpus')?.click();
   await waitFor(() => requests.length === 1
-    && buttonNamed(scope, 'Deleting…')?.disabled === true);
+    && buttonNamed(scope, 'Accepting reset…')?.disabled === true);
 
   let dialog = scope.querySelector<HTMLDialogElement>('dialog')!;
   const cancel = buttonNamed(scope, 'Cancel')!;
@@ -245,7 +261,7 @@ it('keeps a pending deletion modal and isolates the next deletion operation', as
   await scope.updateComplete;
   expect(nextTrigger.getAttribute('aria-expanded')).to.equal('true');
   const deleteResearch = scope.querySelector<HTMLButtonElement>(
-    '[aria-label="Delete workspace Research"]',
+    '[aria-label="Reset Corpus Research"]',
   )!;
   expect(deleteResearch).not.to.equal(null);
   deleteResearch.click();
@@ -257,18 +273,19 @@ it('keeps a pending deletion modal and isolates the next deletion operation', as
   input.value = 'Research';
   input.dispatchEvent(new Event('input'));
   await scope.updateComplete;
-  const submit = buttonNamed(scope, 'Delete')!;
+  const submit = buttonNamed(scope, 'Reset Corpus')!;
   expect(submit.disabled).to.equal(false);
   submit.click();
   await waitFor(() => requests.length === 2);
   expect(scope.querySelector<HTMLInputElement>('[aria-label="Type Research to confirm"]')?.readOnly)
     .to.equal(true);
-  requests[1]!(new Response(JSON.stringify({
-    workspace: 'research', next_workspace: 'default',
-  }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+  requests[1]!(new Response(JSON.stringify(corpusReceipt('run-reset', 'research')), {
+    status: 202,
+    headers: {'Content-Type': 'application/json'},
+  }));
   await waitFor(() => !dialog.open);
 
-  expect(workspaceStore.records.some((record) => record.workspace === 'research')).to.equal(false);
+  expect(workspaceStore.records.some((record) => record.workspace === 'research')).to.equal(true);
   expect(dialog.open).to.equal(false);
 });
 
@@ -325,7 +342,7 @@ it('resets workspace popover and deletion state across disconnect and reconnect'
   const trigger = buttonNamed(scope, 'Choose search workspaces')!;
   trigger.click();
   await scope.updateComplete;
-  scope.querySelector<HTMLButtonElement>('[aria-label="Delete workspace Default"]')?.click();
+  scope.querySelector<HTMLButtonElement>('[aria-label="Reset Corpus Default"]')?.click();
   const dialog = scope.querySelector<HTMLDialogElement>('dialog')!;
   await waitFor(() => dialog.open);
   expect(modalStates.at(-1)).to.equal(true);
@@ -387,7 +404,7 @@ it('restores workspace-selector trigger focus when deletion is cancelled', async
   const trigger = buttonNamed(scope, 'Choose search workspaces')!;
   trigger.click();
   await scope.updateComplete;
-  scope.querySelector<HTMLButtonElement>('[aria-label="Delete workspace Default"]')?.click();
+  scope.querySelector<HTMLButtonElement>('[aria-label="Reset Corpus Default"]')?.click();
   await waitFor(() => Boolean(scope.querySelector<HTMLDialogElement>('dialog')?.open));
 
   buttonNamed(scope, 'Cancel')?.click();

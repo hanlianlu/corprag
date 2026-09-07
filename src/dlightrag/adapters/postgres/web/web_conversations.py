@@ -11,21 +11,13 @@ finalizer, or reconnect has to commit it afterwards.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 from typing import Any
 from uuid import UUID, uuid4
 
 import asyncpg
 
-from dlightrag.adapters.postgres.answer.answer_runs import (
-    ANSWER_RUN_MIGRATION_SCOPE,
-    ANSWER_RUN_MIGRATIONS,
-    ANSWER_RUN_SCHEMA_TABLES,
-    PGAnswerRunStore,
-    answer_run_columns,
-    answer_run_record,
-)
 from dlightrag.adapters.postgres.core._errors import is_postgres_unavailable
 from dlightrag.adapters.postgres.core._migrations import (
     ForeignKeyRequirement,
@@ -35,7 +27,17 @@ from dlightrag.adapters.postgres.core._migrations import (
     verify_migrations,
 )
 from dlightrag.adapters.postgres.core._operations import ConnectionPool, PostgresOperationRunner
+from dlightrag.adapters.postgres.runtime.run_store import (
+    RUN_MIGRATION_SCOPE,
+    RUN_MIGRATIONS,
+    RUN_SCHEMA_TABLES,
+    PGRunStore,
+    run_columns,
+    run_record,
+)
+from dlightrag.application.answer_runs.envelope import accepted_input_envelope
 from dlightrag.application.answer_runs.routing import RoutingAcceptance
+from dlightrag.application.runs import RunView
 from dlightrag.application.web_conversations import (
     AnswerTurnCreation,
     CarriedAttachment,
@@ -58,6 +60,7 @@ from dlightrag.engine.runtime import (
     IdempotencyKeyConflict,
     PendingArtifact,
     PendingArtifactReference,
+    PreparedRunEnvelope,
     RunDeletion,
     RunSchemaError,
     parse_run_id,
@@ -99,7 +102,7 @@ CREATE TABLE IF NOT EXISTS web_conversation_turns (
       REFERENCES web_conversations (principal_id, conversation_id)
       ON DELETE CASCADE,
     FOREIGN KEY (principal_id, answer_run_id)
-      REFERENCES dlightrag_answer_runs (owner_id, run_id)
+      REFERENCES dlightrag_runs (owner_id, run_id)
       ON DELETE CASCADE
 )
 """
@@ -176,7 +179,7 @@ WEB_CONVERSATION_SCHEMA_TABLES = (
                 columns=("principal_id", "conversation_id"), references="web_conversations"
             ),
             ForeignKeyRequirement(
-                columns=("principal_id", "answer_run_id"), references="dlightrag_answer_runs"
+                columns=("principal_id", "answer_run_id"), references="dlightrag_runs"
             ),
         ),
         indexes=("idx_web_conversation_turns_principal_conversation",),
@@ -391,9 +394,9 @@ WITH selected_turns AS (
 )
 SELECT
 {_TURN_COLUMNS},
-{answer_run_columns("r")}
+{run_columns("r")}
 FROM selected_turns AS t
-JOIN dlightrag_answer_runs AS r
+JOIN dlightrag_runs AS r
   ON r.owner_id = t.principal_id
  AND r.run_id = t.answer_run_id
 ORDER BY t.turn_number DESC
@@ -414,9 +417,9 @@ WITH selected_turns AS (
 )
 SELECT
 {_TURN_COLUMNS},
-{answer_run_columns("r")}
+{run_columns("r")}
 FROM selected_turns AS t
-JOIN dlightrag_answer_runs AS r
+JOIN dlightrag_runs AS r
   ON r.owner_id = t.principal_id
  AND r.run_id = t.answer_run_id
 ORDER BY t.turn_number ASC
@@ -431,7 +434,7 @@ SELECT
     attachment.value->>'mime_type' AS mime_type,
     COALESCE((attachment.value->>'byte_size')::bigint, 0) AS byte_size
 FROM web_conversation_turns AS t
-JOIN dlightrag_answer_runs AS r
+JOIN dlightrag_runs AS r
   ON r.owner_id = t.principal_id
  AND r.run_id = t.answer_run_id
 CROSS JOIN LATERAL jsonb_array_elements(
@@ -452,10 +455,10 @@ _GET_TURN_BY_SUBMISSION = f"""
 SELECT
 {_TURN_COLUMNS},
 r.request_fingerprint,
-{answer_run_columns("r")},
+{run_columns("r")},
 {_TURN_CONVERSATION_SUMMARY_COLUMNS}
 FROM web_conversation_turns AS t
-JOIN dlightrag_answer_runs AS r
+JOIN dlightrag_runs AS r
   ON r.owner_id = t.principal_id
  AND r.run_id = t.answer_run_id
 JOIN web_conversations AS c
@@ -468,9 +471,9 @@ WHERE t.principal_id = $1
 _GET_TURN_BY_RUN = f"""
 SELECT
 {_TURN_COLUMNS},
-{answer_run_columns("r")}
+{run_columns("r")}
 FROM web_conversation_turns AS t
-JOIN dlightrag_answer_runs AS r
+JOIN dlightrag_runs AS r
   ON r.owner_id = t.principal_id
  AND r.run_id = t.answer_run_id
 WHERE t.principal_id = $1
@@ -562,7 +565,7 @@ def _linked_turn(row: Any) -> LinkedTurn:
         turn_number=int(row["turn_number"]),
         submission_id=str(row["submission_id"]),
         created_at=row["turn_created_at"],
-        run=answer_run_record(row),
+        run=RunView.from_runtime(run_record(row)),
         conversation_id=str(row["turn_conversation_id"]),
     )
 
@@ -574,10 +577,10 @@ class PGWebConversationStore(PostgresOperationRunner):
         self,
         *,
         pool: ConnectionPool | None = None,
-        run_store: PGAnswerRunStore | None = None,
+        run_store: PGRunStore | None = None,
     ) -> None:
         super().__init__(pool=pool)
-        self._run_store = run_store or PGAnswerRunStore(pool=pool)
+        self._run_store = run_store or PGRunStore(pool=pool)
         self._initialized = False
 
     async def _run_read[T](self, operation: Callable[[Any], Awaitable[T]]) -> T:
@@ -609,9 +612,9 @@ class PGWebConversationStore(PostgresOperationRunner):
             if validate_only:
                 await verify_migrations(
                     conn,
-                    scope=ANSWER_RUN_MIGRATION_SCOPE,
-                    migrations=ANSWER_RUN_MIGRATIONS,
-                    tables=ANSWER_RUN_SCHEMA_TABLES,
+                    scope=RUN_MIGRATION_SCOPE,
+                    migrations=RUN_MIGRATIONS,
+                    tables=RUN_SCHEMA_TABLES,
                     schema_error=RunSchemaError,
                 )
                 await verify_migrations(
@@ -624,8 +627,8 @@ class PGWebConversationStore(PostgresOperationRunner):
                 return
             await apply_migrations(
                 conn,
-                scope=ANSWER_RUN_MIGRATION_SCOPE,
-                migrations=ANSWER_RUN_MIGRATIONS,
+                scope=RUN_MIGRATION_SCOPE,
+                migrations=RUN_MIGRATIONS,
                 schema_error=RunSchemaError,
             )
             await apply_migrations(
@@ -1085,8 +1088,8 @@ class PGWebConversationStore(PostgresOperationRunner):
         principal_id: str,
         conversation_id: str,
         submission_id: str,
-        request: Mapping[str, Any],
-        idempotency_fingerprint: str,
+        envelope: PreparedRunEnvelope,
+        run_id: str,
         artifacts: Sequence[PendingArtifact] = (),
         references: Sequence[PendingArtifactReference] = (),
         title_hint: str | None,
@@ -1105,7 +1108,8 @@ class PGWebConversationStore(PostgresOperationRunner):
         """
         await self._ensure_initialized()
         turn_id = str(uuid4())
-        fingerprint = idempotency_fingerprint
+        request = envelope.payload
+        fingerprint = envelope.request_fingerprint
 
         async def _operation(conn: Any) -> AnswerTurnCreation | None:
             async with conn.transaction():
@@ -1182,10 +1186,12 @@ class PGWebConversationStore(PostgresOperationRunner):
                 try:
                     creation = await self._run_store.create_run_in(
                         conn,
-                        owner_id=principal_id,
-                        request=accepted_request,
-                        idempotency_fingerprint=fingerprint,
-                        idempotency_key=submission_id,
+                        envelope=replace(
+                            envelope,
+                            payload=accepted_request,
+                            accepted_input=accepted_input_envelope(accepted_request),
+                        ),
+                        run_id=run_id,
                         artifacts=artifacts,
                         references=references,
                         routing=accepted_routing,
@@ -1239,7 +1245,7 @@ class PGWebConversationStore(PostgresOperationRunner):
                         turn_number=turn_number,
                         submission_id=submission_id,
                         created_at=creation.run.created_at,
-                        run=creation.run,
+                        run=RunView.from_runtime(creation.run),
                         conversation_id=conversation_id,
                     ),
                     summary=_row_dict(touched if touched is not None else summary_row),

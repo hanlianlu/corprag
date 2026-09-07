@@ -30,7 +30,7 @@ from dlightrag.adapters.mcp.contracts import (
     ConversationMessage,
     CreateWorkspaceInput,
 )
-from dlightrag.application import Application
+from dlightrag.application import Application, ApplicationClosedError
 from dlightrag.application.access import (
     AccessAction,
     AccessDeniedError,
@@ -43,10 +43,7 @@ from dlightrag.application.access import (
     owner_id_from_principal,
     request_scope_context,
 )
-from dlightrag.application.answer_runs import (
-    AnswerRunRecord,
-    AnswerRuntimeUnavailableError,
-)
+from dlightrag.application.answer_runs import AnswerRuntimeUnavailableError
 from dlightrag.application.answer_runs.client_contracts import (
     MAX_HISTORY_MESSAGES,
     AnswerAttachmentLink,
@@ -61,10 +58,8 @@ from dlightrag.application.corpus_admin import (
     normalize_workspace,
     normalize_workspace_ids,
 )
-from dlightrag.application.retrieval import (
-    CorpusUnavailableError,
-    RetrievalTimeoutError,
-)
+from dlightrag.application.retrieval import CorpusUnavailableError
+from dlightrag.application.runs import RunRuntimeUnavailableError, RunView
 from dlightrag.application.settings import access_settings
 
 logger = logging.getLogger(__name__)
@@ -129,11 +124,13 @@ def _owner_id() -> str:
     )
 
 
-def _run_descriptor(record: AnswerRunRecord) -> dict[str, Any]:
+def _run_descriptor(record: RunView) -> dict[str, Any]:
     """Project one run's lifecycle and continuation lineage."""
     accepted = record.request_input()
     return {
         "run_id": record.run_id,
+        "run_kind": record.run_kind,
+        "lane": record.lane,
         "status": record.status,
         "cancel_requested": record.cancel_requested,
         "parent_run_id": accepted.get("parent_run_id"),
@@ -165,9 +162,10 @@ class DlightRAGMCPServer(MCPServer):
                 ValueError,
                 PermissionError,
                 InvalidToolConfigurationError,
-                RetrievalTimeoutError,
+                ApplicationClosedError,
                 CorpusUnavailableError,
                 AnswerRuntimeUnavailableError,
+                RunRuntimeUnavailableError,
             )
             inner = exc if isinstance(exc, surfaced) else exc.__cause__
             if isinstance(inner, InvalidToolConfigurationError):
@@ -177,9 +175,10 @@ class DlightRAGMCPServer(MCPServer):
                 inner,
                 ValueError
                 | PermissionError
-                | RetrievalTimeoutError
+                | ApplicationClosedError
                 | CorpusUnavailableError
-                | AnswerRuntimeUnavailableError,
+                | AnswerRuntimeUnavailableError
+                | RunRuntimeUnavailableError,
             ):
                 logger.warning("MCP tool '%s' rejected: %s", name, inner)
                 text = (
@@ -237,9 +236,9 @@ _application: Application | None = None
 
 
 async def _ensure_application() -> Application:
-    global _application
+    """Return the lifespan-bound Application; never compose a fallback service."""
     if _application is None:
-        _application = await create_application()
+        raise ApplicationClosedError("Application is not bound to this MCP transport")
     return _application
 
 
@@ -252,7 +251,10 @@ async def _close_application() -> None:
 
 @asynccontextmanager
 async def _mcp_lifespan(_: MCPServer[Any]) -> AsyncIterator[None]:
-    await _ensure_application()
+    global _application
+    if _application is not None:
+        raise RuntimeError("Application is already bound to this MCP transport")
+    _application = await create_application()
     try:
         yield
     finally:

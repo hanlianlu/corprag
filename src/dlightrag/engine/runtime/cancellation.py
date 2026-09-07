@@ -18,7 +18,7 @@ import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, cast
 
-CANCEL_CHANNEL = "dlightrag_answer_run_cancel"
+CANCEL_CHANNEL = "dlightrag_run_cancel"
 _RECONNECT_BASE_SECONDS = 1.0
 _RECONNECT_MAX_SECONDS = 30.0
 _RESYNC_SECONDS = 30.0
@@ -82,7 +82,7 @@ class RunCancellationListener:
                 raise
             except Exception:
                 logger.warning(
-                    "Answer run cancellation listener failed; retrying in %.1fs",
+                    "Run cancellation listener failed; retrying in %.1fs",
                     backoff,
                     exc_info=True,
                 )
@@ -91,11 +91,14 @@ class RunCancellationListener:
                 backoff = min(backoff * 2, _RECONNECT_MAX_SECONDS)
 
     async def _listen_once(self) -> None:
+        self._ready.clear()
         connection: Any = await self._open_connection()
         try:
             execute = connection.execute
             await execute(f"LISTEN {CANCEL_CHANNEL}")
-            await self._rescan_cancel_pending()
+            # Initial and reconnect scans are part of readiness: both the scan
+            # and every local signal must succeed before this listener is safe.
+            await self._rescan_cancel_pending(best_effort=False)
             self._ready.set()
             while not self._closing:
                 notification = await self._wait_for_notification(connection)
@@ -134,8 +137,9 @@ class RunCancellationListener:
             try:
                 item = await asyncio.wait_for(queue.get(), timeout=_RESYNC_SECONDS)
             except TimeoutError:
-                # Periodic rescan catches missed cancels between notifications.
-                await self._rescan_cancel_pending()
+                # Once ready, periodic rescans remain best-effort: the next
+                # notification, rescan, or reconnect can retry a missed signal.
+                await self._rescan_cancel_pending(best_effort=True)
                 return b""  # sentinel: keep listening, nothing to handle
             if item is None:
                 return None  # connection terminated; reconnect and rescan
@@ -155,21 +159,16 @@ class RunCancellationListener:
             return  # a wake digest is a 64-char hex; anything else is noise
         # The payload never cancels a task directly: only the authoritative
         # rescan decides which locally leased runs to signal.
-        await self._rescan_cancel_pending()
+        await self._rescan_cancel_pending(best_effort=True)
 
-    async def _rescan_cancel_pending(self) -> None:
+    async def _rescan_cancel_pending(self, *, best_effort: bool) -> None:
         try:
             async for owner_id, run_id in self._rescan():
-                try:
-                    await self._on_cancel(owner_id, run_id)
-                except Exception:
-                    logger.warning(
-                        "Answer run cancel signal handler failed for %s",
-                        run_id,
-                        exc_info=True,
-                    )
+                await self._on_cancel(owner_id, run_id)
         except Exception:
-            logger.warning("Answer run cancel-pending rescan failed", exc_info=True)
+            if not best_effort:
+                raise
+            logger.warning("Run cancel-pending rescan failed", exc_info=True)
 
 
 __all__ = [

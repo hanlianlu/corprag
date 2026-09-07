@@ -405,12 +405,12 @@ export async function getArtifactPresentationAt(
   return parseWire(response, answerPresentation, makeError, 'Failed to load the Artifact');
 }
 
-export async function getAnswerRun(
+export async function getRun(
   runId: string,
   signal?: AbortSignal,
 ): Promise<ConversationTurn> {
   const id = encodeURIComponent(runId);
-  const response = await fetch(`/web/api/answer/${id}`, {signal});
+  const response = await fetch(`/web/api/runs/${id}`, {signal});
   return parseWire(response, conversationTurn, makeError, 'Failed to load answer run');
 }
 
@@ -469,25 +469,12 @@ export async function continueAnswerRun(
   return parseWire(response, acceptedAnswer, makeError, `Failed to ${operation} the answer`);
 }
 
-export async function resumeAnswerRun(
+export async function cancelRun(
   runId: string,
   signal?: AbortSignal,
 ): Promise<ConversationTurn> {
   const id = encodeURIComponent(runId);
-  const response = await fetch(`/web/api/answer/${id}/resume`, {
-    method: 'POST',
-    headers: csrfHeaders(),
-    signal,
-  });
-  return parseWire(response, conversationTurn, makeError, 'Failed to resume the answer');
-}
-
-export async function cancelAnswerRun(
-  runId: string,
-  signal?: AbortSignal,
-): Promise<ConversationTurn> {
-  const id = encodeURIComponent(runId);
-  const response = await fetch(`/web/api/answer/${id}`, {
+  const response = await fetch(`/web/api/runs/${id}`, {
     method: 'DELETE',
     headers: csrfHeaders(),
     signal,

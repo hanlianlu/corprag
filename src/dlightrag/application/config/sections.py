@@ -13,6 +13,7 @@ DLIGHTRAG_* → backend env vars so both modes work seamlessly.
 """
 
 import json
+import math
 import os
 import re
 import ssl
@@ -216,21 +217,44 @@ class AnswerConfig(BaseModel):
     )
 
 
-class RuntimeConfig(BaseModel):
-    """Durable Answer worker admission owned by the Runtime layer."""
+class QueryLaneRuntimeConfig(BaseModel):
+    """Accepted Query-lane worker, active-claim, and admission limits."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    answer_worker_concurrency: int = Field(default=16, ge=1)
-    answer_run_retention_days: int = Field(
+    worker_concurrency: int = Field(default=16, ge=1)
+    max_active_runs: int = Field(default=16, ge=1)
+    max_nonterminal_runs: int = Field(default=30_000, ge=1)
+
+
+class CorpusMutationLaneRuntimeConfig(BaseModel):
+    """Validated Corpus Mutation worker, active-claim, and admission limits."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    worker_concurrency: int = Field(default=2, ge=1)
+    max_active_runs: int = Field(default=2, ge=1)
+    max_nonterminal_runs: int = Field(default=1_000, ge=1)
+
+
+class RuntimeConfig(BaseModel):
+    """Operation-neutral durable RunRuntime admission and retention."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    query: QueryLaneRuntimeConfig = Field(default_factory=QueryLaneRuntimeConfig)
+    corpus_mutation: CorpusMutationLaneRuntimeConfig = Field(
+        default_factory=CorpusMutationLaneRuntimeConfig
+    )
+    run_retention_days: int = Field(
         default=365,
         ge=1,
         description=(
-            "Retention floor for terminal Answer runs and their event logs, "
-            "counted from finished_at. Also the retention clock for memory: "
-            "superseded profile history is purged after the same span. A "
-            "conversation whose last turn's run ages out becomes empty and is "
-            "then reclaimed."
+            "Retention floor for terminal Answer Runs and their event logs, "
+            "counted from finished_at; top-level Retrieval uses seven days. "
+            "Also the retention clock for memory: superseded profile history "
+            "is purged after the same span. A conversation whose last turn's "
+            "Run ages out becomes empty and is then reclaimed."
         ),
     )
 
@@ -575,20 +599,89 @@ class PostgresSettings(FrozenSettings):
 
 
 class LightRAGStorageSettings(FrozenSettings):
+    """Deployment-static LightRAG storage names and narrow vector bindings."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        arbitrary_types_allowed=True,
+        hide_input_in_errors=True,
+    )
+
     vector_index_type: Literal["HNSW", "HNSW_HALFVEC", "IVFFLAT", "VCHORDRQ"] = "HNSW_HALFVEC"
     hnsw_m: int = 32
     hnsw_ef_construction: int = 256
     hnsw_ef_search: int = 256
-    vector_storage: Literal["PGVectorStorage"] = "PGVectorStorage"
+    vector_storage: Literal["PGVectorStorage", "MilvusVectorDBStorage"] = "PGVectorStorage"
     graph_storage: Literal["PGTableGraphStorage"] = "PGTableGraphStorage"
     kv_storage: Literal["PGKVStorage"] = "PGKVStorage"
     doc_status_storage: Literal["PGDocStatusStorage"] = "PGDocStatusStorage"
+    milvus_uri: str | None = None
+    milvus_token: str | None = None
+    milvus_db_name: str | None = None
     vector_db_kwargs: Mapping[str, Any] = Field(default_factory=dict)
+
+    @field_validator("milvus_uri", "milvus_token", "milvus_db_name", mode="before")
+    @classmethod
+    def _normalize_optional_milvus_binding(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return value
+        return value.strip() or None
 
     @field_validator("vector_db_kwargs", mode="after")
     @classmethod
     def _freeze_vector_kwargs(cls, value: Mapping[str, Any]) -> Mapping[str, Any]:
-        return freeze_settings_value(value)
+        if len(value) > 16:
+            raise ValueError("vector_db_kwargs accepts at most 16 entries")
+        normalized: dict[str, Any] = {}
+        for raw_key, item in value.items():
+            key = str(raw_key).strip()
+            if not key or len(key) > 64:
+                raise ValueError("vector_db_kwargs keys must contain 1 to 64 characters")
+            if any(marker in key.lower() for marker in ("password", "secret", "token", "uri")):
+                raise ValueError("vector_db_kwargs must not contain credentials or endpoint URIs")
+            if item is not None and not isinstance(item, str | int | float | bool):
+                raise ValueError("vector_db_kwargs values must be scalar")
+            if isinstance(item, str) and len(item) > 128:
+                raise ValueError("vector_db_kwargs string values must not exceed 128 characters")
+            if isinstance(item, float) and not math.isfinite(item):
+                raise ValueError("vector_db_kwargs numeric values must be finite")
+            normalized[key] = item
+        if len(json.dumps(normalized, separators=(",", ":"), default=str).encode()) > 4096:
+            raise ValueError("vector_db_kwargs exceeds the 4096-byte configuration bound")
+        return freeze_settings_value(normalized)
+
+    @model_validator(mode="after")
+    def _validate_vector_kwargs(self) -> Self:
+        if self.vector_storage != "MilvusVectorDBStorage":
+            if any((self.milvus_uri, self.milvus_token, self.milvus_db_name)):
+                raise ValueError(
+                    "milvus_uri, milvus_token, and milvus_db_name require "
+                    "vector_storage='MilvusVectorDBStorage'"
+                )
+            return self
+        supported = {
+            "cosine_better_than_threshold",
+            "index_type",
+            "metric_type",
+            "hnsw_m",
+            "hnsw_ef_construction",
+            "hnsw_ef",
+            "sq_type",
+            "sq_refine",
+            "sq_refine_type",
+            "sq_refine_k",
+            "ivf_nlist",
+            "ivf_nprobe",
+        }
+        unknown = sorted(set(self.vector_db_kwargs).difference(supported))
+        if unknown:
+            raise ValueError(
+                "Milvus vector_db_kwargs contains unsupported keys: " + ", ".join(unknown)
+            )
+        return self
 
     @field_serializer("vector_db_kwargs")
     def _serialize_vector_kwargs(self, value: Mapping[str, Any]) -> dict[str, Any]:
@@ -602,7 +695,6 @@ class StorageSettings(FrozenSettings):
 
 class AnswerSectionSettings(FrozenSettings):
     generation: AnswerConfig = Field(default_factory=AnswerConfig)
-    runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     agent: AgentExecutionConfig = Field(default_factory=AgentExecutionConfig)
     citations: CitationsConfig = Field(default_factory=CitationsConfig)
     conversations: WebConversationsConfig = Field(default_factory=WebConversationsConfig)
@@ -679,7 +771,7 @@ class ObservabilitySettings(FrozenSettings):
 
 
 class DlightragConfig(BaseSettings):
-    """The eight-section immutable DlightRAG configuration."""
+    """The nine-section immutable DlightRAG configuration."""
 
     _SECRET_PATTERNS: tuple[str, ...] = (
         "api_key",
@@ -689,6 +781,7 @@ class DlightragConfig(BaseSettings):
         "verification_key",
         "password",
         "connection_string",
+        "milvus_uri",
         "account_key",
         "sas_token",
         "token",
@@ -703,6 +796,7 @@ class DlightragConfig(BaseSettings):
         case_sensitive=False,
         extra="forbid",
         frozen=True,
+        hide_input_in_errors=True,
     )
 
     def __init__(self, **values: Any) -> None:
@@ -732,6 +826,7 @@ class DlightragConfig(BaseSettings):
     models: ModelsSettings = Field(default_factory=ModelsSettings)
     corpus: CorpusSettings = Field(default_factory=CorpusSettings)
     answer: AnswerSectionSettings = Field(default_factory=AnswerSectionSettings)
+    runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     access: AccessSectionSettings = Field(default_factory=AccessSectionSettings)
     interfaces: InterfacesSettings = Field(default_factory=InterfacesSettings)
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
@@ -766,7 +861,24 @@ class DlightragConfig(BaseSettings):
         if self.corpus.retrieval.bm25_enabled and not any(p.fallback for p in profiles):
             raise ValueError("bm25_profiles must include at least one fallback profile")
         self._validate_auth()
+        self._validate_storage_composition()
         return self
+
+    def _validate_storage_composition(self) -> None:
+        lightrag = self.storage.lightrag
+        if lightrag.vector_storage != "MilvusVectorDBStorage":
+            return
+        if self.is_reader:
+            raise ValueError(
+                "service_role='reader' does not support MilvusVectorDBStorage; "
+                "use the writer role or PGVectorStorage"
+            )
+        promotion = self.corpus.promotion
+        if promotion.doc_threshold is not None or promotion.chunk_threshold is not None:
+            raise ValueError(
+                "workspace promotion thresholds require PGVectorStorage and cannot be used "
+                "with MilvusVectorDBStorage"
+            )
 
     def _validate_auth(self) -> None:
         access, api, mcp = self.access, self.interfaces.api, self.interfaces.mcp
@@ -910,21 +1022,15 @@ class DlightragConfig(BaseSettings):
         }
 
     def apply_lightrag_sidecar_env(self) -> None:
-        env_map = self._lightrag_sidecar_env_map()
-        keys = {
-            env
-            for cls in (VLMSidecarSettings, MinerUSidecarSettings, DoclingSidecarSettings)
-            for env in cls._ENV_MAP.values()
-        }
-        for key in keys - env_map.keys():
-            os.environ.pop(key, None)
-        os.environ.update(env_map)
+        # Resolved bindings win. Optional fields that are absent deliberately do
+        # not erase inherited LightRAG behavior.
+        os.environ.update(self._lightrag_sidecar_env_map())
 
     def apply_lightrag_backend_env(self, *, force: bool = False) -> None:
         pg, vector = self.storage.postgres, self.storage.lightrag
         active = self.pg_connection_kwargs()
-        os.environ.pop("POSTGRES_WORKSPACE", None)
         values: dict[str, Any] = {
+            "POSTGRES_WORKSPACE": self.deployment.workspace,
             "POSTGRES_HOST": active["host"],
             "POSTGRES_PORT": active["port"],
             "POSTGRES_USER": active["user"],
@@ -947,6 +1053,9 @@ class DlightragConfig(BaseSettings):
             "POSTGRES_SSL_KEY": pg.ssl_key,
             "POSTGRES_SSL_ROOT_CERT": pg.ssl_root_cert,
             "POSTGRES_SSL_CRL": pg.ssl_crl,
+            "MILVUS_URI": vector.milvus_uri,
+            "MILVUS_TOKEN": vector.milvus_token,
+            "MILVUS_DB_NAME": vector.milvus_db_name,
         }.items():
             if (rendered := self._env_value(value)) is not None:
                 values[key] = rendered

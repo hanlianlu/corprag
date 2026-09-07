@@ -11,12 +11,13 @@ from dlightrag.adapters.http.client.client import (
     AnswerPart,
     AnswerResult,
     AnswerRunClient,
-    AnswerRunDescriptor,
     AnswerStreamEvent,
     ArtifactOutcome,
     EvidenceImage,
     ProfileMemoryReceipt,
     ProfileMemorySettings,
+    RetrievalResult,
+    RunDescriptor,
     parse_sse_frames,
 )
 from dlightrag.adapters.http.client.http import (
@@ -30,7 +31,7 @@ from dlightrag.adapters.http.client.http import (
     json_headers,
 )
 from dlightrag.adapters.http.client.requests import query_image_blocks_from_urls
-from dlightrag.application.answer_runs import AnswerRunCancelledError, AnswerRunFailedError
+from dlightrag.application.runs import RunCancelledError, RunFailedError
 
 __all__ = [
     "CLIENT_TIMEOUT_ENV",
@@ -44,15 +45,16 @@ __all__ = [
     "AnswerAttachmentUpload",
     "AnswerPart",
     "AnswerResult",
-    "AnswerRunCancelledError",
+    "RunCancelledError",
     "AnswerRunClient",
-    "AnswerRunDescriptor",
+    "RunDescriptor",
     "AnswerStreamEvent",
-    "AnswerRunFailedError",
+    "RunFailedError",
     "ArtifactOutcome",
     "EvidenceImage",
     "ProfileMemoryReceipt",
     "ProfileMemorySettings",
+    "RetrievalResult",
     "api_url",
     "auth_headers",
     "auth_token",

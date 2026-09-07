@@ -961,7 +961,7 @@ it('shows cancel-aware reconnect state and preserves stopping when reconnecting'
         );
       });
     }
-    if (url.endsWith(`/answer/${runId}`)) {
+    if (url === `/web/api/runs/${runId}`) {
       return Promise.resolve(new Response(JSON.stringify(turnWire(stoppingTurn)), {
         status: 200,
         headers: {'Content-Type': 'application/json'},

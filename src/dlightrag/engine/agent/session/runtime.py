@@ -114,6 +114,7 @@ from dlightrag.engine.agent.session.transactions import (
 )
 from dlightrag.engine.agent.tools.contracts import AgentTool
 from dlightrag.engine.ai.messages import AssistantTurn
+from dlightrag.engine.dependencies import ProviderUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -583,6 +584,7 @@ class AgentSessionRuntime[HostDeltaT]:
                 asyncio.CancelledError,
                 AgentOperationCancelled,
                 OperationConflictError,
+                ProviderUnavailableError,
                 SessionLeaseLostError,
             ):
                 raise
@@ -893,17 +895,22 @@ class AgentSessionRuntime[HostDeltaT]:
                     )
                 )
                 return
+            if exc.retryable:
+                # Keep ProviderAttemptStarted durable and let the owning Run
+                # release compute capacity. Reclaim recovery resolves the
+                # interrupted attempt before resuming this same operation.
+                raise ProviderUnavailableError from exc
             await self._fail(
                 refreshed,
                 kind="provider_unavailable",
                 detail=exc.detail,
             )
             return
-        except Exception as exc:
+        except Exception:
             await self._fail(
                 refreshed,
                 kind="provider_unavailable",
-                detail=str(exc),
+                detail="Model provider request failed",
             )
             return
         await self._commit_assistant(refreshed, assistant)

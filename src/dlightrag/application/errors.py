@@ -3,6 +3,7 @@
 
 import math
 
+from dlightrag.engine.dependencies import TransientDependencyError
 from dlightrag.engine.runtime import RunSchemaError
 
 
@@ -14,8 +15,11 @@ class ApplicationClosedError(RuntimeError):
         super().__init__(self.detail)
 
 
-class CorpusUnavailableError(RuntimeError):
+class CorpusUnavailableError(TransientDependencyError):
     """An Application use case cannot currently reach corpus state."""
+
+    def __init__(self, detail: str | None = None) -> None:
+        super().__init__("corpus_storage", detail or "Corpus storage is temporarily unavailable")
 
 
 class StorageSchemaError(RuntimeError):

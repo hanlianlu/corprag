@@ -6,8 +6,13 @@ from typing import Any
 import asyncpg
 import pytest
 
-from dlightrag.adapters.postgres.answer.answer_runs import PGAnswerRunStore
-from dlightrag.engine.runtime import RunCoordinator, RunExecutionOutcome
+from dlightrag.adapters.postgres.runtime.run_store import PGRunStore
+from dlightrag.engine.runtime import (
+    PreparedRunEnvelope,
+    RunAccessScope,
+    RunCoordinator,
+    RunExecutionOutcome,
+)
 from tests.integration.pg_conn import PG_CONN_KWARGS
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
@@ -61,14 +66,31 @@ def _request(query: str = "why") -> dict[str, Any]:
     }
 
 
-async def _claim(pool) -> tuple[PGAnswerRunStore, Any]:
-    store = PGAnswerRunStore(pool=pool)
-    await store.initialize()
-    creation = await store.create_run(
-        owner_id="owner-a",
-        prepared_input=_request(),
-        idempotency_fingerprint="f" * 64,
+async def _create(store: PGRunStore):
+    import uuid
+
+    run_id = str(uuid.uuid7())
+    prepared = _request()
+    return await store.create_run(
+        envelope=PreparedRunEnvelope(
+            run_kind="answer",
+            lane="query",
+            submitted_by="owner-a",
+            access_scope=RunAccessScope(kind="owner", scope_id="owner-a"),
+            submission_key=run_id,
+            request_fingerprint="f" * 64,
+            payload=prepared,
+            accepted_input=prepared,
+            retention_seconds=365 * 24 * 60 * 60,
+        ),
+        run_id=run_id,
     )
+
+
+async def _claim(pool) -> tuple[PGRunStore, Any]:
+    store = PGRunStore(pool=pool)
+    await store.initialize()
+    creation = await _create(store)
     claimed = await store.claim_next(worker_id="worker-1")
     assert claimed is not None
     return store, creation.run.run_id
@@ -99,13 +121,9 @@ async def test_listener_wakes_the_lease_owner_on_notify(pool) -> None:
 
 
 async def test_second_connection_wake_reaches_a_running_coordinator(pool) -> None:
-    store = PGAnswerRunStore(pool=pool)
+    store = PGRunStore(pool=pool)
     await store.initialize()
-    creation = await store.create_run(
-        owner_id="owner-a",
-        prepared_input=_request(),
-        idempotency_fingerprint="f" * 64,
-    )
+    creation = await _create(store)
     run_id = creation.run.run_id
     cancelled: list[str] = []
 
@@ -115,7 +133,10 @@ async def test_second_connection_wake_reaches_a_running_coordinator(pool) -> Non
                 await __import__("asyncio").sleep(60)
 
     coordinator = RunCoordinator(
-        store=store, executor=_BlockedExecutor(), answer_worker_concurrency=1, worker_id="worker-1"
+        store=store,
+        executors={"answer": _BlockedExecutor()},
+        query_worker_concurrency=1,
+        worker_id="worker-1",
     )
 
     async def _on_cancel(owner_id: str, target: str) -> None:
@@ -140,7 +161,7 @@ async def test_second_connection_wake_reaches_a_running_coordinator(pool) -> Non
             await asyncio.sleep(0.01)
         # A second "process" cancels: its durable write NOTIFYs the channel in
         # the same transaction, and only the authoritative row wakes the owner.
-        other = PGAnswerRunStore(pool=pool)
+        other = PGRunStore(pool=pool)
         outcome = await other.request_cancellation(owner_id="owner-a", run_id=run_id)
         assert outcome.outcome == "pending"
         for _ in range(400):

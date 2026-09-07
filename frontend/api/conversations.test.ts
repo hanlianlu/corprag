@@ -47,6 +47,26 @@ test('conversation pages use the bounded route and encode an opaque continuation
   ]);
 });
 
+test('conversation titles preserve JavaScript-sensitive separators as inert data', async () => {
+  const title = 'line\u2028separator\u2029</script><script>globalThis.__conversationTitleRan=true</script>';
+  const runtime = globalThis as typeof globalThis & {__conversationTitleRan?: boolean};
+  delete runtime.__conversationTitleRan;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    items: [{
+      conversation_id: 'conversation-sensitive',
+      title,
+      created_at: '2026-08-23T00:00:00Z',
+      updated_at: '2026-08-23T00:00:00Z',
+    }],
+    next_cursor: null,
+  }), {headers: {'Content-Type': 'application/json'}});
+
+  const page = await listConversations();
+
+  assert.equal(page.items[0]?.title, title);
+  assert.equal(runtime.__conversationTitleRan, undefined);
+});
+
 test('history pages encode cursor and limit, normalize rollback payloads, and pass abort', async () => {
   let seenUrl = '';
   let seenSignal: AbortSignal | null | undefined;
@@ -115,7 +135,7 @@ test('continuation posts one submission id to the selected branch operation', as
   assert.equal(result.conversation.conversationId, 'conversation-2');
 });
 
-test('steer and child roster use their shared run routes', async () => {
+test('steer and child roster use their Answer-specific routes', async () => {
   const paths: string[] = [];
   globalThis.fetch = async (input) => {
     const request = new Request(new URL(String(input), 'http://localhost'));

@@ -18,15 +18,15 @@ from typing import Any
 
 from fastapi import HTTPException, Request
 
-from dlightrag.application.answer_runs import AnswerRunEvent
 from dlightrag.application.answer_runs.client_contracts import model_dump_json_safe
+from dlightrag.application.runs import RunEvent
 
 #: A queued or quiet run keeps its connection alive with comments, not events.
 SSE_KEEPALIVE_SECONDS = 10.0
 KEEPALIVE_FRAME = ": keepalive\n\n"
 
 #: How one transport turns a durable event into the frame its clients read.
-type EventRenderer = Callable[[AnswerRunEvent], str]
+type EventRenderer = Callable[[RunEvent], str]
 
 
 def resume_cursor(request: Request) -> int:
@@ -61,7 +61,7 @@ def sse_frame(*, sequence: int, event_type: str, payload: Any) -> str:
 
 
 async def follow_run_frames(
-    events: AsyncIterator[AnswerRunEvent], render: EventRenderer
+    events: AsyncIterator[RunEvent], render: EventRenderer
 ) -> AsyncGenerator[str]:
     """Replay and follow one run's durable events as this transport's frames.
 
@@ -69,7 +69,7 @@ async def follow_run_frames(
     is quiet neither restarts nor loses the event that arrives next.
     """
     iterator = events.__aiter__()
-    pending: asyncio.Task[AnswerRunEvent] | None = None
+    pending: asyncio.Task[RunEvent] | None = None
     try:
         while True:
             if pending is None:

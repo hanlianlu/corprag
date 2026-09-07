@@ -14,6 +14,7 @@ from dlightrag.application.access import (
     UserContext,
     WorkspaceRecord,
     access_control_from_settings,
+    corpus_mutation_access_action,
     owner_id_from_user,
 )
 from dlightrag.application.config import (
@@ -67,7 +68,7 @@ async def test_allow_all_access_control_is_default(test_config: DlightragConfig)
 
     await access_control.check(
         UserContext(user_id="anonymous", auth_mode="none"),
-        AccessAction.WORKSPACE_DELETE,
+        AccessAction.WORKSPACE_RESET,
         workspace="finance",
     )
 
@@ -146,10 +147,10 @@ async def test_reader_preset_allows_reads_and_denies_writes(
     with pytest.raises(AccessDeniedError):
         await access_control.check(user, AccessAction.WORKSPACE_INGEST, workspace="finance")
     with pytest.raises(AccessDeniedError):
-        await access_control.check(user, AccessAction.WORKSPACE_DELETE, workspace="finance")
+        await access_control.check(user, AccessAction.WORKSPACE_RESET, workspace="finance")
 
 
-async def test_editor_preset_allows_ingest_and_job_read_but_not_workspace_admin(
+async def test_editor_preset_allows_corpus_edits_but_not_workspace_admin(
     test_config: DlightragConfig,
 ) -> None:
     access_control, user = _preset_access_control("editor", test_config)
@@ -157,9 +158,6 @@ async def test_editor_preset_allows_ingest_and_job_read_but_not_workspace_admin(
     await access_control.check(user, AccessAction.WORKSPACE_QUERY, workspace="finance")
     await access_control.check(user, AccessAction.WORKSPACE_INGEST, workspace="finance")
     await access_control.check(user, AccessAction.WORKSPACE_DELETE_FILES, workspace="finance")
-    await access_control.check(user, AccessAction.JOB_READ, workspace="finance")
-    with pytest.raises(AccessDeniedError):
-        await access_control.check(user, AccessAction.WORKSPACE_DELETE, workspace="finance")
     with pytest.raises(AccessDeniedError):
         await access_control.check(user, AccessAction.WORKSPACE_RESET, workspace="finance")
     with pytest.raises(AccessDeniedError):
@@ -173,12 +171,25 @@ async def test_admin_preset_allows_every_action(test_config: DlightragConfig) ->
         AccessAction.WORKSPACE_QUERY,
         AccessAction.WORKSPACE_INGEST,
         AccessAction.WORKSPACE_CREATE,
-        AccessAction.WORKSPACE_DELETE,
         AccessAction.WORKSPACE_RESET,
-        AccessAction.JOB_READ,
         AccessAction.MODEL_CATALOGUE_WRITE,
     ):
         await access_control.check(user, action, workspace="finance")
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        ("ingest", AccessAction.WORKSPACE_INGEST),
+        ("replace", AccessAction.WORKSPACE_INGEST),
+        ("retry", AccessAction.WORKSPACE_INGEST),
+        ("delete", AccessAction.WORKSPACE_DELETE_FILES),
+        ("reset", AccessAction.WORKSPACE_RESET),
+        ("unknown", AccessAction.WORKSPACE_RESET),
+    ],
+)
+def test_corpus_mutation_action_mapping_fails_closed(mutation: str, expected: str) -> None:
+    assert corpus_mutation_access_action(mutation) == expected
 
 
 async def test_workspace_wildcard_rule_matches_any_canonical_workspace(

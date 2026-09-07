@@ -12,9 +12,14 @@ from dlightrag.adapters.postgres.core.identifiers import pg_identifier, pg_quali
 from dlightrag.adapters.postgres.corpus.pg_metadata_index import (
     METADATA_TABLE,
     metadata_match_conditions,
+    metadata_visibility_condition,
 )
 from dlightrag.engine.rag.retrieval import MetadataScope
 from dlightrag.engine.rag.retrieval.filtering import current_filter_stats
+from dlightrag.engine.rag.retrieval.visibility import (
+    MAX_VISIBILITY_CANDIDATES,
+    bounded_visibility_candidate_limit,
+)
 
 logger = logging.getLogger(__name__)
 EXACT_FILTER_THRESHOLD = 8192
@@ -42,22 +47,24 @@ class PGFilteredVectorSearch:
     """Strict document-scoped pgvector search and supporting index DDL."""
 
     def __init__(self, original: Any, *, exact_threshold: int = EXACT_FILTER_THRESHOLD) -> None:
+        required = ("table_name", "workspace", "db", "cosine_better_than_threshold")
+        missing = [name for name in required if not hasattr(original, name)]
+        if missing:
+            raise RuntimeError(
+                "Filtered vector search requires PostgreSQL vector capabilities: "
+                + ", ".join(missing)
+            )
         self._original = original
-        self._backend = type(original).__name__
         self._exact_threshold = exact_threshold
 
     async def search(
         self,
         embedding: list[float],
         *,
-        scope: MetadataScope,
+        scope: MetadataScope | None,
         top_k: int,
     ) -> list[dict[str, Any]]:
-        if self._backend != "PGVectorStorage":
-            raise RuntimeError(
-                f"Filtered vector search requires PGVectorStorage, got {self._backend}"
-            )
-        if not scope:
+        if scope is not None and not scope:
             return []
         table_name = pg_qualified_identifier(self._original.table_name)
         workspace = self._original.workspace
@@ -69,7 +76,20 @@ class PGFilteredVectorSearch:
         )
         embedding_vec = np.array(embedding, dtype=np.float32)
 
-        if scope.candidate_count <= self._exact_threshold:
+        if scope is None:
+            strategy = "hnsw_visibility"
+            rows = await self._run(
+                lambda conn: self._visibility_search(
+                    conn,
+                    embedding_vec,
+                    workspace,
+                    cosine_threshold,
+                    top_k,
+                    table_name=table_name,
+                    vector_cast=vector_cast,
+                )
+            )
+        elif scope.candidate_count <= self._exact_threshold:
             strategy = "exact_vector"
             rows = await self._run(
                 lambda conn: self._exact_search(
@@ -100,7 +120,7 @@ class PGFilteredVectorSearch:
         stats = current_filter_stats()
         if stats is not None:
             stats.vector_strategy = strategy
-            if scope.candidate_count_exact:
+            if scope is not None and scope.candidate_count_exact:
                 shortfall = max(0, min(top_k, scope.candidate_count) - len(rows))
                 if shortfall:
                     stats.vector_candidate_shortfall = shortfall
@@ -108,9 +128,53 @@ class PGFilteredVectorSearch:
             "%s in-filtered PG search: %d results from %s chunk(s)",
             "Exact" if strategy == "exact_vector" else "HNSW",
             len(rows),
-            scope.render_candidate_count(),
+            scope.render_candidate_count() if scope is not None else "bounded visible",
         )
         return self._format_rows(rows)
+
+    async def _visibility_search(
+        self,
+        conn: Any,
+        embedding_vec: Any,
+        workspace: str,
+        cosine_threshold: float,
+        top_k: int,
+        *,
+        table_name: str,
+        vector_cast: str,
+    ) -> list[Any]:
+        """Rank a bounded ANN window, then correlate it to visible metadata."""
+        overfetch = bounded_visibility_candidate_limit(top_k)
+        async with conn.transaction():
+            await conn.execute("SET LOCAL hnsw.iterative_scan = 'relaxed_order'")
+            await conn.execute(f"SET LOCAL hnsw.max_scan_tuples = {MAX_VISIBILITY_CANDIDATES}")
+            sql = (
+                f"WITH nearest AS MATERIALIZED ("  # noqa: S608
+                f"SELECT id, workspace, content, file_path, full_doc_id, "
+                f"1 - (content_vector <=> $1::{vector_cast}) AS score, "
+                f"content_vector <=> $1::{vector_cast} AS distance "
+                f"FROM {table_name} "
+                "WHERE workspace = $2 "
+                f"ORDER BY content_vector <=> $1::{vector_cast} "
+                "LIMIT $3"
+                ") "
+                "SELECT n.id, n.content, n.file_path, n.full_doc_id, n.score "
+                "FROM nearest n "
+                "WHERE n.score > $4 AND EXISTS ("
+                f"SELECT 1 FROM {METADATA_TABLE} m "
+                "WHERE m.workspace = n.workspace AND m.doc_id = n.full_doc_id "
+                f"AND {metadata_visibility_condition('m')}"
+                ") "
+                "ORDER BY n.distance + 0 LIMIT $5"
+            )
+            return await conn.fetch(
+                sql,
+                embedding_vec,
+                workspace,
+                overfetch,
+                cosine_threshold,
+                top_k,
+            )
 
     async def _exact_search(
         self,
@@ -168,7 +232,7 @@ class PGFilteredVectorSearch:
         async def iterative_search(conn: Any) -> Any:
             async with conn.transaction():
                 await conn.execute("SET LOCAL hnsw.iterative_scan = 'relaxed_order'")
-                await conn.execute("SET LOCAL hnsw.max_scan_tuples = 20000")
+                await conn.execute(f"SET LOCAL hnsw.max_scan_tuples = {MAX_VISIBILITY_CANDIDATES}")
                 # The ranked stream stays the HNSW source; the metadata
                 # semi-join filters before the outer LIMIT collects top_k
                 # matching rows, with the existing ANN search budget intact.

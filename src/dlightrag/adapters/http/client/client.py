@@ -16,7 +16,7 @@ from uuid import uuid4
 import httpx
 
 from dlightrag.adapters.http.client.attachments import AnswerAttachmentUpload
-from dlightrag.application.answer_runs import AnswerRunCancelledError, AnswerRunFailedError
+from dlightrag.application.runs import RunCancelledError, RunFailedError
 
 logger = logging.getLogger(__name__)
 
@@ -32,10 +32,12 @@ _TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
 
 
 @dataclass(frozen=True, slots=True)
-class AnswerRunDescriptor:
+class RunDescriptor:
     """The accepted run one request created, with its owner-scoped URLs."""
 
     run_id: str
+    run_kind: str
+    lane: str
     status: str
     status_url: str
     events_url: str
@@ -44,14 +46,16 @@ class AnswerRunDescriptor:
     continuation_kind: str | None = None
 
     @classmethod
-    def from_payload(cls, payload: Mapping[str, Any]) -> AnswerRunDescriptor:
+    def from_payload(cls, payload: Mapping[str, Any]) -> RunDescriptor:
         run_id = str(payload["run_id"])
         return cls(
             run_id=run_id,
+            run_kind=str(payload["run_kind"]),
+            lane=str(payload["lane"]),
             status=str(payload["status"]),
-            status_url=str(payload.get("status_url") or f"/answer/{run_id}"),
-            events_url=str(payload.get("events_url") or f"/answer/{run_id}/events"),
-            cancel_url=str(payload.get("cancel_url") or f"/answer/{run_id}"),
+            status_url=str(payload.get("status_url") or f"/runs/{run_id}"),
+            events_url=str(payload.get("events_url") or f"/runs/{run_id}/events"),
+            cancel_url=str(payload.get("cancel_url") or f"/runs/{run_id}"),
             parent_run_id=(str(payload["parent_run_id"]) if payload.get("parent_run_id") else None),
             continuation_kind=(
                 str(payload["continuation_kind"]) if payload.get("continuation_kind") else None
@@ -278,6 +282,25 @@ class AnswerResult:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class RetrievalResult:
+    """One authorized reader projection of a succeeded Retrieval run."""
+
+    contexts: Mapping[str, Any]
+    sources: tuple[Mapping[str, Any], ...]
+    trace: Mapping[str, Any]
+    image_descriptions: tuple[str, ...]
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> RetrievalResult:
+        return cls(
+            contexts=dict(payload.get("contexts") or {}),
+            sources=tuple(dict(item) for item in payload.get("sources") or ()),
+            trace=dict(payload.get("trace") or {}),
+            image_descriptions=tuple(str(item) for item in payload.get("image_descriptions") or ()),
+        )
+
+
 def parse_sse_frames(chunk: str, *, buffer: str = "") -> tuple[list[AnswerStreamEvent], str]:
     """Decode complete SSE frames and return their incomplete tail."""
     text = buffer + chunk
@@ -317,7 +340,7 @@ def parse_sse_frames(chunk: str, *, buffer: str = "") -> tuple[list[AnswerStream
 
 
 class AnswerRunClient:
-    """Create, follow, read, and cancel durable Answer runs over REST."""
+    """Internal REST helper for creating, following, and reading durable Runs."""
 
     def __init__(
         self,
@@ -339,7 +362,7 @@ class AnswerRunClient:
         *,
         attachments: Sequence[AnswerAttachmentUpload] = (),
         idempotency_key: str | None = None,
-    ) -> AnswerRunDescriptor:
+    ) -> RunDescriptor:
         """Submit one Answer request and return its 202 descriptor."""
         headers = dict(self._headers)
         if idempotency_key:
@@ -360,11 +383,240 @@ class AnswerRunClient:
                 self._url("/answer"), json=dict(payload), headers=headers
             )
         response.raise_for_status()
-        return AnswerRunDescriptor.from_payload(response.json())
+        return RunDescriptor.from_payload(response.json())
+
+    async def create_retrieve(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        idempotency_key: str | None = None,
+    ) -> RunDescriptor:
+        """Submit one Retrieval request and return its 202 Run descriptor."""
+        headers = dict(self._headers)
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key
+        response = await self._client.post(
+            self._url("/retrieve"), json=dict(payload), headers=headers
+        )
+        response.raise_for_status()
+        return RunDescriptor.from_payload(response.json())
+
+    async def _create_corpus_action(
+        self,
+        action: Literal["ingest", "replace", "delete", "retry", "reset"],
+        payload: Mapping[str, Any],
+        *,
+        idempotency_key: str | None = None,
+    ) -> RunDescriptor:
+        headers = {
+            **self._headers,
+            "Idempotency-Key": idempotency_key or str(uuid4()),
+        }
+        response = await self._client.post(
+            self._url(f"/runs/corpus/{action}"),
+            json=dict(payload),
+            headers=headers,
+        )
+        response.raise_for_status()
+        return RunDescriptor.from_payload(response.json())
+
+    async def create_corpus_ingest(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        replace: bool = False,
+        idempotency_key: str | None = None,
+    ) -> RunDescriptor:
+        """Submit one durable ingest/replace mutation and return its Run descriptor."""
+        return await self._create_corpus_action(
+            "replace" if replace else "ingest",
+            payload,
+            idempotency_key=idempotency_key,
+        )
+
+    async def create_corpus_replace(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        idempotency_key: str | None = None,
+    ) -> RunDescriptor:
+        return await self._create_corpus_action("replace", payload, idempotency_key=idempotency_key)
+
+    async def create_corpus_upload(
+        self,
+        *,
+        filename: str,
+        content: bytes,
+        workspace: str | None = None,
+        title: str | None = None,
+        author: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        content_sha256: str | None = None,
+        replace: bool = False,
+        idempotency_key: str | None = None,
+    ) -> RunDescriptor:
+        """Upload one bounded source and return its durable mutation descriptor."""
+        headers = {
+            **self._headers,
+            "Idempotency-Key": idempotency_key or str(uuid4()),
+        }
+        headers.pop("Content-Type", None)
+        data = {
+            key: value
+            for key, value in {
+                "workspace": workspace,
+                "title": title,
+                "author": author,
+                "metadata": json.dumps(dict(metadata)) if metadata is not None else None,
+                "content_sha256": content_sha256,
+            }.items()
+            if value is not None
+        }
+        action = "replace" if replace else "ingest"
+        response = await self._client.post(
+            self._url(f"/runs/corpus/{action}/upload"),
+            data=data,
+            files={"file": (filename, content)},
+            headers=headers,
+        )
+        response.raise_for_status()
+        return RunDescriptor.from_payload(response.json())
+
+    async def create_corpus_delete(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        idempotency_key: str | None = None,
+    ) -> RunDescriptor:
+        return await self._create_corpus_action("delete", payload, idempotency_key=idempotency_key)
+
+    async def create_corpus_retry(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        idempotency_key: str | None = None,
+    ) -> RunDescriptor:
+        return await self._create_corpus_action("retry", payload, idempotency_key=idempotency_key)
+
+    async def create_corpus_reset(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        idempotency_key: str | None = None,
+    ) -> RunDescriptor:
+        return await self._create_corpus_action("reset", payload, idempotency_key=idempotency_key)
+
+    async def resume_corpus_mutation(self, run_id: str) -> RunDescriptor:
+        """Explicitly requeue the same waiting-for-repair mutation Run."""
+        response = await self._client.post(
+            self._url(f"/runs/{run_id}/resume"), headers=self._headers
+        )
+        response.raise_for_status()
+        return RunDescriptor.from_payload(response.json())
+
+    async def wait_corpus_mutation(self, run_id: str) -> dict[str, Any]:
+        """Poll until terminal, or return a mutation awaiting operator repair."""
+        while True:
+            status = await self.status(run_id)
+            state = str(status.get("status") or "")
+            if state == "succeeded":
+                result = status.get("result")
+                return dict(result) if isinstance(result, Mapping) else {}
+            if state == "running" and status.get("phase") == "waiting_for_repair":
+                return status
+            if state == "failed":
+                raise RunFailedError(
+                    str(status.get("error_kind") or "corpus_mutation_failed"),
+                    str(status.get("error_message") or "Corpus Mutation failed."),
+                )
+            if state == "cancelled":
+                raise RunCancelledError(run_id)
+            await asyncio.sleep(STATUS_POLL_SECONDS)
+
+    async def ingest(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        replace: bool = False,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Create one durable ingest/replace mutation and wait for its result."""
+        descriptor = await self.create_corpus_ingest(
+            payload,
+            replace=replace,
+            idempotency_key=idempotency_key,
+        )
+        return await self.wait_corpus_mutation(descriptor.run_id)
+
+    async def replace(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        descriptor = await self.create_corpus_replace(payload, idempotency_key=idempotency_key)
+        return await self.wait_corpus_mutation(descriptor.run_id)
+
+    async def upload(
+        self,
+        *,
+        filename: str,
+        content: bytes,
+        workspace: str | None = None,
+        title: str | None = None,
+        author: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        content_sha256: str | None = None,
+        replace: bool = False,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        descriptor = await self.create_corpus_upload(
+            filename=filename,
+            content=content,
+            workspace=workspace,
+            title=title,
+            author=author,
+            metadata=metadata,
+            content_sha256=content_sha256,
+            replace=replace,
+            idempotency_key=idempotency_key,
+        )
+        return await self.wait_corpus_mutation(descriptor.run_id)
+
+    async def delete(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        descriptor = await self.create_corpus_delete(payload, idempotency_key=idempotency_key)
+        return await self.wait_corpus_mutation(descriptor.run_id)
+
+    async def retry(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        descriptor = await self.create_corpus_retry(payload, idempotency_key=idempotency_key)
+        return await self.wait_corpus_mutation(descriptor.run_id)
+
+    async def reset(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        descriptor = await self.create_corpus_reset(payload, idempotency_key=idempotency_key)
+        return await self.wait_corpus_mutation(descriptor.run_id)
+
+    async def resume(self, run_id: str) -> dict[str, Any]:
+        await self.resume_corpus_mutation(run_id)
+        return await self.wait_corpus_mutation(run_id)
 
     async def status(self, run_id: str) -> dict[str, Any]:
         """Read one run's authoritative status and terminal result."""
-        response = await self._client.get(self._url(f"/answer/{run_id}"), headers=self._headers)
+        response = await self._client.get(self._url(f"/runs/{run_id}"), headers=self._headers)
         response.raise_for_status()
         return dict(response.json())
 
@@ -380,12 +632,12 @@ class AnswerRunClient:
 
     async def follow_up(
         self, run_id: str, query: str, *, idempotency_key: str | None = None
-    ) -> AnswerRunDescriptor:
+    ) -> RunDescriptor:
         return await self._continuation(run_id, "follow-up", query, idempotency_key)
 
     async def fork(
         self, run_id: str, query: str, *, idempotency_key: str | None = None
-    ) -> AnswerRunDescriptor:
+    ) -> RunDescriptor:
         return await self._continuation(run_id, "fork", query, idempotency_key)
 
     async def _continuation(
@@ -394,7 +646,7 @@ class AnswerRunClient:
         operation: str,
         query: str,
         idempotency_key: str | None,
-    ) -> AnswerRunDescriptor:
+    ) -> RunDescriptor:
         headers = dict(self._headers)
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key
@@ -404,15 +656,7 @@ class AnswerRunClient:
             headers=headers,
         )
         response.raise_for_status()
-        return AnswerRunDescriptor.from_payload(response.json())
-
-    async def resume(self, run_id: str) -> dict[str, Any]:
-        """Reattach to a durable run; pass its event cursor to events separately."""
-        response = await self._client.post(
-            self._url(f"/answer/{run_id}/resume"), headers=self._headers
-        )
-        response.raise_for_status()
-        return dict(response.json())
+        return RunDescriptor.from_payload(response.json())
 
     async def transcript(self, run_id: str, *, limit: int = 20) -> dict[str, Any]:
         response = await self._client.get(
@@ -450,7 +694,7 @@ class AnswerRunClient:
     async def cancel(self, run_id: str) -> dict[str, Any]:
         """Request cancellation; repeating it on a terminal run is a no-op."""
         response = await self._client.request(
-            "DELETE", self._url(f"/answer/{run_id}"), headers=self._headers
+            "DELETE", self._url(f"/runs/{run_id}"), headers=self._headers
         )
         response.raise_for_status()
         return dict(response.json())
@@ -481,6 +725,47 @@ class AnswerRunClient:
                 return
             await asyncio.sleep(STATUS_POLL_SECONDS)
 
+    async def retrieve(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        idempotency_key: str | None = None,
+    ) -> RetrievalResult:
+        """Create one durable Retrieval and wait for its projected result."""
+        descriptor = await self.create_retrieve(payload, idempotency_key=idempotency_key)
+        return await self.wait_retrieve(descriptor.run_id)
+
+    async def wait_retrieve(self, run_id: str) -> RetrievalResult:
+        """Wait for an accepted Retrieval through events with status fallback."""
+        try:
+            async with aclosing(self.events(run_id)) as events:
+                async for event in events:
+                    if event.event_type == "done":
+                        return self._terminal_retrieval_result(
+                            run_id,
+                            status=str(event.payload.get("status") or ""),
+                            result=event.payload.get("result"),
+                        )
+                    if event.event_type == "error":
+                        raise RunFailedError(
+                            str(event.payload.get("kind") or "retrieval_failed"),
+                            str(event.payload.get("message") or "Retrieval failed."),
+                        )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 410:
+                raise
+        while True:
+            status = await self.status(run_id)
+            if status["status"] in _TERMINAL_STATUSES:
+                return self._terminal_retrieval_result(
+                    run_id,
+                    status=str(status["status"]),
+                    result=status.get("result"),
+                    error_kind=status.get("error_kind"),
+                    error_message=status.get("error_message"),
+                )
+            await asyncio.sleep(STATUS_POLL_SECONDS)
+
     async def answer(
         self,
         payload: Mapping[str, Any],
@@ -505,7 +790,7 @@ class AnswerRunClient:
                             result=event.payload.get("result"),
                         )
                     elif event.event_type == "error":
-                        raise AnswerRunFailedError(
+                        raise RunFailedError(
                             str(event.payload.get("kind") or "answer_stream_failed"),
                             str(event.payload.get("message") or "Answer run failed."),
                         )
@@ -521,7 +806,7 @@ class AnswerRunClient:
             headers["Last-Event-ID"] = str(cursor)
         async with self._client.stream(
             "GET",
-            self._url(f"/answer/{run_id}/events"),
+            self._url(f"/runs/{run_id}/events"),
             headers=headers,
             timeout=_EVENT_STREAM_TIMEOUT,
         ) as response:
@@ -547,7 +832,7 @@ class AnswerRunClient:
 
     async def list_runs(self, *, after: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         response = await self._client.get(
-            self._url("/answer"),
+            self._url("/runs"),
             params={"after": after, "limit": limit} if after else {"limit": limit},
             headers=self._headers,
         )
@@ -706,6 +991,24 @@ class AnswerRunClient:
             offset += len(chunk)
 
     @staticmethod
+    def _terminal_retrieval_result(
+        run_id: str,
+        *,
+        status: str,
+        result: Any,
+        error_kind: Any = None,
+        error_message: Any = None,
+    ) -> RetrievalResult:
+        if status == "succeeded" and isinstance(result, dict):
+            return RetrievalResult.from_payload(result)
+        if status == "cancelled":
+            raise RunCancelledError(run_id)
+        raise RunFailedError(
+            str(error_kind or "retrieval_failed"),
+            str(error_message or "Retrieval failed."),
+        )
+
+    @staticmethod
     def _terminal_result(
         run_id: str,
         *,
@@ -717,8 +1020,8 @@ class AnswerRunClient:
         if status == "succeeded" and isinstance(result, dict):
             return AnswerResult.from_payload(result)
         if status == "cancelled":
-            raise AnswerRunCancelledError(run_id)
-        raise AnswerRunFailedError(
+            raise RunCancelledError(run_id)
+        raise RunFailedError(
             str(error_kind or "answer_stream_failed"),
             str(error_message or "Answer run failed."),
         )
@@ -733,11 +1036,12 @@ __all__ = [
     "AnswerPart",
     "AnswerResult",
     "AnswerRunClient",
-    "AnswerRunDescriptor",
+    "RunDescriptor",
     "AnswerStreamEvent",
     "ArtifactOutcome",
     "EvidenceImage",
     "ProfileMemoryReceipt",
     "ProfileMemorySettings",
+    "RetrievalResult",
     "parse_sse_frames",
 ]

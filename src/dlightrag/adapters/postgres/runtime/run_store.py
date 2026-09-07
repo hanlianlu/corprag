@@ -1,13 +1,10 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
-"""PostgreSQL adapters for durable Answer runs, Agent Sessions, and blobs.
+"""PostgreSQL adapter family for the operation-neutral RunRuntime.
 
-This module owns every concrete PostgreSQL implementation for the Answer Run
-lifecycle: the rewritten baseline schema (``answer_runs``),
-claim-bound Session/progress repository construction, acceptance, events, terminal
-transitions, sweeping, retention, and blob-backed artifacts.
-
-There is no checkpoint column, single-row artifact ``content`` table, dual
-write, or compatibility decoder anywhere in this adapter.
+The generic run row, claim/lease/event lifecycle, and retention logic live here.
+Answer-owned Session, evidence, and resource tables remain narrow projections
+linked to the generic row; callers consume owner-specific Protocols rather than
+one universal operational-storage interface.
 """
 
 from __future__ import annotations
@@ -15,12 +12,10 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from typing import Any
+from typing import Any, Literal, cast
 
 import asyncpg
 
-from dlightrag.adapters.postgres.answer._blobs import BlobSizeConflict, write_blob_content
-from dlightrag.adapters.postgres.answer._terminal import TerminalStatus, finish_fenced_run
 from dlightrag.adapters.postgres.answer.memory_settings import (
     MEMORY_SETTINGS_DDL,
     MEMORY_SETTINGS_SCHEMA_TABLE,
@@ -39,6 +34,8 @@ from dlightrag.adapters.postgres.core._migrations import (
 )
 from dlightrag.adapters.postgres.core._operations import ConnectionPool, PostgresOperationRunner
 from dlightrag.adapters.postgres.core._pool import pg_pool
+from dlightrag.adapters.postgres.runtime._terminal import TerminalStatus, finish_fenced_run
+from dlightrag.adapters.postgres.runtime.run_blob_store import BlobSizeConflict, write_blob_content
 from dlightrag.application.answer_runs import (
     ChildRosterPageRequest,
     ChildRosterRowPage,
@@ -46,57 +43,200 @@ from dlightrag.application.answer_runs import (
 from dlightrag.application.answer_runs.routing import RoutingAcceptance, RoutingRecord
 from dlightrag.engine.agent.session.ids import SessionId
 from dlightrag.engine.agent.tool_content import decode_tool_content, tool_content_message_fields
-from dlightrag.engine.runtime.cancellation import RunCancellationListener, cancellation_notify_key
-from dlightrag.engine.runtime.contracts import AnswerRunPhase
+from dlightrag.engine.runtime.cancellation import (
+    RunCancellationListener,
+    cancellation_notify_key,
+)
+from dlightrag.engine.runtime.contracts import RunKind, RunLane, RunPhase
 from dlightrag.engine.runtime.errors import RunSchemaError
 from dlightrag.engine.runtime.policy import (
-    ANSWER_RUN_LEASE_SECONDS,
     DEFAULT_RUN_RETENTION_SECONDS,
     MAX_RECLAIMS_WITHOUT_PROGRESS,
     RUN_ABANDONED_ERROR_KIND,
+    RUN_LEASE_SECONDS,
 )
 from dlightrag.engine.runtime.records import (
-    AnswerRunEvent,
-    AnswerRunRecord,
     CancellationOutcome,
     ClaimedRun,
     IdempotencyKeyConflict,
     LeaseRenewal,
     PendingArtifact,
     PendingArtifactReference,
+    PreparedRunEnvelope,
     ReclaimDecision,
     ReclaimState,
+    RunAccessScope,
     RunArtifactReference,
+    RunCapacityExceededError,
     RunCreation,
     RunDeletion,
+    RunEvent,
     RunExecutionContext,
     RunFetchedResource,
+    RunRecord,
     ShutdownOutcome,
     SweepOutcome,
     TerminalOutcome,
-    accepted_input_envelope,
     advance_reclaim,
     parse_run_id,
+    require_prepared_input_bounds,
 )
 from dlightrag.engine.runtime.settlements import ArtifactAttachmentUpdate
 
-ANSWER_RUN_MIGRATION_SCOPE = "answer_runs"
+RUN_MIGRATION_SCOPE = "runs"
 
-_ABANDONED_ERROR_MESSAGE = "Answer run exceeded its reclaim-without-progress bound."
+_ABANDONED_ERROR_MESSAGE = "Run exceeded its reclaim-without-progress bound."
 _BATCH_LIMIT = 200
 _EVENT_PAGE_LIMIT = 500
+DEFAULT_QUERY_MAX_ACTIVE_RUNS = 16
+DEFAULT_QUERY_MAX_NONTERMINAL_RUNS = 30_000
+# Validated by the deterministic bounded-control-plane campaign documented in
+# docs/validation/run-runtime-slice-6.md.
+DEFAULT_CORPUS_MUTATION_MAX_ACTIVE_RUNS = 2
+DEFAULT_CORPUS_MUTATION_MAX_NONTERMINAL_RUNS = 1_000
+
+_MIGRATE_ANSWER_RUNTIME = """
+DO $$
+BEGIN
+    IF to_regclass('dlightrag_answer_runs') IS NOT NULL
+       AND to_regclass('dlightrag_runs') IS NULL THEN
+        IF EXISTS (
+            SELECT 1 FROM dlightrag_answer_runs
+            WHERE status IN ('queued', 'running')
+        ) THEN
+            RAISE EXCEPTION
+                'cannot rename Answer runtime schema while nonterminal runs exist';
+        END IF;
+        ALTER TABLE dlightrag_answer_runs RENAME TO dlightrag_runs;
+    END IF;
+    IF to_regclass('dlightrag_answer_run_events') IS NOT NULL
+       AND to_regclass('dlightrag_run_events') IS NULL THEN
+        ALTER TABLE dlightrag_answer_run_events RENAME TO dlightrag_run_events;
+    END IF;
+END $$
+"""
+
+_MIGRATE_RUN_COLUMNS = """
+DO $$
+BEGIN
+    IF to_regclass('dlightrag_runs') IS NULL THEN
+        RETURN;
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'dlightrag_runs' AND column_name = 'idempotency_key'
+    ) THEN
+        ALTER TABLE dlightrag_runs RENAME COLUMN idempotency_key TO submission_key;
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'dlightrag_runs' AND column_name = 'workspace_epoch'
+    ) THEN
+        ALTER TABLE dlightrag_runs RENAME COLUMN workspace_epoch TO agent_workspace_epoch;
+    END IF;
+END $$
+"""
+
+_ALTER_RUN_RUNTIME = """
+ALTER TABLE dlightrag_runs
+    ADD COLUMN IF NOT EXISTS run_kind TEXT NOT NULL DEFAULT 'answer',
+    ADD COLUMN IF NOT EXISTS lane TEXT NOT NULL DEFAULT 'query',
+    ADD COLUMN IF NOT EXISTS submitted_by TEXT,
+    ADD COLUMN IF NOT EXISTS access_scope_kind TEXT NOT NULL DEFAULT 'owner',
+    ADD COLUMN IF NOT EXISTS retention_seconds BIGINT NOT NULL DEFAULT 31536000,
+    ADD COLUMN IF NOT EXISTS purge_after TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS active_permit BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS checkpoint_json JSONB,
+    ADD COLUMN IF NOT EXISTS handoff_started_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS superseded_by_run_id UUID;
+UPDATE dlightrag_runs
+SET submitted_by = owner_id,
+    submission_key = COALESCE(submission_key, 'legacy:' || run_id::text),
+    purge_after = CASE
+        WHEN finished_at IS NOT NULL AND purge_after IS NULL
+        THEN finished_at + make_interval(secs => retention_seconds::double precision)
+        ELSE purge_after
+    END;
+ALTER TABLE dlightrag_runs
+    ALTER COLUMN submitted_by SET NOT NULL,
+    ALTER COLUMN submission_key SET NOT NULL;
+"""
+
+_NORMALIZE_RUN_CONSTRAINTS = """
+ALTER TABLE dlightrag_runs
+    DROP CONSTRAINT IF EXISTS dlightrag_answer_runs_status_check,
+    DROP CONSTRAINT IF EXISTS dlightrag_answer_runs_phase_check,
+    DROP CONSTRAINT IF EXISTS dlightrag_answer_runs_counter_check,
+    DROP CONSTRAINT IF EXISTS dlightrag_answer_runs_lease_check,
+    DROP CONSTRAINT IF EXISTS dlightrag_answer_runs_terminal_check,
+    DROP CONSTRAINT IF EXISTS dlightrag_answer_runs_result_check,
+    DROP CONSTRAINT IF EXISTS dlightrag_answer_runs_error_check,
+    DROP CONSTRAINT IF EXISTS dlightrag_answer_runs_prepared_input_check,
+    DROP CONSTRAINT IF EXISTS dlightrag_answer_runs_workspace_epoch_check,
+    DROP CONSTRAINT IF EXISTS dlightrag_runs_kind_check,
+    DROP CONSTRAINT IF EXISTS dlightrag_runs_lane_check,
+    DROP CONSTRAINT IF EXISTS dlightrag_runs_scope_check,
+    DROP CONSTRAINT IF EXISTS dlightrag_runs_status_check,
+    DROP CONSTRAINT IF EXISTS dlightrag_runs_phase_check,
+    DROP CONSTRAINT IF EXISTS dlightrag_runs_counter_check,
+    DROP CONSTRAINT IF EXISTS dlightrag_runs_lease_check,
+    DROP CONSTRAINT IF EXISTS dlightrag_runs_permit_check,
+    DROP CONSTRAINT IF EXISTS dlightrag_runs_terminal_check,
+    DROP CONSTRAINT IF EXISTS dlightrag_runs_result_check,
+    DROP CONSTRAINT IF EXISTS dlightrag_runs_error_check,
+    DROP CONSTRAINT IF EXISTS dlightrag_runs_prepared_input_check,
+    DROP CONSTRAINT IF EXISTS dlightrag_runs_workspace_epoch_check;
+ALTER TABLE dlightrag_runs
+    ADD CONSTRAINT dlightrag_runs_kind_check
+        CHECK (run_kind IN ('retrieval', 'answer', 'corpus_mutation')),
+    ADD CONSTRAINT dlightrag_runs_lane_check
+        CHECK (lane IN ('query', 'corpus_mutation')),
+    ADD CONSTRAINT dlightrag_runs_scope_check
+        CHECK (access_scope_kind IN ('owner', 'workspace')),
+    ADD CONSTRAINT dlightrag_runs_status_check
+        CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
+    ADD CONSTRAINT dlightrag_runs_counter_check
+        CHECK (fencing_epoch >= 0 AND next_event_sequence >= 1
+               AND durable_progress_version >= 0
+               AND last_reclaim_progress_version >= 0
+               AND reclaims_without_progress >= 0 AND retention_seconds >= 1),
+    ADD CONSTRAINT dlightrag_runs_lease_check
+        CHECK ((lease_owner IS NULL) = (lease_expires_at IS NULL)),
+    ADD CONSTRAINT dlightrag_runs_permit_check
+        CHECK (NOT active_permit OR (status = 'running' AND lease_owner IS NOT NULL)),
+    ADD CONSTRAINT dlightrag_runs_terminal_check
+        CHECK ((status IN ('succeeded', 'failed', 'cancelled')) = (finished_at IS NOT NULL)),
+    ADD CONSTRAINT dlightrag_runs_result_check
+        CHECK (status <> 'succeeded' OR result_json IS NOT NULL),
+    ADD CONSTRAINT dlightrag_runs_error_check
+        CHECK ((status = 'failed') = (error_kind IS NOT NULL)),
+    ADD CONSTRAINT dlightrag_runs_prepared_input_check
+        CHECK ((status IN ('queued', 'running')) = (prepared_input_json IS NOT NULL)),
+    ADD CONSTRAINT dlightrag_runs_workspace_epoch_check
+        CHECK (agent_workspace_epoch IS NULL OR agent_workspace_epoch >= 1);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_dlightrag_runs_global_id ON dlightrag_runs (run_id);
+DROP INDEX IF EXISTS idx_dlightrag_answer_runs_idempotency;
+DROP INDEX IF EXISTS idx_dlightrag_runs_idempotency;
+CREATE UNIQUE INDEX idx_dlightrag_runs_submission
+    ON dlightrag_runs (run_kind, submitted_by, submission_key);
+"""
 
 # ─────────────────────────────────────────────────────────────────
 # Final clean-break baseline schema
 # ─────────────────────────────────────────────────────────────────
 
 _CREATE_RUNS = """
-CREATE TABLE IF NOT EXISTS dlightrag_answer_runs (
+CREATE TABLE IF NOT EXISTS dlightrag_runs (
     owner_id            TEXT        NOT NULL,
     run_id              UUID        NOT NULL,
-    idempotency_key     TEXT,
+    run_kind            TEXT        NOT NULL,
+    lane                TEXT        NOT NULL,
+    submitted_by        TEXT        NOT NULL,
+    access_scope_kind   TEXT        NOT NULL,
+    submission_key      TEXT        NOT NULL,
     prepared_input_json JSONB,
-    accepted_input_json JSONB        NOT NULL DEFAULT '{}'::jsonb,
+    accepted_input_json JSONB       NOT NULL DEFAULT '{}'::jsonb,
     request_fingerprint TEXT        NOT NULL,
     status              TEXT        NOT NULL DEFAULT 'queued',
     phase               TEXT,
@@ -113,38 +253,52 @@ CREATE TABLE IF NOT EXISTS dlightrag_answer_runs (
     result_json         JSONB,
     error_kind          TEXT,
     error_message       TEXT,
+    retention_seconds   BIGINT      NOT NULL,
+    purge_after         TIMESTAMPTZ,
+    next_attempt_at     TIMESTAMPTZ,
+    active_permit       BOOLEAN     NOT NULL DEFAULT FALSE,
+    checkpoint_json     JSONB,
+    handoff_started_at  TIMESTAMPTZ,
+    superseded_by_run_id UUID,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     started_at          TIMESTAMPTZ,
     finished_at         TIMESTAMPTZ,
-    workspace_epoch     BIGINT,
+    agent_workspace_epoch BIGINT,
     PRIMARY KEY (owner_id, run_id),
-    CONSTRAINT dlightrag_answer_runs_status_check
+    UNIQUE (run_id),
+    CONSTRAINT dlightrag_runs_kind_check
+        CHECK (run_kind IN ('retrieval', 'answer', 'corpus_mutation')),
+    CONSTRAINT dlightrag_runs_lane_check
+        CHECK (lane IN ('query', 'corpus_mutation')),
+    CONSTRAINT dlightrag_runs_scope_check
+        CHECK (access_scope_kind IN ('owner', 'workspace')),
+    CONSTRAINT dlightrag_runs_status_check
         CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
-    CONSTRAINT dlightrag_answer_runs_phase_check
-        CHECK (phase IS NULL OR phase IN ('routing', 'planning', 'searching', 'researching', 'generating')),
-    CONSTRAINT dlightrag_answer_runs_counter_check
+    CONSTRAINT dlightrag_runs_counter_check
         CHECK (fencing_epoch >= 0 AND next_event_sequence >= 1
                AND durable_progress_version >= 0
                AND last_reclaim_progress_version >= 0
-               AND reclaims_without_progress >= 0),
-    CONSTRAINT dlightrag_answer_runs_lease_check
+               AND reclaims_without_progress >= 0 AND retention_seconds >= 1),
+    CONSTRAINT dlightrag_runs_lease_check
         CHECK ((lease_owner IS NULL) = (lease_expires_at IS NULL)),
-    CONSTRAINT dlightrag_answer_runs_terminal_check
+    CONSTRAINT dlightrag_runs_permit_check
+        CHECK (NOT active_permit OR (status = 'running' AND lease_owner IS NOT NULL)),
+    CONSTRAINT dlightrag_runs_terminal_check
         CHECK ((status IN ('succeeded', 'failed', 'cancelled')) = (finished_at IS NOT NULL)),
-    CONSTRAINT dlightrag_answer_runs_result_check
+    CONSTRAINT dlightrag_runs_result_check
         CHECK (status <> 'succeeded' OR result_json IS NOT NULL),
-    CONSTRAINT dlightrag_answer_runs_error_check
+    CONSTRAINT dlightrag_runs_error_check
         CHECK ((status = 'failed') = (error_kind IS NOT NULL)),
-    CONSTRAINT dlightrag_answer_runs_prepared_input_check
+    CONSTRAINT dlightrag_runs_prepared_input_check
         CHECK ((status IN ('queued', 'running')) = (prepared_input_json IS NOT NULL)),
-    CONSTRAINT dlightrag_answer_runs_workspace_epoch_check
-        CHECK (workspace_epoch IS NULL OR workspace_epoch >= 1)
+    CONSTRAINT dlightrag_runs_workspace_epoch_check
+        CHECK (agent_workspace_epoch IS NULL OR agent_workspace_epoch >= 1)
 )
 """
 
 _CREATE_EVENTS = """
-CREATE TABLE IF NOT EXISTS dlightrag_answer_run_events (
+CREATE TABLE IF NOT EXISTS dlightrag_run_events (
     owner_id       TEXT        NOT NULL,
     run_id         UUID        NOT NULL,
     event_sequence BIGINT      NOT NULL,
@@ -153,16 +307,115 @@ CREATE TABLE IF NOT EXISTS dlightrag_answer_run_events (
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (owner_id, run_id, event_sequence),
     FOREIGN KEY (owner_id, run_id)
-        REFERENCES dlightrag_answer_runs (owner_id, run_id) ON DELETE CASCADE,
-    CONSTRAINT dlightrag_answer_run_events_type_check
-        CHECK (event_type IN (
-            'progress', 'token', 'reset',
-            'tool_start', 'tool_progress', 'tool_end',
-            'memory_operation_settled', 'done', 'error'
-        )),
-    CONSTRAINT dlightrag_answer_run_events_sequence_check
+        REFERENCES dlightrag_runs (owner_id, run_id) ON DELETE CASCADE,
+    CONSTRAINT dlightrag_run_events_sequence_check
         CHECK (event_sequence >= 1)
 )
+"""
+
+_NORMALIZE_RUN_EVENTS = """
+ALTER TABLE dlightrag_run_events
+    DROP CONSTRAINT IF EXISTS dlightrag_answer_run_events_type_check,
+    DROP CONSTRAINT IF EXISTS dlightrag_run_events_type_check,
+    DROP CONSTRAINT IF EXISTS dlightrag_answer_run_events_sequence_check,
+    DROP CONSTRAINT IF EXISTS dlightrag_run_events_sequence_check;
+ALTER TABLE dlightrag_run_events
+    ADD CONSTRAINT dlightrag_run_events_sequence_check
+        CHECK (event_sequence >= 1);
+"""
+
+_ENFORCE_RUN_EVENT_CONSTRAINTS = """
+CREATE OR REPLACE FUNCTION public.dlightrag_enforce_run_event_constraints()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+    parent_status TEXT;
+    parent_lease_owner TEXT;
+    parent_lease_expires_at TIMESTAMPTZ;
+    parent_next_event_sequence BIGINT;
+    parent_result JSONB;
+    parent_error_kind TEXT;
+    parent_error_message TEXT;
+BEGIN
+    SELECT status, lease_owner, lease_expires_at, next_event_sequence,
+           result_json, error_kind, error_message
+    INTO parent_status, parent_lease_owner, parent_lease_expires_at,
+         parent_next_event_sequence, parent_result, parent_error_kind,
+         parent_error_message
+    FROM public.dlightrag_runs
+    WHERE owner_id = NEW.owner_id AND run_id = NEW.run_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'run event parent does not exist'
+            USING ERRCODE = '23503';
+    END IF;
+    IF NEW.event_sequence >= parent_next_event_sequence THEN
+        RAISE EXCEPTION 'run event sequence must precede the parent next sequence'
+            USING ERRCODE = '23514';
+    END IF;
+    IF jsonb_typeof(NEW.payload) IS DISTINCT FROM 'object' THEN
+        RAISE EXCEPTION 'run event payload must be a JSON object'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NEW.event_type = 'done' THEN
+        IF jsonb_typeof(NEW.payload->'status') IS DISTINCT FROM 'string'
+           OR NEW.payload->>'status' IS DISTINCT FROM parent_status THEN
+            RAISE EXCEPTION 'done event status does not match its parent'
+                USING ERRCODE = '23514';
+        END IF;
+        IF parent_status = 'succeeded' THEN
+            IF NOT NEW.payload ? 'result'
+               OR NEW.payload->'result' IS DISTINCT FROM parent_result THEN
+                RAISE EXCEPTION 'succeeded run event payload does not match its parent'
+                    USING ERRCODE = '23514';
+            END IF;
+        ELSIF parent_status = 'cancelled' THEN
+            IF NEW.payload ? 'result' THEN
+                RAISE EXCEPTION 'cancelled run event payload cannot contain a result'
+                    USING ERRCODE = '23514';
+            END IF;
+        ELSE
+            RAISE EXCEPTION 'done event requires a succeeded or cancelled parent'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSIF NEW.event_type = 'error' THEN
+        IF parent_status IS DISTINCT FROM 'failed' THEN
+            RAISE EXCEPTION 'error event requires a failed parent'
+                USING ERRCODE = '23514';
+        END IF;
+        IF jsonb_typeof(NEW.payload->'kind') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(NEW.payload->'message') IS DISTINCT FROM 'string'
+           OR NEW.payload->>'kind' IS DISTINCT FROM parent_error_kind
+           OR NEW.payload->>'message' IS DISTINCT FROM parent_error_message
+           OR (NEW.payload ? 'result'
+               AND NEW.payload->'result' IS DISTINCT FROM parent_result) THEN
+            RAISE EXCEPTION 'failed run event payload does not match its parent'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSIF parent_status IS DISTINCT FROM 'running'
+          OR parent_lease_owner IS NULL
+          OR parent_lease_expires_at IS NULL
+          OR parent_lease_expires_at < NOW() THEN
+        RAISE EXCEPTION 'nonterminal event requires a live leased parent'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END
+$$
+"""
+
+_CREATE_RUN_EVENT_CONSTRAINT_TRIGGER = """
+DROP TRIGGER IF EXISTS trg_dlightrag_run_events_enforce
+    ON public.dlightrag_run_events;
+CREATE TRIGGER trg_dlightrag_run_events_enforce
+    BEFORE INSERT OR UPDATE ON public.dlightrag_run_events
+    FOR EACH ROW
+    EXECUTE FUNCTION public.dlightrag_enforce_run_event_constraints();
 """
 
 _CREATE_SESSIONS = """
@@ -244,7 +497,7 @@ CREATE TABLE IF NOT EXISTS dlightrag_answer_run_stages (
     settled_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (owner_id, run_id, stage_intent_id),
     FOREIGN KEY (owner_id, run_id)
-        REFERENCES dlightrag_answer_runs (owner_id, run_id) ON DELETE CASCADE,
+        REFERENCES dlightrag_runs (owner_id, run_id) ON DELETE CASCADE,
     CONSTRAINT dlightrag_answer_run_stages_name_check
         CHECK (stage_name IN ('planner', 'retrieval', 'final_generation')),
     CONSTRAINT dlightrag_answer_run_stages_digest_check
@@ -266,7 +519,7 @@ CREATE TABLE IF NOT EXISTS dlightrag_answer_evidence (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (owner_id, run_id, session_id, intent_id, result_ordinal),
     FOREIGN KEY (owner_id, run_id)
-        REFERENCES dlightrag_answer_runs (owner_id, run_id) ON DELETE CASCADE,
+        REFERENCES dlightrag_runs (owner_id, run_id) ON DELETE CASCADE,
     CONSTRAINT dlightrag_answer_evidence_ordinal_check CHECK (result_ordinal >= 0),
     CONSTRAINT dlightrag_answer_evidence_digest_check
         CHECK (content_digest ~ '^[0-9a-f]{64}$' AND locator_digest ~ '^[0-9a-f]{64}$')
@@ -292,7 +545,7 @@ CREATE TABLE IF NOT EXISTS dlightrag_answer_resources (
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (owner_id, run_id, resource_id),
     FOREIGN KEY (owner_id, run_id)
-        REFERENCES dlightrag_answer_runs (owner_id, run_id) ON DELETE CASCADE,
+        REFERENCES dlightrag_runs (owner_id, run_id) ON DELETE CASCADE,
     CONSTRAINT dlightrag_answer_resources_kind_check
         CHECK (kind IN ('accepted_blob', 'evidence', 'fetched_blob', 'committed_spill')),
     CONSTRAINT dlightrag_answer_resources_blob_link_check
@@ -347,7 +600,7 @@ CREATE TABLE IF NOT EXISTS dlightrag_answer_run_artifacts (
     PRIMARY KEY (owner_id, run_id, resource_id),
     UNIQUE (owner_id, run_id, reference_kind, ordinal),
     FOREIGN KEY (owner_id, run_id)
-        REFERENCES dlightrag_answer_runs (owner_id, run_id) ON DELETE CASCADE,
+        REFERENCES dlightrag_runs (owner_id, run_id) ON DELETE CASCADE,
     FOREIGN KEY (owner_id, digest)
         REFERENCES dlightrag_blobs (owner_id, digest) ON DELETE RESTRICT,
     CONSTRAINT dlightrag_answer_run_artifacts_kind_check
@@ -375,7 +628,7 @@ CREATE TABLE IF NOT EXISTS dlightrag_answer_run_routing (
     updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (owner_id, run_id),
     FOREIGN KEY (owner_id, run_id)
-        REFERENCES dlightrag_answer_runs (owner_id, run_id) ON DELETE CASCADE,
+        REFERENCES dlightrag_runs (owner_id, run_id) ON DELETE CASCADE,
     CONSTRAINT dlightrag_answer_run_routing_requested_check
         CHECK (requested_mode IN ('auto', 'fast', 'research')),
     CONSTRAINT dlightrag_answer_run_routing_valid_check
@@ -415,7 +668,7 @@ CREATE TABLE IF NOT EXISTS dlightrag_answer_child_sessions (
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (owner_id, run_id, child_session_id),
     FOREIGN KEY (owner_id, run_id)
-        REFERENCES dlightrag_answer_runs (owner_id, run_id) ON DELETE CASCADE,
+        REFERENCES dlightrag_runs (owner_id, run_id) ON DELETE CASCADE,
     CONSTRAINT dlightrag_answer_child_sessions_status_check
         CHECK (status IN ('running', 'succeeded', 'failed', 'cancelled')),
     CONSTRAINT dlightrag_answer_child_sessions_depth_check CHECK (depth >= 1),
@@ -434,7 +687,7 @@ CREATE TABLE IF NOT EXISTS dlightrag_agent_controls (
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (owner_id, run_id, control_sequence),
     FOREIGN KEY (owner_id, run_id)
-        REFERENCES dlightrag_answer_runs (owner_id, run_id) ON DELETE CASCADE,
+        REFERENCES dlightrag_runs (owner_id, run_id) ON DELETE CASCADE,
     CONSTRAINT dlightrag_agent_controls_sequence_check CHECK (control_sequence >= 1),
     CONSTRAINT dlightrag_agent_controls_kind_check CHECK (kind IN ('steer', 'follow_up')),
     CONSTRAINT dlightrag_agent_controls_content_check CHECK (char_length(content) BETWEEN 1 AND 20000)
@@ -444,22 +697,21 @@ CREATE TABLE IF NOT EXISTS dlightrag_agent_controls (
 
 _CREATE_INDEXES = (
     # Claim and sweep scan nonterminal rows oldest-first across every owner.
-    "CREATE INDEX IF NOT EXISTS idx_dlightrag_answer_runs_claim "
-    "ON dlightrag_answer_runs (created_at, run_id) "
+    "CREATE INDEX IF NOT EXISTS idx_dlightrag_runs_claim "
+    "ON dlightrag_runs (lane, next_attempt_at, created_at, run_id) "
     "WHERE status IN ('queued', 'running')",
-    "CREATE UNIQUE INDEX IF NOT EXISTS idx_dlightrag_answer_runs_idempotency "
-    "ON dlightrag_answer_runs (owner_id, idempotency_key) "
-    "WHERE idempotency_key IS NOT NULL",
-    "CREATE INDEX IF NOT EXISTS idx_dlightrag_answer_runs_retention "
-    "ON dlightrag_answer_runs (finished_at) "
-    "WHERE finished_at IS NOT NULL",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_dlightrag_runs_submission "
+    "ON dlightrag_runs (run_kind, submitted_by, submission_key)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_dlightrag_runs_global_id ON dlightrag_runs (run_id)",
+    "CREATE INDEX IF NOT EXISTS idx_dlightrag_runs_retention "
+    "ON dlightrag_runs (purge_after) WHERE purge_after IS NOT NULL",
     # Reconnect/notification rescans page only this worker's live cancellations.
-    "CREATE INDEX IF NOT EXISTS idx_dlightrag_answer_runs_cancel_pending "
-    "ON dlightrag_answer_runs (lease_owner, created_at, run_id) "
+    "CREATE INDEX IF NOT EXISTS idx_dlightrag_runs_cancel_pending "
+    "ON dlightrag_runs (lease_owner, created_at, run_id) "
     "WHERE cancel_requested_at IS NOT NULL AND status = 'running'",
     # Exactly one terminal event per run, enforced durably rather than by convention.
-    "CREATE UNIQUE INDEX IF NOT EXISTS idx_dlightrag_answer_run_events_terminal "
-    "ON dlightrag_answer_run_events (owner_id, run_id) "
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_dlightrag_run_events_terminal "
+    "ON dlightrag_run_events (owner_id, run_id) "
     "WHERE event_type IN ('done', 'error')",
     # Reverse lookup for ownership-safe blob cleanup and the RESTRICT foreign key.
     "CREATE INDEX IF NOT EXISTS idx_dlightrag_answer_run_artifacts_digest "
@@ -488,7 +740,7 @@ CREATE TABLE IF NOT EXISTS dlightrag_answer_workspace_inventory (
     content_digest  TEXT,
     PRIMARY KEY (owner_id, run_id, relative_path),
     FOREIGN KEY (owner_id, run_id)
-        REFERENCES dlightrag_answer_runs (owner_id, run_id) ON DELETE CASCADE
+        REFERENCES dlightrag_runs (owner_id, run_id) ON DELETE CASCADE
 )
 """
 
@@ -513,7 +765,7 @@ CREATE TABLE IF NOT EXISTS dlightrag_answer_artifact_attachments (
     attached_at     TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (owner_id, run_id, relative_path),
     FOREIGN KEY (owner_id, run_id)
-        REFERENCES dlightrag_answer_runs (owner_id, run_id) ON DELETE CASCADE,
+        REFERENCES dlightrag_runs (owner_id, run_id) ON DELETE CASCADE,
     CONSTRAINT dlightrag_answer_artifact_attachments_digest_check
         CHECK (content_digest ~ '^[0-9a-f]{64}$'),
     CONSTRAINT dlightrag_answer_artifact_attachments_size_check
@@ -521,6 +773,27 @@ CREATE TABLE IF NOT EXISTS dlightrag_answer_artifact_attachments (
     CONSTRAINT dlightrag_answer_artifact_attachments_presentation_check
         CHECK (presentation IN ('image', 'markdown', 'html', 'pdf', 'text', 'download'))
 )
+"""
+
+_CREATE_CORPUS_MUTATION_WINDOWS = """
+CREATE TABLE IF NOT EXISTS dlightrag_corpus_mutation_windows (
+    run_id          UUID        NOT NULL,
+    window_number   INTEGER     NOT NULL,
+    workspace       TEXT        NOT NULL,
+    docs             BIGINT      NOT NULL,
+    chunks           BIGINT      NOT NULL,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (run_id, window_number),
+    FOREIGN KEY (run_id) REFERENCES dlightrag_runs (run_id) ON DELETE CASCADE,
+    CONSTRAINT dlightrag_corpus_mutation_windows_nonnegative
+        CHECK (window_number > 0 AND docs >= 0 AND chunks >= 0)
+)
+"""
+
+_CLEAN_BREAK_CORPUS_MUTATIONS = """
+DROP TABLE IF EXISTS dlightrag_failed_retry_items CASCADE;
+DROP TABLE IF EXISTS dlightrag_ingest_counters CASCADE;
+DROP TABLE IF EXISTS dlightrag_ingest_jobs CASCADE;
 """
 
 _CREATE_COMMITTED_SPILLS = """
@@ -534,20 +807,25 @@ CREATE TABLE IF NOT EXISTS dlightrag_answer_committed_spills (
     intent_id       UUID        NOT NULL,
     PRIMARY KEY (owner_id, run_id, resource_id),
     FOREIGN KEY (owner_id, run_id)
-        REFERENCES dlightrag_answer_runs (owner_id, run_id) ON DELETE CASCADE
+        REFERENCES dlightrag_runs (owner_id, run_id) ON DELETE CASCADE
 )
 """
 
 # The baseline bakes the current schema directly into CREATE statements. Later
 # migrations advance initialized databases without adding runtime compatibility paths.
 
-ANSWER_RUN_MIGRATIONS = (
+RUN_MIGRATIONS = (
     Migration(
-        "answer_runs",
-        "Create the final Answer run, Agent Session, evidence, and blob state",
+        "run_runtime_v1",
+        "Rename terminal Answer rows and create the operation-neutral RunRuntime schema",
         (
+            _MIGRATE_ANSWER_RUNTIME,
+            _MIGRATE_RUN_COLUMNS,
             _CREATE_RUNS,
+            _ALTER_RUN_RUNTIME,
+            _NORMALIZE_RUN_CONSTRAINTS,
             _CREATE_EVENTS,
+            _NORMALIZE_RUN_EVENTS,
             _CREATE_SESSIONS,
             _CREATE_ENTRIES,
             _CREATE_SESSION_REGISTERS,
@@ -581,8 +859,8 @@ ANSWER_RUN_MIGRATIONS = (
         "worker_cancel_pending_index",
         "Index bounded worker-local cancellation rescans",
         (
-            "CREATE INDEX IF NOT EXISTS idx_dlightrag_answer_runs_cancel_pending "
-            "ON dlightrag_answer_runs (lease_owner, created_at, run_id) "
+            "CREATE INDEX IF NOT EXISTS idx_dlightrag_runs_cancel_pending "
+            "ON dlightrag_runs (lease_owner, created_at, run_id) "
             "WHERE cancel_requested_at IS NOT NULL AND status = 'running'",
         ),
     ),
@@ -623,15 +901,37 @@ ANSWER_RUN_MIGRATIONS = (
             "AND locator_digest IS NULL))",
         ),
     ),
+    Migration(
+        "corpus_mutation_runtime",
+        "Add fenced Corpus Mutation checkpoints and remove the legacy ingest lifecycle",
+        (
+            "ALTER TABLE dlightrag_runs ADD COLUMN IF NOT EXISTS handoff_started_at TIMESTAMPTZ",
+            "ALTER TABLE dlightrag_runs ADD COLUMN IF NOT EXISTS superseded_by_run_id UUID",
+            _CREATE_CORPUS_MUTATION_WINDOWS,
+            _CLEAN_BREAK_CORPUS_MUTATIONS,
+            "CREATE INDEX IF NOT EXISTS idx_dlightrag_runs_mutation_fifo "
+            "ON dlightrag_runs (owner_id, created_at, run_id) "
+            "WHERE lane = 'corpus_mutation' AND status IN ('queued', 'running')",
+        ),
+    ),
+    Migration(
+        "normalize_run_event_constraints",
+        "Enforce event sequence, parent lifecycle, and terminal payload integrity",
+        (_ENFORCE_RUN_EVENT_CONSTRAINTS, _CREATE_RUN_EVENT_CONSTRAINT_TRIGGER),
+    ),
 )
 
-ANSWER_RUN_SCHEMA_TABLES = (
+RUN_SCHEMA_TABLES = (
     TableRequirement(
-        name="dlightrag_answer_runs",
+        name="dlightrag_runs",
         columns=(
             "owner_id",
             "run_id",
-            "idempotency_key",
+            "run_kind",
+            "lane",
+            "submitted_by",
+            "access_scope_kind",
+            "submission_key",
             "prepared_input_json",
             "accepted_input_json",
             "request_fingerprint",
@@ -650,33 +950,53 @@ ANSWER_RUN_SCHEMA_TABLES = (
             "result_json",
             "error_kind",
             "error_message",
+            "retention_seconds",
+            "purge_after",
+            "next_attempt_at",
+            "active_permit",
+            "checkpoint_json",
+            "handoff_started_at",
+            "superseded_by_run_id",
             "created_at",
             "updated_at",
             "started_at",
             "finished_at",
-            "workspace_epoch",
+            "agent_workspace_epoch",
         ),
         primary_key=("owner_id", "run_id"),
         checks=(
-            "dlightrag_answer_runs_status_check",
-            "dlightrag_answer_runs_phase_check",
-            "dlightrag_answer_runs_counter_check",
-            "dlightrag_answer_runs_lease_check",
-            "dlightrag_answer_runs_terminal_check",
-            "dlightrag_answer_runs_result_check",
-            "dlightrag_answer_runs_error_check",
-            "dlightrag_answer_runs_prepared_input_check",
-            "dlightrag_answer_runs_workspace_epoch_check",
+            "dlightrag_runs_kind_check",
+            "dlightrag_runs_lane_check",
+            "dlightrag_runs_scope_check",
+            "dlightrag_runs_status_check",
+            "dlightrag_runs_counter_check",
+            "dlightrag_runs_lease_check",
+            "dlightrag_runs_permit_check",
+            "dlightrag_runs_terminal_check",
+            "dlightrag_runs_result_check",
+            "dlightrag_runs_error_check",
+            "dlightrag_runs_prepared_input_check",
+            "dlightrag_runs_workspace_epoch_check",
         ),
         indexes=(
-            "idx_dlightrag_answer_runs_claim",
-            "idx_dlightrag_answer_runs_retention",
-            "idx_dlightrag_answer_runs_cancel_pending",
+            "idx_dlightrag_runs_claim",
+            "idx_dlightrag_runs_retention",
+            "idx_dlightrag_runs_cancel_pending",
         ),
-        unique_indexes=("idx_dlightrag_answer_runs_idempotency",),
+        unique_indexes=(
+            "idx_dlightrag_runs_submission",
+            "idx_dlightrag_runs_global_id",
+        ),
     ),
     TableRequirement(
-        name="dlightrag_answer_run_events",
+        name="dlightrag_corpus_mutation_windows",
+        columns=("run_id", "window_number", "workspace", "docs", "chunks", "created_at"),
+        primary_key=("run_id", "window_number"),
+        foreign_keys=(ForeignKeyRequirement(columns=("run_id",), references="dlightrag_runs"),),
+        checks=("dlightrag_corpus_mutation_windows_nonnegative",),
+    ),
+    TableRequirement(
+        name="dlightrag_run_events",
         columns=(
             "owner_id",
             "run_id",
@@ -687,15 +1007,10 @@ ANSWER_RUN_SCHEMA_TABLES = (
         ),
         primary_key=("owner_id", "run_id", "event_sequence"),
         foreign_keys=(
-            ForeignKeyRequirement(
-                columns=("owner_id", "run_id"), references="dlightrag_answer_runs"
-            ),
+            ForeignKeyRequirement(columns=("owner_id", "run_id"), references="dlightrag_runs"),
         ),
-        checks=(
-            "dlightrag_answer_run_events_type_check",
-            "dlightrag_answer_run_events_sequence_check",
-        ),
-        unique_indexes=("idx_dlightrag_answer_run_events_terminal",),
+        checks=("dlightrag_run_events_sequence_check",),
+        unique_indexes=("idx_dlightrag_run_events_terminal",),
     ),
     TableRequirement(
         name="dlightrag_agent_sessions",
@@ -791,9 +1106,7 @@ ANSWER_RUN_SCHEMA_TABLES = (
         ),
         primary_key=("owner_id", "run_id", "stage_intent_id"),
         foreign_keys=(
-            ForeignKeyRequirement(
-                columns=("owner_id", "run_id"), references="dlightrag_answer_runs"
-            ),
+            ForeignKeyRequirement(columns=("owner_id", "run_id"), references="dlightrag_runs"),
         ),
         checks=(
             "dlightrag_answer_run_stages_name_check",
@@ -816,9 +1129,7 @@ ANSWER_RUN_SCHEMA_TABLES = (
         ),
         primary_key=("owner_id", "run_id", "session_id", "intent_id", "result_ordinal"),
         foreign_keys=(
-            ForeignKeyRequirement(
-                columns=("owner_id", "run_id"), references="dlightrag_answer_runs"
-            ),
+            ForeignKeyRequirement(columns=("owner_id", "run_id"), references="dlightrag_runs"),
         ),
         checks=(
             "dlightrag_answer_evidence_ordinal_check",
@@ -847,9 +1158,7 @@ ANSWER_RUN_SCHEMA_TABLES = (
         ),
         primary_key=("owner_id", "run_id", "resource_id"),
         foreign_keys=(
-            ForeignKeyRequirement(
-                columns=("owner_id", "run_id"), references="dlightrag_answer_runs"
-            ),
+            ForeignKeyRequirement(columns=("owner_id", "run_id"), references="dlightrag_runs"),
         ),
         checks=(
             "dlightrag_answer_resources_kind_check",
@@ -895,9 +1204,7 @@ ANSWER_RUN_SCHEMA_TABLES = (
         primary_key=("owner_id", "run_id", "resource_id"),
         unique=(("owner_id", "run_id", "reference_kind", "ordinal"),),
         foreign_keys=(
-            ForeignKeyRequirement(
-                columns=("owner_id", "run_id"), references="dlightrag_answer_runs"
-            ),
+            ForeignKeyRequirement(columns=("owner_id", "run_id"), references="dlightrag_runs"),
             ForeignKeyRequirement(columns=("owner_id", "digest"), references="dlightrag_blobs"),
         ),
         checks=(
@@ -919,9 +1226,7 @@ ANSWER_RUN_SCHEMA_TABLES = (
         ),
         primary_key=("owner_id", "run_id", "relative_path"),
         foreign_keys=(
-            ForeignKeyRequirement(
-                columns=("owner_id", "run_id"), references="dlightrag_answer_runs"
-            ),
+            ForeignKeyRequirement(columns=("owner_id", "run_id"), references="dlightrag_runs"),
         ),
     ),
     TableRequirement(
@@ -941,9 +1246,7 @@ ANSWER_RUN_SCHEMA_TABLES = (
         ),
         primary_key=("owner_id", "run_id", "relative_path"),
         foreign_keys=(
-            ForeignKeyRequirement(
-                columns=("owner_id", "run_id"), references="dlightrag_answer_runs"
-            ),
+            ForeignKeyRequirement(columns=("owner_id", "run_id"), references="dlightrag_runs"),
         ),
         checks=(
             "dlightrag_answer_artifact_attachments_digest_check",
@@ -969,9 +1272,7 @@ ANSWER_RUN_SCHEMA_TABLES = (
         ),
         primary_key=("owner_id", "run_id"),
         foreign_keys=(
-            ForeignKeyRequirement(
-                columns=("owner_id", "run_id"), references="dlightrag_answer_runs"
-            ),
+            ForeignKeyRequirement(columns=("owner_id", "run_id"), references="dlightrag_runs"),
         ),
         checks=(
             "dlightrag_answer_run_routing_requested_check",
@@ -1008,9 +1309,7 @@ ANSWER_RUN_SCHEMA_TABLES = (
         ),
         primary_key=("owner_id", "run_id", "child_session_id"),
         foreign_keys=(
-            ForeignKeyRequirement(
-                columns=("owner_id", "run_id"), references="dlightrag_answer_runs"
-            ),
+            ForeignKeyRequirement(columns=("owner_id", "run_id"), references="dlightrag_runs"),
         ),
         indexes=("idx_answer_child_sessions_roster",),
         checks=(
@@ -1032,9 +1331,7 @@ ANSWER_RUN_SCHEMA_TABLES = (
         ),
         primary_key=("owner_id", "run_id", "control_sequence"),
         foreign_keys=(
-            ForeignKeyRequirement(
-                columns=("owner_id", "run_id"), references="dlightrag_answer_runs"
-            ),
+            ForeignKeyRequirement(columns=("owner_id", "run_id"), references="dlightrag_runs"),
         ),
         checks=(
             "dlightrag_agent_controls_sequence_check",
@@ -1056,18 +1353,21 @@ ANSWER_RUN_SCHEMA_TABLES = (
         ),
         primary_key=("owner_id", "run_id", "resource_id"),
         foreign_keys=(
-            ForeignKeyRequirement(
-                columns=("owner_id", "run_id"), references="dlightrag_answer_runs"
-            ),
+            ForeignKeyRequirement(columns=("owner_id", "run_id"), references="dlightrag_runs"),
         ),
     ),
 )
 
-#: ``(expression, output name)`` for every column :func:`answer_run_record` reads.
+#: ``(expression, output name)`` for every column :func:`run_record` reads.
 _RUN_COLUMN_SPECS: tuple[tuple[str, str], ...] = (
     ("owner_id", "owner_id"),
     ("run_id::text", "run_id"),
-    ("idempotency_key", "idempotency_key"),
+    ("run_kind", "run_kind"),
+    ("lane", "lane"),
+    ("submitted_by", "submitted_by"),
+    ("access_scope_kind", "access_scope_kind"),
+    ("submission_key", "submission_key"),
+    ("request_fingerprint", "request_fingerprint"),
     ("prepared_input_json", "prepared_input"),
     ("accepted_input_json", "accepted_input"),
     ("status", "status"),
@@ -1089,35 +1389,42 @@ _RUN_COLUMN_SPECS: tuple[tuple[str, str], ...] = (
     ("updated_at", "updated_at"),
     ("started_at", "started_at"),
     ("finished_at", "finished_at"),
-    ("workspace_epoch", "workspace_epoch"),
+    ("purge_after", "purge_after"),
+    ("next_attempt_at", "next_attempt_at"),
+    ("active_permit", "active_permit"),
+    ("checkpoint_json", "checkpoint_json"),
+    ("handoff_started_at", "handoff_started_at"),
+    ("superseded_by_run_id::text", "superseded_by_run_id"),
+    ("agent_workspace_epoch", "agent_workspace_epoch"),
 )
 
 
-def answer_run_columns(alias: str = "") -> str:
+def run_columns(alias: str = "") -> str:
     """Project one run row's columns, optionally through a join alias."""
     prefix = f"{alias}." if alias else ""
     return ",\n".join(f"{prefix}{expression} AS {name}" for expression, name in _RUN_COLUMN_SPECS)
 
 
-_RUN_COLUMNS = answer_run_columns()
+_RUN_COLUMNS = run_columns()
 _LIST_RUNS = f"""
 SELECT {_RUN_COLUMNS}
-FROM dlightrag_answer_runs
+FROM dlightrag_runs
 WHERE owner_id = $1 ORDER BY created_at, run_id LIMIT $2
 """  # noqa: S608 - interpolates only the trusted _RUN_COLUMNS constant
 _LIST_RUNS_AFTER = f"""
 SELECT {_RUN_COLUMNS}
-FROM dlightrag_answer_runs
+FROM dlightrag_runs
 WHERE owner_id = $1 AND (created_at, run_id) > (
- SELECT created_at, run_id FROM dlightrag_answer_runs
+ SELECT created_at, run_id FROM dlightrag_runs
  WHERE owner_id = $1 AND run_id = $2)
 ORDER BY created_at, run_id LIMIT $3
 """  # noqa: S608 - interpolates only the trusted _RUN_COLUMNS constant
 
 _ACTIVE_REQUIREMENTS_FRONTIER = """
 SELECT created_at, run_id
-FROM dlightrag_answer_runs
-WHERE status IN ('queued', 'running')
+FROM dlightrag_runs
+WHERE run_kind IN ('answer', 'retrieval')
+  AND status IN ('queued', 'running')
   AND cancel_requested_at IS NULL
   AND NOT (status = 'running' AND lease_expires_at < NOW()
            AND reclaims_without_progress >= $1)
@@ -1125,11 +1432,10 @@ ORDER BY created_at DESC, run_id DESC
 LIMIT 1
 """
 _ACTIVE_REQUIREMENTS_FIRST_PAGE = """
-SELECT created_at, run_id,
-       prepared_input_json ->> 'context_policy_revision' AS context_policy_revision,
-       prepared_input_json -> 'pinned_models' AS pinned_models
-FROM dlightrag_answer_runs
-WHERE status IN ('queued', 'running')
+SELECT created_at, run_id, run_kind, prepared_input_json
+FROM dlightrag_runs
+WHERE run_kind IN ('answer', 'retrieval')
+  AND status IN ('queued', 'running')
   AND cancel_requested_at IS NULL
   AND NOT (status = 'running' AND lease_expires_at < NOW()
            AND reclaims_without_progress >= $1)
@@ -1138,11 +1444,10 @@ ORDER BY created_at, run_id
 LIMIT $4
 """
 _ACTIVE_REQUIREMENTS_AFTER = """
-SELECT created_at, run_id,
-       prepared_input_json ->> 'context_policy_revision' AS context_policy_revision,
-       prepared_input_json -> 'pinned_models' AS pinned_models
-FROM dlightrag_answer_runs
-WHERE status IN ('queued', 'running')
+SELECT created_at, run_id, run_kind, prepared_input_json
+FROM dlightrag_runs
+WHERE run_kind IN ('answer', 'retrieval')
+  AND status IN ('queued', 'running')
   AND cancel_requested_at IS NULL
   AND NOT (status = 'running' AND lease_expires_at < NOW()
            AND reclaims_without_progress >= $1)
@@ -1154,7 +1459,7 @@ LIMIT $6
 
 _CANCEL_PENDING_FRONTIER = """
 SELECT created_at, run_id
-FROM dlightrag_answer_runs
+FROM dlightrag_runs
 WHERE cancel_requested_at IS NOT NULL
   AND status = 'running'
   AND lease_owner = $1
@@ -1164,7 +1469,7 @@ LIMIT 1
 """
 _CANCEL_PENDING_FIRST_PAGE = """
 SELECT owner_id, run_id, created_at
-FROM dlightrag_answer_runs
+FROM dlightrag_runs
 WHERE cancel_requested_at IS NOT NULL
   AND status = 'running'
   AND lease_owner = $1
@@ -1175,7 +1480,7 @@ LIMIT $4
 """
 _CANCEL_PENDING_AFTER = """
 SELECT owner_id, run_id, created_at
-FROM dlightrag_answer_runs
+FROM dlightrag_runs
 WHERE cancel_requested_at IS NOT NULL
   AND status = 'running'
   AND lease_owner = $1
@@ -1187,30 +1492,76 @@ LIMIT $6
 """
 
 _INSERT_RUN = f"""
-INSERT INTO dlightrag_answer_runs (
-    owner_id, run_id, idempotency_key, prepared_input_json, accepted_input_json,
-    request_fingerprint
+INSERT INTO dlightrag_runs (
+    owner_id, run_id, run_kind, lane, submitted_by, access_scope_kind,
+    submission_key, prepared_input_json, accepted_input_json,
+    request_fingerprint, retention_seconds
 )
-VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6)
-ON CONFLICT (owner_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11)
+ON CONFLICT (run_kind, submitted_by, submission_key) DO NOTHING
 RETURNING {_RUN_COLUMNS}
 """  # noqa: S608 - interpolates only the trusted _RUN_COLUMNS constant
 
 _SELECT_RUN_BY_KEY = f"""
-SELECT {_RUN_COLUMNS}, request_fingerprint
-FROM dlightrag_answer_runs
-WHERE owner_id = $1 AND idempotency_key = $2
+SELECT {_RUN_COLUMNS}
+FROM dlightrag_runs
+WHERE run_kind = $1 AND submitted_by = $2 AND submission_key = $3
 """  # noqa: S608 - interpolates only the trusted _RUN_COLUMNS constant
+
+_COUNT_NONTERMINAL_LANE = """
+SELECT COUNT(*) FROM dlightrag_runs
+WHERE lane = $1 AND status IN ('queued', 'running')
+"""
 
 _SELECT_RUN = f"""
 SELECT {_RUN_COLUMNS}
-FROM dlightrag_answer_runs
+FROM dlightrag_runs
 WHERE owner_id = $1 AND run_id = $2
 """  # noqa: S608 - interpolates only the trusted _RUN_COLUMNS constant
 
+_SELECT_RUN_FOR_UPDATE = f"""
+SELECT {_RUN_COLUMNS}
+FROM dlightrag_runs
+WHERE owner_id = $1 AND run_id = $2
+FOR UPDATE
+"""  # noqa: S608 - interpolates only the trusted _RUN_COLUMNS constant
+
+_SELECT_RUN_GLOBAL = f"""
+SELECT {_RUN_COLUMNS}
+FROM dlightrag_runs
+WHERE run_id = $1
+"""  # noqa: S608 - interpolates only the trusted _RUN_COLUMNS constant
+
+_RECORD_CORPUS_WINDOW = """
+WITH inserted AS (
+    INSERT INTO dlightrag_corpus_mutation_windows (
+        run_id, window_number, workspace, docs, chunks
+    ) VALUES ($1, $2, $3, $4, $5)
+    ON CONFLICT (run_id, window_number) DO NOTHING
+    RETURNING 1
+), updated AS (
+    UPDATE dlightrag_workspace_meta
+    SET ingested_docs_total = ingested_docs_total + $4,
+        ingested_chunks_total = ingested_chunks_total + $5,
+        promotion_state = CASE
+            WHEN promotion_state = 'none' AND storage_tier = 'shared'
+             AND (($6::bigint IS NOT NULL AND ingested_docs_total + $4 >= $6)
+               OR ($7::bigint IS NOT NULL AND ingested_chunks_total + $5 >= $7))
+            THEN 'pending' ELSE promotion_state END,
+        updated_at = NOW()
+    WHERE workspace = $3 AND EXISTS (SELECT 1 FROM inserted)
+    RETURNING promotion_state
+), promoted AS (
+    INSERT INTO dlightrag_promotion_jobs (workspace, state)
+    SELECT $3, 'pending' FROM updated WHERE promotion_state = 'pending'
+    ON CONFLICT DO NOTHING
+)
+SELECT EXISTS (SELECT 1 FROM inserted)
+"""
+
 _SELECT_EVENTS = """
 SELECT event_sequence, event_type, payload, created_at
-FROM dlightrag_answer_run_events
+FROM dlightrag_run_events
 WHERE owner_id = $1 AND run_id = $2 AND event_sequence > $3
 ORDER BY event_sequence
 LIMIT $4
@@ -1218,16 +1569,25 @@ LIMIT $4
 
 _SELECT_CLAIM_CANDIDATE = """
 SELECT r.owner_id, r.run_id
-FROM dlightrag_answer_runs r
-WHERE EXISTS (
-    SELECT 1 FROM dlightrag_answer_run_routing rt
-    WHERE rt.owner_id = r.owner_id AND rt.run_id = r.run_id
-)
+FROM dlightrag_runs r
+WHERE r.run_kind = ANY($2::text[])
+  AND r.lane = ANY($3::text[])
   AND r.cancel_requested_at IS NULL
+  AND (r.next_attempt_at IS NULL OR r.next_attempt_at <= NOW())
   AND (
       r.status = 'queued'
       OR (r.status = 'running' AND r.lease_expires_at < NOW()
           AND r.reclaims_without_progress < $1)
+  )
+  AND (
+      r.lane <> 'corpus_mutation'
+      OR NOT EXISTS (
+          SELECT 1 FROM dlightrag_runs earlier
+          WHERE earlier.lane = 'corpus_mutation'
+            AND earlier.owner_id = r.owner_id
+            AND earlier.status IN ('queued', 'running')
+            AND (earlier.created_at, earlier.run_id) < (r.created_at, r.run_id)
+      )
   )
 ORDER BY r.created_at, r.run_id
 LIMIT 1
@@ -1261,7 +1621,7 @@ _RESOLVE_ROUTING = """
 UPDATE dlightrag_answer_run_routing AS rt
 SET resolved_mode = $5,
     updated_at = NOW()
-FROM dlightrag_answer_runs AS r
+FROM dlightrag_runs AS r
 WHERE rt.owner_id = r.owner_id AND rt.run_id = r.run_id
   AND rt.owner_id = $1 AND rt.run_id = $2
   AND r.lease_owner = $3 AND r.fencing_epoch = $4
@@ -1272,7 +1632,7 @@ RETURNING rt.resolved_mode
 
 _HOLD_RUN_LEASE = """
 SELECT 1
-FROM dlightrag_answer_runs
+FROM dlightrag_runs
 WHERE owner_id = $1 AND run_id = $2
   AND lease_owner = $3 AND fencing_epoch = $4
   AND status = 'running' AND lease_expires_at > NOW()
@@ -1398,7 +1758,7 @@ LIMIT $4
 
 _LOCK_CONTROL_RUN = """
 SELECT r.status, rt.requested_mode, rt.resolved_mode
-FROM dlightrag_answer_runs AS r
+FROM dlightrag_runs AS r
 JOIN dlightrag_answer_run_routing AS rt
   ON rt.owner_id = r.owner_id AND rt.run_id = r.run_id
 WHERE r.owner_id = $1 AND r.run_id = $2
@@ -1456,7 +1816,7 @@ WHERE owner_id = $1 AND run_id = $2 AND child_session_id = $3
 """
 
 _CLAIM_RUN = f"""
-UPDATE dlightrag_answer_runs
+UPDATE dlightrag_runs
 SET status = 'running',
     lease_owner = $3,
     lease_expires_at = NOW() + ($4 * INTERVAL '1 second'),
@@ -1464,6 +1824,8 @@ SET status = 'running',
     reclaims_without_progress = $5,
     last_reclaim_progress_version = $6,
     started_at = COALESCE(started_at, NOW()),
+    active_permit = TRUE,
+    next_attempt_at = NULL,
     updated_at = NOW()
 WHERE owner_id = $1 AND run_id = $2
   AND status IN ('queued', 'running')
@@ -1471,7 +1833,7 @@ RETURNING {_RUN_COLUMNS}
 """  # noqa: S608 - interpolates only the trusted _RUN_COLUMNS constant
 
 _HEARTBEAT = """
-UPDATE dlightrag_answer_runs
+UPDATE dlightrag_runs
 SET lease_expires_at = NOW() + ($5 * INTERVAL '1 second'),
     updated_at = NOW()
 WHERE owner_id = $1 AND run_id = $2
@@ -1480,9 +1842,36 @@ WHERE owner_id = $1 AND run_id = $2
 RETURNING (cancel_requested_at IS NOT NULL) AS cancel_requested
 """
 
+_WRITE_CHECKPOINT = """
+UPDATE dlightrag_runs
+SET checkpoint_json = $5::jsonb,
+    phase = COALESCE($6::text, phase),
+    durable_progress_version = durable_progress_version + 1,
+    lease_expires_at = NOW() + ($7 * INTERVAL '1 second'),
+    updated_at = NOW()
+WHERE owner_id = $1 AND run_id = $2
+  AND lease_owner = $3 AND fencing_epoch = $4
+  AND status = 'running' AND lease_expires_at > NOW()
+RETURNING 1
+"""
+
+_START_HANDOFF = """
+UPDATE dlightrag_runs
+SET handoff_started_at = COALESCE(handoff_started_at, NOW()),
+    checkpoint_json = $5::jsonb,
+    durable_progress_version = durable_progress_version + 1,
+    lease_expires_at = NOW() + ($6 * INTERVAL '1 second'),
+    updated_at = NOW()
+WHERE owner_id = $1 AND run_id = $2
+  AND lease_owner = $3 AND fencing_epoch = $4
+  AND status = 'running' AND lease_expires_at > NOW()
+  AND (handoff_started_at IS NOT NULL OR cancel_requested_at IS NULL)
+RETURNING 1
+"""
+
 _APPEND_EVENT = """
 WITH bumped AS (
-    UPDATE dlightrag_answer_runs
+    UPDATE dlightrag_runs
     SET next_event_sequence = next_event_sequence + 1,
         phase = COALESCE($5::text, phase),
         lease_expires_at = NOW() + ($8 * INTERVAL '1 second'),
@@ -1492,7 +1881,7 @@ WITH bumped AS (
       AND status = 'running' AND lease_expires_at > NOW()
     RETURNING next_event_sequence - 1 AS event_sequence
 ), inserted AS (
-    INSERT INTO dlightrag_answer_run_events (
+    INSERT INTO dlightrag_run_events (
         owner_id, run_id, event_sequence, event_type, payload
     )
     SELECT $1, $2, event_sequence, $6::text, $7::jsonb FROM bumped
@@ -1503,7 +1892,7 @@ SELECT event_sequence FROM inserted
 
 _FINALIZE_UNLEASED = """
 WITH bumped AS (
-    UPDATE dlightrag_answer_runs AS r
+    UPDATE dlightrag_runs AS r
     SET status = $3::text,
         cancel_requested_at = CASE
             WHEN $3::text = 'cancelled' THEN COALESCE(r.cancel_requested_at, NOW())
@@ -1516,7 +1905,9 @@ WITH bumped AS (
         prepared_input_json = NULL,
         lease_owner = NULL,
         lease_expires_at = NULL,
+        active_permit = FALSE,
         finished_at = NOW(),
+        purge_after = NOW() + make_interval(secs => retention_seconds::double precision),
         updated_at = NOW(),
         next_event_sequence = r.next_event_sequence + 1
     WHERE (r.owner_id, r.run_id) IN (SELECT * FROM unnest($1::text[], $2::uuid[]))
@@ -1524,7 +1915,7 @@ WITH bumped AS (
       AND (r.lease_expires_at IS NULL OR r.lease_expires_at < NOW())
     RETURNING r.owner_id, r.run_id, r.next_event_sequence - 1 AS event_sequence
 ), inserted AS (
-    INSERT INTO dlightrag_answer_run_events (
+    INSERT INTO dlightrag_run_events (
         owner_id, run_id, event_sequence, event_type, payload
     )
     SELECT owner_id, run_id, event_sequence, $6::text, $7::jsonb FROM bumped
@@ -1533,25 +1924,66 @@ WITH bumped AS (
 SELECT count(*)::int FROM inserted
 """
 
+_SUPERSEDE_WAITING_MUTATION = """
+WITH updated AS (
+    UPDATE dlightrag_runs
+    SET status = 'failed', phase = NULL,
+        error_kind = 'repair_superseded',
+        error_message = 'Waiting mutation was superseded by an authorized Corpus Reset.',
+        result_json = jsonb_build_object(
+            'action', COALESCE(accepted_input_json->>'action', 'unknown'),
+            'superseded_by_run_id', $3::uuid,
+            'repair_reason', 'Superseded by an authorized full Corpus Reset.'
+        ),
+        prepared_input_json = NULL,
+        superseded_by_run_id = $3::uuid,
+        lease_owner = NULL, lease_expires_at = NULL, active_permit = FALSE,
+        finished_at = NOW(),
+        purge_after = NOW() + make_interval(secs => retention_seconds::double precision),
+        updated_at = NOW(), next_event_sequence = next_event_sequence + 1
+    WHERE owner_id = $1 AND run_id = $2
+      AND run_kind = 'corpus_mutation' AND status = 'running'
+      AND phase = 'waiting_for_repair'
+      AND lease_owner IS NULL AND lease_expires_at IS NULL
+    RETURNING owner_id, run_id, next_event_sequence - 1 AS event_sequence,
+              result_json
+), inserted AS (
+    INSERT INTO dlightrag_run_events (
+        owner_id, run_id, event_sequence, event_type, payload
+    )
+    SELECT owner_id, run_id, event_sequence, 'error',
+           jsonb_build_object(
+               'kind', 'repair_superseded',
+               'message', 'Waiting mutation was superseded by an authorized Corpus Reset.',
+               'result', result_json
+           )
+    FROM updated
+    RETURNING 1
+)
+SELECT count(*)::int FROM inserted
+"""
+
 _REQUEST_CANCELLATION = """
 WITH updated AS (
-    UPDATE dlightrag_answer_runs
+    UPDATE dlightrag_runs
     SET cancel_requested_at = COALESCE(cancel_requested_at, NOW()),
         updated_at = NOW()
     WHERE owner_id = $1 AND run_id = $2
       AND status = 'running'
+      AND handoff_started_at IS NULL
     RETURNING 1
 ), notified AS (
-    SELECT pg_notify('dlightrag_answer_run_cancel', $3) FROM updated
+    SELECT pg_notify('dlightrag_run_cancel', $3) FROM updated
 )
 SELECT count(*)::int FROM notified
 """
 
 _REQUEUE_RUN = """
-UPDATE dlightrag_answer_runs
+UPDATE dlightrag_runs
 SET status = 'queued',
     lease_owner = NULL,
     lease_expires_at = NULL,
+    active_permit = FALSE,
     updated_at = NOW()
 WHERE owner_id = $1 AND run_id = $2
   AND lease_owner = $3 AND fencing_epoch = $4
@@ -1560,9 +1992,45 @@ WHERE owner_id = $1 AND run_id = $2
 RETURNING 1
 """
 
+_DEFER_RUN = """
+UPDATE dlightrag_runs
+SET status = 'queued', phase = 'deferred', checkpoint_json = $5::jsonb,
+    next_attempt_at = $6, lease_owner = NULL, lease_expires_at = NULL,
+    active_permit = FALSE, updated_at = NOW()
+WHERE owner_id = $1 AND run_id = $2 AND lease_owner = $3
+  AND fencing_epoch = $4 AND status = 'running' AND lease_expires_at > NOW()
+RETURNING 1
+"""
+
+_RESUME_REPAIR = """
+UPDATE dlightrag_runs
+SET status = 'queued', phase = 'repair_resumed', next_attempt_at = NOW(),
+    checkpoint_json = jsonb_set(
+        COALESCE(checkpoint_json, '{}'::jsonb),
+        '{repair_resume_confirmed}',
+        'true'::jsonb,
+        TRUE
+    ),
+    updated_at = NOW()
+WHERE owner_id = $1 AND run_id = $2
+  AND status = 'running' AND phase = 'waiting_for_repair'
+  AND lease_owner IS NULL AND lease_expires_at IS NULL
+RETURNING 1
+"""
+
+_WAIT_FOR_REPAIR = """
+UPDATE dlightrag_runs
+SET phase = 'waiting_for_repair', checkpoint_json = $5::jsonb,
+    next_attempt_at = NULL, lease_owner = NULL, lease_expires_at = NULL,
+    active_permit = FALSE, updated_at = NOW()
+WHERE owner_id = $1 AND run_id = $2 AND lease_owner = $3
+  AND fencing_epoch = $4 AND status = 'running' AND lease_expires_at > NOW()
+RETURNING 1
+"""
+
 _SELECT_CANCEL_PENDING = """
 SELECT owner_id, run_id
-FROM dlightrag_answer_runs
+FROM dlightrag_runs
 WHERE cancel_requested_at IS NOT NULL
   AND status IN ('queued', 'running')
   AND (lease_expires_at IS NULL OR lease_expires_at < NOW())
@@ -1588,16 +2056,6 @@ INSERT INTO dlightrag_answer_run_artifacts (
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
 ON CONFLICT (owner_id, run_id, resource_id) DO NOTHING
-"""
-
-_SELECT_BLOB_CHUNKS = """
-SELECT content FROM dlightrag_blob_chunks
-WHERE owner_id = $1 AND digest = $2
-ORDER BY chunk_index
-"""
-
-_SELECT_BLOB_SIZE = """
-SELECT byte_size FROM dlightrag_blobs WHERE owner_id = $1 AND digest = $2
 """
 
 _SELECT_RUN_ARTIFACTS = """
@@ -1626,14 +2084,19 @@ ORDER BY attachment_order
 """
 
 _SELECT_RUN_DIGESTS = """
-SELECT DISTINCT owner_id, digest
+SELECT owner_id, digest
 FROM dlightrag_answer_run_artifacts
 WHERE (owner_id, run_id) IN (SELECT * FROM unnest($1::text[], $2::uuid[]))
+UNION
+SELECT owner_id, blob_digest AS digest
+FROM dlightrag_answer_resources
+WHERE (owner_id, run_id) IN (SELECT * FROM unnest($1::text[], $2::uuid[]))
+  AND blob_digest IS NOT NULL
 """
 
 _DELETE_RUNS = """
 WITH deleted AS (
-    DELETE FROM dlightrag_answer_runs
+    DELETE FROM dlightrag_runs
     WHERE (owner_id, run_id) IN (SELECT * FROM unnest($1::text[], $2::uuid[]))
     RETURNING 1
 )
@@ -1702,32 +2165,32 @@ SELECT count(*)::int FROM deleted
 
 _SELECT_EXPIRED_RUNS = """
 SELECT runs.owner_id, runs.run_id
-FROM dlightrag_answer_runs AS runs
+FROM dlightrag_runs AS runs
 WHERE runs.status IN ('succeeded', 'failed', 'cancelled')
-  AND runs.finished_at < NOW() - ($1 * INTERVAL '1 second')
-ORDER BY runs.finished_at
-LIMIT $2
+  AND runs.purge_after <= NOW()
+ORDER BY runs.purge_after
+LIMIT $1
 FOR UPDATE OF runs SKIP LOCKED
 """
 
 _SELECT_TRIMMABLE_RUNS = """
 SELECT owner_id, run_id
-FROM dlightrag_answer_runs
+FROM dlightrag_runs
 WHERE status IN ('succeeded', 'failed', 'cancelled')
-  AND finished_at < NOW() - ($1 * INTERVAL '1 second')
+  AND purge_after <= NOW()
   AND events_trimmed_at IS NULL
-ORDER BY finished_at
-LIMIT $2
+ORDER BY purge_after
+LIMIT $1
 FOR UPDATE SKIP LOCKED
 """
 
 _DELETE_EVENTS_FOR_RUNS = """
-DELETE FROM dlightrag_answer_run_events
+DELETE FROM dlightrag_run_events
 WHERE (owner_id, run_id) IN (SELECT * FROM unnest($1::text[], $2::uuid[]))
 """
 
 _MARK_EVENTS_TRIMMED = """
-UPDATE dlightrag_answer_runs
+UPDATE dlightrag_runs
 SET events_trimmed_at = NOW(),
     updated_at = NOW()
 WHERE (owner_id, run_id) IN (SELECT * FROM unnest($1::text[], $2::uuid[]))
@@ -1792,16 +2255,33 @@ async def _delete_unreferenced(conn: Any, owners: Sequence[str], digests: Sequen
     return survivors
 
 
-def _new_run_id() -> uuid.UUID:
-    """Return a fresh time-ordered UUIDv7 run identifier."""
-    return uuid.uuid7()
-
-
 def _require_owner(owner_id: str) -> str:
     owner = str(owner_id).strip()
     if not owner:
         raise ValueError("owner_id cannot be empty")
     return owner
+
+
+def _validate_envelope(
+    envelope: PreparedRunEnvelope, run_id: str
+) -> tuple[str, uuid.UUID, str, str]:
+    submitter = _require_owner(envelope.submitted_by)
+    owner = _require_owner(envelope.access_scope.scope_id)
+    if envelope.access_scope.kind == "owner" and owner != submitter:
+        raise ValueError("owner-scoped runs must be submitted by their owner")
+    if not envelope.submission_key:
+        raise ValueError("submission_key must be non-empty")
+    if not envelope.request_fingerprint:
+        raise ValueError("request_fingerprint must be non-empty")
+    if envelope.retention_seconds < 1:
+        raise ValueError("retention_seconds must be positive")
+    run_uuid = parse_run_id(run_id)
+    if run_uuid is None:
+        raise ValueError("run_id must be a canonical UUID")
+    require_prepared_input_bounds(envelope.payload)
+    payload = json.dumps(dict(envelope.payload), ensure_ascii=False, sort_keys=True)
+    accepted_input = json.dumps(dict(envelope.accepted_input), ensure_ascii=False, sort_keys=True)
+    return owner, run_uuid, payload, accepted_input
 
 
 def _json_object(value: Any) -> dict[str, Any]:
@@ -1853,13 +2333,20 @@ def _optional_int(row: Any, name: str) -> int | None:
     return int(value) if value is not None else None
 
 
-def answer_run_record(row: Any) -> AnswerRunRecord:
+def run_record(row: Any) -> RunRecord:
     """Project one stored run row into the storage-neutral Runtime record."""
     prepared = row["prepared_input"]
-    return AnswerRunRecord(
-        owner_id=str(row["owner_id"]),
+    return RunRecord(
         run_id=str(row["run_id"]),
-        idempotency_key=row["idempotency_key"],
+        run_kind=cast(RunKind, str(row["run_kind"])),
+        lane=cast(RunLane, str(row["lane"])),
+        submitted_by=str(row["submitted_by"]),
+        access_scope=RunAccessScope(
+            kind=cast(Literal["owner", "workspace"], str(row["access_scope_kind"])),
+            scope_id=str(row["owner_id"]),
+        ),
+        submission_key=str(row["submission_key"]),
+        request_fingerprint=str(row["request_fingerprint"]),
         prepared_input=_json_object(prepared) if prepared is not None else None,
         accepted_input=_json_object(row["accepted_input"]),
         status=row["status"],
@@ -1881,12 +2368,22 @@ def answer_run_record(row: Any) -> AnswerRunRecord:
         updated_at=row["updated_at"],
         started_at=row["started_at"],
         finished_at=row["finished_at"],
-        workspace_epoch=_optional_int(row, "workspace_epoch"),
+        purge_after=row["purge_after"],
+        next_attempt_at=row["next_attempt_at"],
+        active_permit=bool(row["active_permit"]),
+        checkpoint=(
+            _json_object(row["checkpoint_json"]) if row["checkpoint_json"] is not None else None
+        ),
+        handoff_started_at=row["handoff_started_at"],
+        superseded_by_run_id=(
+            str(row["superseded_by_run_id"]) if row["superseded_by_run_id"] is not None else None
+        ),
+        agent_workspace_epoch=_optional_int(row, "agent_workspace_epoch"),
     )
 
 
-def _event_record(row: Any) -> AnswerRunEvent:
-    return AnswerRunEvent(
+def _event_record(row: Any) -> RunEvent:
+    return RunEvent(
         sequence=int(row["event_sequence"]),
         event_type=row["event_type"],
         payload=_json_object(row["payload"]),
@@ -1907,17 +2404,31 @@ def _reference_record(row: Any) -> RunArtifactReference:
     )
 
 
-class PGAnswerRunStore(PostgresOperationRunner):
-    """Owner-scoped durable Answer run state backed by PostgreSQL."""
+class PGRunStore(PostgresOperationRunner):
+    """Generic durable lifecycle plus Answer-owned PostgreSQL projections."""
 
     def __init__(
         self,
         *,
         pool: ConnectionPool | None = None,
         retention_seconds: int = DEFAULT_RUN_RETENTION_SECONDS,
+        query_max_active_runs: int = DEFAULT_QUERY_MAX_ACTIVE_RUNS,
+        query_max_nonterminal_runs: int = DEFAULT_QUERY_MAX_NONTERMINAL_RUNS,
+        corpus_mutation_max_active_runs: int = DEFAULT_CORPUS_MUTATION_MAX_ACTIVE_RUNS,
+        corpus_mutation_max_nonterminal_runs: int = DEFAULT_CORPUS_MUTATION_MAX_NONTERMINAL_RUNS,
+        promotion_doc_threshold: int | None = None,
+        promotion_chunk_threshold: int | None = None,
     ) -> None:
         super().__init__(pool=pool)
         self._retention_seconds = retention_seconds
+        self._query_max_active_runs = max(1, int(query_max_active_runs))
+        self._query_max_nonterminal_runs = max(1, int(query_max_nonterminal_runs))
+        self._corpus_mutation_max_active_runs = max(1, int(corpus_mutation_max_active_runs))
+        self._corpus_mutation_max_nonterminal_runs = max(
+            1, int(corpus_mutation_max_nonterminal_runs)
+        )
+        self._promotion_doc_threshold = promotion_doc_threshold
+        self._promotion_chunk_threshold = promotion_chunk_threshold
         self._initialized = False
 
     async def _run_read[T](self, operation: Callable[[Any], Awaitable[T]]) -> T:
@@ -1927,7 +2438,7 @@ class PGAnswerRunStore(PostgresOperationRunner):
         return await self._run_once(operation)
 
     async def initialize(self, *, validate_only: bool = False) -> None:
-        """Create the final durable Answer schema, or validate it for a reader."""
+        """Create the RunRuntime and Answer projection schema, or validate a reader."""
         if self._initialized:
             return
 
@@ -1935,16 +2446,16 @@ class PGAnswerRunStore(PostgresOperationRunner):
             if validate_only:
                 await verify_migrations(
                     conn,
-                    scope=ANSWER_RUN_MIGRATION_SCOPE,
-                    migrations=ANSWER_RUN_MIGRATIONS,
-                    tables=ANSWER_RUN_SCHEMA_TABLES,
+                    scope=RUN_MIGRATION_SCOPE,
+                    migrations=RUN_MIGRATIONS,
+                    tables=RUN_SCHEMA_TABLES,
                     schema_error=RunSchemaError,
                 )
                 return
             await apply_migrations(
                 conn,
-                scope=ANSWER_RUN_MIGRATION_SCOPE,
-                migrations=ANSWER_RUN_MIGRATIONS,
+                scope=RUN_MIGRATION_SCOPE,
+                migrations=RUN_MIGRATIONS,
                 schema_error=RunSchemaError,
             )
 
@@ -1953,13 +2464,18 @@ class PGAnswerRunStore(PostgresOperationRunner):
 
     # -- acceptance ---------------------------------------------------
     async def replay_run(
-        self, *, owner_id: str, idempotency_key: str, idempotency_fingerprint: str
+        self,
+        *,
+        owner_id: str,
+        idempotency_key: str,
+        idempotency_fingerprint: str,
+        run_kind: RunKind,
     ) -> RunCreation | None:
-        """Replay a matching idempotency key before any preparation happens."""
+        """Replay a matching operation-scoped key before preparation happens."""
         owner = _require_owner(owner_id)
 
         async def _operation(conn: Any) -> RunCreation | None:
-            row = await conn.fetchrow(_SELECT_RUN_BY_KEY, owner, idempotency_key)
+            row = await conn.fetchrow(_SELECT_RUN_BY_KEY, run_kind, owner, idempotency_key)
             if row is None:
                 return None
             return _require_replay_match(
@@ -1975,22 +2491,17 @@ class PGAnswerRunStore(PostgresOperationRunner):
     async def create_run(
         self,
         *,
-        owner_id: str,
-        prepared_input: Mapping[str, object],
-        idempotency_fingerprint: str,
-        idempotency_key: str | None = None,
+        envelope: PreparedRunEnvelope,
+        run_id: str,
         resources: Sequence[Mapping[str, object]] = (),
         artifacts: Sequence[PendingArtifact] = (),
         references: Sequence[PendingArtifactReference] = (),
         routing: RoutingAcceptance | None = None,
     ) -> RunCreation:
-        """Accept one run with its bounded prepared input."""
+        """Accept one purpose-built Answer envelope on the generic runtime."""
         return await self.accept_run(
-            owner_id=owner_id,
-            run_id=str(_new_run_id()),
-            idempotency_key=idempotency_key,
-            fingerprint=idempotency_fingerprint,
-            prepared_input=prepared_input,
+            envelope=envelope,
+            run_id=run_id,
             resources=resources,
             blobs=artifacts,
             references=references,
@@ -2000,56 +2511,121 @@ class PGAnswerRunStore(PostgresOperationRunner):
     async def accept_run(
         self,
         *,
-        owner_id: str,
+        envelope: PreparedRunEnvelope,
         run_id: str,
-        idempotency_key: str | None,
-        fingerprint: str,
-        prepared_input: Mapping[str, object],
         resources: Sequence[Mapping[str, object]] = (),
         blobs: Sequence[PendingArtifact] = (),
         references: Sequence[PendingArtifactReference] = (),
         routing: RoutingAcceptance | None = None,
     ) -> RunCreation:
-        """Atomically accept one run: blobs, resources, references, run row.
-
-        The public request fingerprint is computed before enrichment and is
-        compared against any idempotent replay; a mismatch is an
-        :class:`IdempotencyKeyConflict`.
-        """
-        owner = _require_owner(owner_id)
-        run_uuid = parse_run_id(run_id)
-        if run_uuid is None:
-            raise ValueError("run_id must be a canonical UUID")
-        prepared_json = json.dumps(dict(prepared_input), ensure_ascii=False, sort_keys=True)
-        envelope_json = json.dumps(
-            accepted_input_envelope(prepared_input), ensure_ascii=False, sort_keys=True
+        """Atomically accept one operation input and its generic run row."""
+        if envelope.run_kind in {"answer", "retrieval"} and envelope.lane != "query":
+            raise ValueError("Answer and Retrieval runs execute on the query lane")
+        if envelope.run_kind == "corpus_mutation" and envelope.lane != "corpus_mutation":
+            raise ValueError("Corpus Mutation runs execute on the corpus_mutation lane")
+        if envelope.run_kind == "corpus_mutation" and envelope.access_scope.kind != "workspace":
+            raise ValueError("Corpus Mutation runs require workspace access scope")
+        if envelope.supersedes_run_id is not None and envelope.run_kind != "corpus_mutation":
+            raise ValueError("only Corpus Mutation runs may supersede a waiting mutation")
+        superseded_uuid = (
+            parse_run_id(envelope.supersedes_run_id)
+            if envelope.supersedes_run_id is not None
+            else None
         )
+        if envelope.supersedes_run_id is not None and superseded_uuid is None:
+            raise ValueError("supersedes_run_id is invalid")
+        if envelope.run_kind != "answer" and (resources or blobs or references or routing):
+            raise ValueError("non-Answer runs cannot carry Answer-owned projections")
+        if any(reference.reference_kind == "fetched_resource" for reference in references):
+            raise ValueError("fetched_resource references cannot be run creation inputs")
+        owner, run_uuid, prepared_json, accepted_json = _validate_envelope(envelope, run_id)
 
         async def _operation(conn: Any) -> RunCreation:
             async with conn.transaction():
-                if idempotency_key:
-                    replayed = await conn.fetchrow(_SELECT_RUN_BY_KEY, owner, idempotency_key)
-                    if replayed is not None:
-                        return _require_replay_match(
-                            owner=owner,
-                            key=idempotency_key,
-                            stored_fingerprint=str(replayed["request_fingerprint"]),
-                            fingerprint=fingerprint,
-                            row=replayed,
+                replayed = await conn.fetchrow(
+                    _SELECT_RUN_BY_KEY,
+                    envelope.run_kind,
+                    envelope.submitted_by,
+                    envelope.submission_key,
+                )
+                if replayed is not None:
+                    return _require_replay_match(
+                        owner=owner,
+                        key=envelope.submission_key,
+                        stored_fingerprint=str(replayed["request_fingerprint"]),
+                        fingerprint=envelope.request_fingerprint,
+                        row=replayed,
+                    )
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext($1))",
+                    f"dlightrag:run-accept:{envelope.lane}",
+                )
+                replayed = await conn.fetchrow(
+                    _SELECT_RUN_BY_KEY,
+                    envelope.run_kind,
+                    envelope.submitted_by,
+                    envelope.submission_key,
+                )
+                if replayed is not None:
+                    return _require_replay_match(
+                        owner=owner,
+                        key=envelope.submission_key,
+                        stored_fingerprint=str(replayed["request_fingerprint"]),
+                        fingerprint=envelope.request_fingerprint,
+                        row=replayed,
+                    )
+                if superseded_uuid is not None:
+                    superseded = await conn.fetchval(
+                        _SUPERSEDE_WAITING_MUTATION,
+                        owner,
+                        superseded_uuid,
+                        run_uuid,
+                    )
+                    if int(superseded or 0) != 1:
+                        raise ValueError(
+                            "supersedes_run_id is not this Workspace's waiting mutation"
                         )
+                nonterminal = int(await conn.fetchval(_COUNT_NONTERMINAL_LANE, envelope.lane) or 0)
+                max_nonterminal = (
+                    self._query_max_nonterminal_runs
+                    if envelope.lane == "query"
+                    else self._corpus_mutation_max_nonterminal_runs
+                )
+                if nonterminal >= max_nonterminal:
+                    raise RunCapacityExceededError(
+                        f"{envelope.lane} lane nonterminal admission fuse is full"
+                    )
                 await self._write_blobs(conn, owner, blobs)
                 row = await conn.fetchrow(
                     _INSERT_RUN,
                     owner,
                     run_uuid,
-                    idempotency_key,
+                    envelope.run_kind,
+                    envelope.lane,
+                    envelope.submitted_by,
+                    envelope.access_scope.kind,
+                    envelope.submission_key,
                     prepared_json,
-                    envelope_json,
-                    fingerprint,
+                    accepted_json,
+                    envelope.request_fingerprint,
+                    envelope.retention_seconds,
                 )
                 if row is None:
-                    replayed = await conn.fetchrow(_SELECT_RUN_BY_KEY, owner, idempotency_key)
-                    return RunCreation(run=answer_run_record(replayed), replayed=True)
+                    replayed = await conn.fetchrow(
+                        _SELECT_RUN_BY_KEY,
+                        envelope.run_kind,
+                        envelope.submitted_by,
+                        envelope.submission_key,
+                    )
+                    if replayed is None:
+                        raise RuntimeError("run insert reported a vanished conflict")
+                    return _require_replay_match(
+                        owner=owner,
+                        key=envelope.submission_key,
+                        stored_fingerprint=str(replayed["request_fingerprint"]),
+                        fingerprint=envelope.request_fingerprint,
+                        row=replayed,
+                    )
                 for resource in resources:
                     await conn.execute(
                         _INSERT_RESOURCE,
@@ -2081,10 +2657,42 @@ class PGAnswerRunStore(PostgresOperationRunner):
                         reference.mime_type,
                         json.dumps(dict(reference.transform_locator), ensure_ascii=False),
                     )
-                await self._insert_routing(
-                    conn, owner, run_uuid, routing, prepared_input=prepared_input
+                if envelope.run_kind == "answer":
+                    await self._insert_routing(
+                        conn, owner, run_uuid, routing, prepared_input=envelope.payload
+                    )
+                return RunCreation(run=run_record(row), replayed=False)
+
+        return await self._run_write(_operation)
+
+    async def record_corpus_window(
+        self,
+        *,
+        run_id: str,
+        workspace: str,
+        window_number: int,
+        docs: int,
+        chunks: int,
+    ) -> bool:
+        """Idempotently account one successful mutation window for promotion."""
+        run_uuid = parse_run_id(run_id)
+        if run_uuid is None or window_number < 1 or docs < 0 or chunks < 0:
+            raise ValueError("invalid corpus mutation window")
+
+        async def _operation(conn: Any) -> bool:
+            async with conn.transaction():
+                return bool(
+                    await conn.fetchval(
+                        _RECORD_CORPUS_WINDOW,
+                        run_uuid,
+                        window_number,
+                        _require_owner(workspace),
+                        docs,
+                        chunks,
+                        self._promotion_doc_threshold,
+                        self._promotion_chunk_threshold,
+                    )
                 )
-                return RunCreation(run=answer_run_record(row), replayed=False)
 
         return await self._run_write(_operation)
 
@@ -2127,10 +2735,8 @@ class PGAnswerRunStore(PostgresOperationRunner):
         self,
         conn: Any,
         *,
-        owner_id: str,
-        request: Mapping[str, Any],
-        idempotency_fingerprint: str,
-        idempotency_key: str | None = None,
+        envelope: PreparedRunEnvelope,
+        run_id: str,
         artifacts: Sequence[PendingArtifact] = (),
         references: Sequence[PendingArtifactReference] = (),
         routing: RoutingAcceptance | None = None,
@@ -2142,36 +2748,82 @@ class PGAnswerRunStore(PostgresOperationRunner):
         of its own, so the caller's commit is what makes the run and its link
         durable together. ``request`` is the bounded accepted execution input.
         """
-        owner = _require_owner(owner_id)
+        if envelope.run_kind != "answer" or envelope.lane != "query":
+            raise ValueError("Web Answer acceptance requires answer kind on the query lane")
+        if envelope.access_scope.kind != "owner":
+            raise ValueError("Web Answer runs require owner access scope")
+        if envelope.supersedes_run_id is not None:
+            raise ValueError("Web Answer runs cannot supersede another run")
+        owner, run_uuid, payload, envelope_json = _validate_envelope(envelope, run_id)
         if any(reference.reference_kind == "fetched_resource" for reference in references):
             # A fetched resource is worker-fenced run state, never accepted input.
             raise ValueError("fetched_resource references cannot be run creation inputs")
-        if not idempotency_fingerprint:
-            raise ValueError("idempotency_fingerprint must be non-empty")
-        payload = json.dumps(dict(request), ensure_ascii=False, sort_keys=True)
-        envelope_json = json.dumps(
-            accepted_input_envelope(request), ensure_ascii=False, sort_keys=True
+        existing = await conn.fetchrow(
+            _SELECT_RUN_BY_KEY,
+            envelope.run_kind,
+            envelope.submitted_by,
+            envelope.submission_key,
         )
-        run_uuid = _new_run_id()
+        if existing is not None:
+            return _require_replay_match(
+                owner=owner,
+                key=envelope.submission_key,
+                stored_fingerprint=str(existing["request_fingerprint"]),
+                fingerprint=envelope.request_fingerprint,
+                row=existing,
+            )
+        await conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtext($1))",
+            f"dlightrag:run-accept:{envelope.lane}",
+        )
+        existing = await conn.fetchrow(
+            _SELECT_RUN_BY_KEY,
+            envelope.run_kind,
+            envelope.submitted_by,
+            envelope.submission_key,
+        )
+        if existing is not None:
+            return _require_replay_match(
+                owner=owner,
+                key=envelope.submission_key,
+                stored_fingerprint=str(existing["request_fingerprint"]),
+                fingerprint=envelope.request_fingerprint,
+                row=existing,
+            )
+        nonterminal = int(await conn.fetchval(_COUNT_NONTERMINAL_LANE, envelope.lane) or 0)
+        if nonterminal >= self._query_max_nonterminal_runs:
+            raise RunCapacityExceededError(
+                f"{envelope.lane} lane nonterminal admission fuse is full"
+            )
         await self._write_blobs(conn, owner, artifacts)
         row = await conn.fetchrow(
             _INSERT_RUN,
             owner,
             run_uuid,
-            idempotency_key,
+            envelope.run_kind,
+            envelope.lane,
+            envelope.submitted_by,
+            envelope.access_scope.kind,
+            envelope.submission_key,
             payload,
             envelope_json,
-            idempotency_fingerprint,
+            envelope.request_fingerprint,
+            envelope.retention_seconds,
         )
         if row is None:
-            existing = await conn.fetchrow(_SELECT_RUN_BY_KEY, owner, idempotency_key)
+            existing = await conn.fetchrow(
+                _SELECT_RUN_BY_KEY,
+                envelope.run_kind,
+                envelope.submitted_by,
+                envelope.submission_key,
+            )
             if existing is None:
                 raise RuntimeError("answer run insert reported a vanished conflict")
-            if str(existing["request_fingerprint"]) != idempotency_fingerprint:
+            if str(existing["request_fingerprint"]) != envelope.request_fingerprint:
                 raise IdempotencyKeyConflict(
                     "idempotency key was reused with different request input"
                 )
-            return RunCreation(run=answer_run_record(existing), replayed=True)
+            return RunCreation(run=run_record(existing), replayed=True)
         for reference in references:
             await conn.execute(
                 _INSERT_RUN_ARTIFACT,
@@ -2185,8 +2837,8 @@ class PGAnswerRunStore(PostgresOperationRunner):
                 reference.mime_type,
                 json.dumps(dict(reference.transform_locator), ensure_ascii=False),
             )
-        await self._insert_routing(conn, owner, run_uuid, routing, prepared_input=request)
-        return RunCreation(run=answer_run_record(row), replayed=False)
+        await self._insert_routing(conn, owner, run_uuid, routing, prepared_input=envelope.payload)
+        return RunCreation(run=run_record(row), replayed=False)
 
     async def _insert_routing(
         self,
@@ -2352,7 +3004,7 @@ class PGAnswerRunStore(PostgresOperationRunner):
                     run_uuid,
                     child_uuid,
                     worker_id,
-                    ANSWER_RUN_LEASE_SECONDS,
+                    RUN_LEASE_SECONDS,
                 )
                 return int(value) if value is not None else None
 
@@ -2389,7 +3041,7 @@ class PGAnswerRunStore(PostgresOperationRunner):
                     child_uuid,
                     worker_id,
                     child_fencing_epoch,
-                    ANSWER_RUN_LEASE_SECONDS,
+                    RUN_LEASE_SECONDS,
                 )
                 return renewed is not None
 
@@ -2778,8 +3430,8 @@ class PGAnswerRunStore(PostgresOperationRunner):
                 return
             for row in rows:
                 yield {
-                    "context_policy_revision": row["context_policy_revision"],
-                    "pinned_models": _json_value(row["pinned_models"]),
+                    "run_kind": str(row["run_kind"]),
+                    "prepared_input": _json_value(row["prepared_input_json"]),
                 }
             if len(rows) < cap:
                 return
@@ -2798,31 +3450,43 @@ class PGAnswerRunStore(PostgresOperationRunner):
         return await self._run_write(_operation)
 
     # -- reads --------------------------------------------------------
-    async def get_run(self, *, owner_id: str, run_id: str) -> AnswerRunRecord | None:
+    async def get_run(self, *, owner_id: str, run_id: str) -> RunRecord | None:
         owner = _require_owner(owner_id)
         run_uuid = parse_run_id(run_id)
         if run_uuid is None:
             return None
 
-        async def _operation(conn: Any) -> AnswerRunRecord | None:
+        async def _operation(conn: Any) -> RunRecord | None:
             row = await conn.fetchrow(_SELECT_RUN, owner, run_uuid)
-            return answer_run_record(row) if row is not None else None
+            return run_record(row) if row is not None else None
+
+        return await self._run_read(_operation)
+
+    async def get_run_global(self, *, run_id: str) -> RunRecord | None:
+        """Read by globally unique id for a later fail-closed authorization check."""
+        run_uuid = parse_run_id(run_id)
+        if run_uuid is None:
+            return None
+
+        async def _operation(conn: Any) -> RunRecord | None:
+            row = await conn.fetchrow(_SELECT_RUN_GLOBAL, run_uuid)
+            return run_record(row) if row is not None else None
 
         return await self._run_read(_operation)
 
     async def list_runs(
         self, *, owner_id: str, after_run_id: str | None = None, limit: int = 50
-    ) -> tuple[AnswerRunRecord, ...]:
+    ) -> tuple[RunRecord, ...]:
         owner = _require_owner(owner_id)
         cap = max(1, min(int(limit), 100))
         after = parse_run_id(after_run_id) if after_run_id else None
 
-        async def _operation(conn: Any) -> tuple[AnswerRunRecord, ...]:
+        async def _operation(conn: Any) -> tuple[RunRecord, ...]:
             if after is None:
                 rows = await conn.fetch(_LIST_RUNS, owner, cap)
             else:
                 rows = await conn.fetch(_LIST_RUNS_AFTER, owner, after, cap)
-            return tuple(answer_run_record(row) for row in rows)
+            return tuple(run_record(row) for row in rows)
 
         return await self._run_read(_operation)
 
@@ -2892,13 +3556,13 @@ class PGAnswerRunStore(PostgresOperationRunner):
 
     async def read_event_page(
         self, *, owner_id: str, run_id: str, after_sequence: int = 0
-    ) -> tuple[AnswerRunEvent, ...]:
+    ) -> tuple[RunEvent, ...]:
         owner = _require_owner(owner_id)
         run_uuid = parse_run_id(run_id)
         if run_uuid is None:
             return ()
 
-        async def _operation(conn: Any) -> tuple[AnswerRunEvent, ...]:
+        async def _operation(conn: Any) -> tuple[RunEvent, ...]:
             rows = await conn.fetch(
                 _SELECT_EVENTS,
                 owner,
@@ -2907,67 +3571,6 @@ class PGAnswerRunStore(PostgresOperationRunner):
                 _EVENT_PAGE_LIMIT,
             )
             return tuple(_event_record(row) for row in rows)
-
-        return await self._run_read(_operation)
-
-    async def stream_artifact(
-        self,
-        *,
-        owner_id: str,
-        digest: str,
-        offset: int = 0,
-        length: int | None = None,
-    ) -> AsyncIterator[bytes]:
-        """Yield one blob's 1 MiB chunks, windowed, without materializing it."""
-        owner = _require_owner(owner_id)
-
-        async def _operation(conn: Any) -> AsyncIterator[bytes]:
-            size = await conn.fetchval(_SELECT_BLOB_SIZE, owner, digest)
-            if size is None:
-                return
-            skipped = 0
-            remaining = length
-            async for record in conn.cursor(_SELECT_BLOB_CHUNKS, owner, digest):
-                content = bytes(record["content"])
-                end = skipped + len(content)
-                if end <= offset:
-                    skipped = end
-                    continue
-                start = offset - skipped if offset > skipped else 0
-                piece = content[start:]
-                if remaining is not None:
-                    if len(piece) > remaining:
-                        piece = piece[:remaining]
-                    remaining -= len(piece)
-                skipped = end
-                if piece:
-                    yield piece
-                if remaining is not None and remaining <= 0:
-                    return
-
-        async for piece in self._stream(_operation):
-            yield piece
-
-    async def load_artifact(self, *, owner_id: str, digest: str) -> bytes | None:
-        """Reassemble one complete blob for bounded reads and tests."""
-        owner = _require_owner(owner_id)
-
-        async def _operation(conn: Any) -> bytes | None:
-            size = await conn.fetchval(_SELECT_BLOB_SIZE, owner, digest)
-            if size is None:
-                return None
-            chunks = await conn.fetch(_SELECT_BLOB_CHUNKS, owner, digest)
-            return b"".join(bytes(row["content"]) for row in chunks)
-
-        return await self._run_read(_operation)
-
-    async def blob_size(self, *, owner_id: str, digest: str) -> int | None:
-        """Return one blob's byte size; unknown digests return ``None``."""
-        owner = _require_owner(owner_id)
-
-        async def _operation(conn: Any) -> int | None:
-            size = await conn.fetchval(_SELECT_BLOB_SIZE, owner, digest)
-            return None if size is None else int(size)
 
         return await self._run_read(_operation)
 
@@ -3053,33 +3656,40 @@ class PGAnswerRunStore(PostgresOperationRunner):
 
         async def _operation(conn: Any) -> CancellationOutcome:
             async with conn.transaction():
-                row = await conn.fetchrow(_SELECT_RUN, owner, run_uuid)
+                row = await conn.fetchrow(_SELECT_RUN_FOR_UPDATE, owner, run_uuid)
                 if row is None:
                     return CancellationOutcome(outcome="unknown", run=None)
-                run = answer_run_record(row)
+                run = run_record(row)
                 if run.terminal:
                     return CancellationOutcome(outcome="already_terminal", run=run)
+                if run.handoff_started_at is not None:
+                    return CancellationOutcome(outcome="rejected", run=run)
                 if run.status == "queued":
-                    await self._finalize_cancelled_queued(conn, owner, run_uuid)
+                    finalized = await self._finalize_cancelled_queued(conn, owner, run_uuid)
+                    if not finalized:
+                        raise RuntimeError("locked queued run could not be cancelled")
                     return CancellationOutcome(
                         outcome="cancelled",
-                        run=answer_run_record(await conn.fetchrow(_SELECT_RUN, owner, run_uuid)),
+                        run=run_record(await conn.fetchrow(_SELECT_RUN, owner, run_uuid)),
                     )
-                await conn.execute(
+                updated = await conn.fetchval(
                     _REQUEST_CANCELLATION,
                     owner,
                     run_uuid,
                     cancellation_notify_key(owner_id=owner, run_id=str(run_uuid)),
                 )
+                if int(updated or 0) != 1:
+                    current = run_record(await conn.fetchrow(_SELECT_RUN, owner, run_uuid))
+                    return CancellationOutcome(outcome="rejected", run=current)
                 return CancellationOutcome(
                     outcome="pending",
-                    run=answer_run_record(await conn.fetchrow(_SELECT_RUN, owner, run_uuid)),
+                    run=run_record(await conn.fetchrow(_SELECT_RUN, owner, run_uuid)),
                 )
 
         return await self._run_write(_operation)
 
-    async def _finalize_cancelled_queued(self, conn: Any, owner: str, run_uuid: uuid.UUID) -> None:
-        await conn.execute(
+    async def _finalize_cancelled_queued(self, conn: Any, owner: str, run_uuid: uuid.UUID) -> bool:
+        finalized = await conn.fetchval(
             _FINALIZE_UNLEASED,
             [owner],
             [run_uuid],
@@ -3087,20 +3697,54 @@ class PGAnswerRunStore(PostgresOperationRunner):
             None,
             None,
             "done",
-            "{}",
+            json.dumps({"status": "cancelled"}),
         )
+        return int(finalized or 0) == 1
 
     # -- claim and writes ---------------------------------------------
-    async def claim_next(self, *, worker_id: str) -> ClaimedRun | None:
-        """Claim the oldest eligible run and build its claim-bound execution surface."""
+    async def claim_next(
+        self,
+        *,
+        worker_id: str,
+        run_kinds: Sequence[RunKind] = ("answer",),
+        lanes: Sequence[RunLane] = ("query",),
+    ) -> ClaimedRun | None:
+        """Claim the oldest eligible registered kind under one lane's ceiling."""
         worker = str(worker_id).strip()
         if not worker:
             raise ValueError("worker_id cannot be empty")
+        requested_lanes = tuple(dict.fromkeys(lanes))
+        if len(requested_lanes) != 1:
+            raise ValueError("claim_next requires exactly one execution lane")
+        lane = requested_lanes[0]
+        max_active = (
+            self._query_max_active_runs
+            if lane == "query"
+            else self._corpus_mutation_max_active_runs
+        )
 
         async def _operation(conn: Any) -> ClaimedRun | None:
             while True:
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext($1))",
+                    f"dlightrag:run-claim:{lane}",
+                )
+                active = int(
+                    await conn.fetchval(
+                        "SELECT COUNT(*) FROM dlightrag_runs "
+                        "WHERE lane = $1 AND active_permit = TRUE "
+                        "AND status = 'running' AND lease_expires_at > NOW()",
+                        lane,
+                    )
+                    or 0
+                )
+                if active >= max_active:
+                    return None
                 candidate = await conn.fetchrow(
-                    _SELECT_CLAIM_CANDIDATE, MAX_RECLAIMS_WITHOUT_PROGRESS
+                    _SELECT_CLAIM_CANDIDATE,
+                    MAX_RECLAIMS_WITHOUT_PROGRESS,
+                    list(run_kinds),
+                    [lane],
                 )
                 if candidate is None:
                     return None
@@ -3134,7 +3778,12 @@ class PGAnswerRunStore(PostgresOperationRunner):
                         RUN_ABANDONED_ERROR_KIND,
                         _ABANDONED_ERROR_MESSAGE,
                         "error",
-                        json.dumps({"error_kind": RUN_ABANDONED_ERROR_KIND}),
+                        json.dumps(
+                            {
+                                "kind": RUN_ABANDONED_ERROR_KIND,
+                                "message": _ABANDONED_ERROR_MESSAGE,
+                            }
+                        ),
                     )
                     continue
                 row = await conn.fetchrow(
@@ -3142,7 +3791,7 @@ class PGAnswerRunStore(PostgresOperationRunner):
                     candidate["owner_id"],
                     candidate["run_id"],
                     worker,
-                    ANSWER_RUN_LEASE_SECONDS,
+                    RUN_LEASE_SECONDS,
                     decision.reclaims_without_progress,
                     decision.last_reclaim_progress_version,
                 )
@@ -3157,15 +3806,26 @@ class PGAnswerRunStore(PostgresOperationRunner):
         return await self._run_write(_wrapped)
 
     def _claim_from_row(self, row: Any, worker: str) -> ClaimedRun:
-        run = answer_run_record(row)
+        run = run_record(row)
         owner = run.owner_id
         run_uuid = parse_run_id(run.run_id)
         if run_uuid is None:
             raise RuntimeError("claimed run id is not a canonical UUID")
+        if run.run_kind != "answer":
+            return ClaimedRun(
+                run=run,
+                execution=RunExecutionContext(
+                    owner_id=owner,
+                    run_id=run.run_id,
+                    worker_id=worker,
+                    lease_owner=worker,
+                    fencing_epoch=run.fencing_epoch,
+                ),
+            )
         prepared = run.prepared_input or run.accepted_input or {}
         raw_session_id = prepared.get("agent_session_id")
         if not raw_session_id:
-            raise RuntimeError("claimed run has no canonical Agent Session mapping")
+            raise RuntimeError("claimed Answer run has no canonical Agent Session mapping")
         primary_session_id = SessionId(str(raw_session_id))
         execution = RunExecutionContext(
             owner_id=owner,
@@ -3216,11 +3876,69 @@ class PGAnswerRunStore(PostgresOperationRunner):
                 run_uuid,
                 worker_id,
                 fencing_epoch,
-                ANSWER_RUN_LEASE_SECONDS,
+                RUN_LEASE_SECONDS,
             )
             if row is None:
                 return LeaseRenewal(renewed=False, cancel_requested=False)
             return LeaseRenewal(renewed=True, cancel_requested=bool(row["cancel_requested"]))
+
+        return await self._run_write(_operation)
+
+    async def write_checkpoint(
+        self,
+        *,
+        owner_id: str,
+        run_id: str,
+        worker_id: str,
+        fencing_epoch: int,
+        checkpoint: Mapping[str, object],
+        phase: RunPhase | None = None,
+    ) -> bool:
+        owner = _require_owner(owner_id)
+        run_uuid = parse_run_id(run_id)
+        if run_uuid is None:
+            return False
+
+        async def _operation(conn: Any) -> bool:
+            value = await conn.fetchval(
+                _WRITE_CHECKPOINT,
+                owner,
+                run_uuid,
+                worker_id,
+                fencing_epoch,
+                json.dumps(dict(checkpoint), ensure_ascii=False),
+                phase,
+                RUN_LEASE_SECONDS,
+            )
+            return value is not None
+
+        return await self._run_write(_operation)
+
+    async def start_handoff(
+        self,
+        *,
+        owner_id: str,
+        run_id: str,
+        worker_id: str,
+        fencing_epoch: int,
+        checkpoint: Mapping[str, object],
+    ) -> bool:
+        owner = _require_owner(owner_id)
+        run_uuid = parse_run_id(run_id)
+        if run_uuid is None:
+            return False
+
+        async def _operation(conn: Any) -> bool:
+            value = await conn.fetchval(
+                _START_HANDOFF,
+                owner,
+                run_uuid,
+                worker_id,
+                fencing_epoch,
+                json.dumps(dict(checkpoint), ensure_ascii=False),
+                RUN_LEASE_SECONDS,
+            )
+            return value is not None
 
         return await self._run_write(_operation)
 
@@ -3231,9 +3949,9 @@ class PGAnswerRunStore(PostgresOperationRunner):
         run_id: str,
         worker_id: str,
         fencing_epoch: int,
-        phase: AnswerRunPhase,
+        phase: RunPhase,
     ) -> int | None:
-        return await self._append_event(
+        return await self.append_event(
             owner_id=owner_id,
             run_id=run_id,
             worker_id=worker_id,
@@ -3243,68 +3961,14 @@ class PGAnswerRunStore(PostgresOperationRunner):
             payload={"phase": phase},
         )
 
-    async def append_token_batch(
+    async def append_event(
         self,
         *,
         owner_id: str,
         run_id: str,
         worker_id: str,
         fencing_epoch: int,
-        text: str,
-    ) -> int | None:
-        return await self._append_event(
-            owner_id=owner_id,
-            run_id=run_id,
-            worker_id=worker_id,
-            fencing_epoch=fencing_epoch,
-            phase=None,
-            event_type="token",
-            payload={"text": text},
-        )
-
-    async def append_reset(
-        self, *, owner_id: str, run_id: str, worker_id: str, fencing_epoch: int
-    ) -> int | None:
-        return await self._append_event(
-            owner_id=owner_id,
-            run_id=run_id,
-            worker_id=worker_id,
-            fencing_epoch=fencing_epoch,
-            phase=None,
-            event_type="reset",
-            payload={},
-        )
-
-    async def append_tool_event(
-        self,
-        *,
-        owner_id: str,
-        run_id: str,
-        worker_id: str,
-        fencing_epoch: int,
-        event_type: str,
-        payload: Mapping[str, object],
-    ) -> int | None:
-        if event_type not in {"tool_start", "tool_progress", "tool_end"}:
-            raise ValueError("invalid tool event type")
-        return await self._append_event(
-            owner_id=owner_id,
-            run_id=run_id,
-            worker_id=worker_id,
-            fencing_epoch=fencing_epoch,
-            phase=None,
-            event_type=event_type,
-            payload=payload,
-        )
-
-    async def _append_event(
-        self,
-        *,
-        owner_id: str,
-        run_id: str,
-        worker_id: str,
-        fencing_epoch: int,
-        phase: AnswerRunPhase | None,
+        phase: RunPhase | None,
         event_type: str,
         payload: Mapping[str, Any],
     ) -> int | None:
@@ -3323,7 +3987,7 @@ class PGAnswerRunStore(PostgresOperationRunner):
                 phase,
                 event_type,
                 json.dumps(dict(payload), ensure_ascii=False),
-                ANSWER_RUN_LEASE_SECONDS,
+                RUN_LEASE_SECONDS,
             )
             return int(sequence) if sequence is not None else None
 
@@ -3366,6 +4030,7 @@ class PGAnswerRunStore(PostgresOperationRunner):
         fencing_epoch: int,
         error_kind: str,
         error_message: str,
+        result: Mapping[str, object] | None = None,
     ) -> TerminalOutcome:
         return await self._finish_run(
             owner_id=owner_id,
@@ -3374,11 +4039,11 @@ class PGAnswerRunStore(PostgresOperationRunner):
             fencing_epoch=fencing_epoch,
             status="failed",
             stop_reason=None,
-            result=None,
+            result=result,
             error_kind=error_kind,
             error_message=error_message,
             event_type="error",
-            payload={"error_kind": error_kind},
+            payload={"kind": error_kind, "message": error_message},
             withhold_on_cancel=True,
         )
 
@@ -3440,8 +4105,8 @@ class PGAnswerRunStore(PostgresOperationRunner):
                     withhold_on_cancel=withhold_on_cancel,
                 )
                 # Preserve publication and spill cleanup ownership for the
-                # requested transition; a cancellation that beat success owns
-                # only its terminal row and event.
+                # requested transition; a cancellation that beat it owns only
+                # its terminal row and event.
                 if outcome.committed and outcome.status == status:
                     if status == "succeeded" and publications:
                         await self._write_publications(conn, owner, run_uuid, publications)
@@ -3458,6 +4123,75 @@ class PGAnswerRunStore(PostgresOperationRunner):
                         run_uuid,
                     )
                 return outcome
+
+        return await self._run_write(_operation)
+
+    async def defer(
+        self,
+        *,
+        owner_id: str,
+        run_id: str,
+        worker_id: str,
+        fencing_epoch: int,
+        checkpoint: Mapping[str, object],
+        next_attempt_at: Any,
+    ) -> bool:
+        owner = _require_owner(owner_id)
+        run_uuid = parse_run_id(run_id)
+        if run_uuid is None:
+            return False
+
+        async def _operation(conn: Any) -> bool:
+            value = await conn.fetchval(
+                _DEFER_RUN,
+                owner,
+                run_uuid,
+                worker_id,
+                fencing_epoch,
+                json.dumps(dict(checkpoint), ensure_ascii=False),
+                next_attempt_at,
+            )
+            return value is not None
+
+        return await self._run_write(_operation)
+
+    async def resume_repair(self, *, owner_id: str, run_id: str) -> bool:
+        """Explicitly make one waiting mutation claimable again without a new Run."""
+        owner = _require_owner(owner_id)
+        run_uuid = parse_run_id(run_id)
+        if run_uuid is None:
+            return False
+
+        async def _operation(conn: Any) -> bool:
+            value = await conn.fetchval(_RESUME_REPAIR, owner, run_uuid)
+            return value is not None
+
+        return await self._run_write(_operation)
+
+    async def wait_for_repair(
+        self,
+        *,
+        owner_id: str,
+        run_id: str,
+        worker_id: str,
+        fencing_epoch: int,
+        checkpoint: Mapping[str, object],
+    ) -> bool:
+        owner = _require_owner(owner_id)
+        run_uuid = parse_run_id(run_id)
+        if run_uuid is None:
+            return False
+
+        async def _operation(conn: Any) -> bool:
+            value = await conn.fetchval(
+                _WAIT_FOR_REPAIR,
+                owner,
+                run_uuid,
+                worker_id,
+                fencing_epoch,
+                json.dumps(dict(checkpoint), ensure_ascii=False),
+            )
+            return value is not None
 
         return await self._run_write(_operation)
 
@@ -3516,10 +4250,10 @@ class PGAnswerRunStore(PostgresOperationRunner):
                         None,
                         None,
                         "done",
-                        "{}",
+                        json.dumps({"status": "cancelled"}),
                     )
                 poisoned = await conn.fetch(
-                    "SELECT owner_id, run_id FROM dlightrag_answer_runs"
+                    "SELECT owner_id, run_id FROM dlightrag_runs"
                     " WHERE status = 'running' AND lease_expires_at < NOW()"
                     " AND reclaims_without_progress >= $1"
                     " AND cancel_requested_at IS NULL"
@@ -3540,7 +4274,12 @@ class PGAnswerRunStore(PostgresOperationRunner):
                         RUN_ABANDONED_ERROR_KIND,
                         _ABANDONED_ERROR_MESSAGE,
                         "error",
-                        "{}",
+                        json.dumps(
+                            {
+                                "kind": RUN_ABANDONED_ERROR_KIND,
+                                "message": _ABANDONED_ERROR_MESSAGE,
+                            }
+                        ),
                     )
                 return SweepOutcome(cancelled=int(cancelled), abandoned=int(abandoned))
 
@@ -3549,9 +4288,7 @@ class PGAnswerRunStore(PostgresOperationRunner):
     async def trim_expired_event_logs(self) -> int:
         async def _operation(conn: Any) -> int:
             async with conn.transaction():
-                rows = await conn.fetch(
-                    _SELECT_TRIMMABLE_RUNS, self._retention_seconds, _BATCH_LIMIT
-                )
+                rows = await conn.fetch(_SELECT_TRIMMABLE_RUNS, _BATCH_LIMIT)
                 if not rows:
                     return 0
                 owners = [row["owner_id"] for row in rows]
@@ -3567,7 +4304,7 @@ class PGAnswerRunStore(PostgresOperationRunner):
 
         async def _operation(conn: Any) -> RunDeletion:
             async with conn.transaction():
-                rows = await conn.fetch(_SELECT_EXPIRED_RUNS, self._retention_seconds, _BATCH_LIMIT)
+                rows = await conn.fetch(_SELECT_EXPIRED_RUNS, _BATCH_LIMIT)
                 if not rows:
                     return RunDeletion(runs=0, artifacts=0)
                 owners = [row["owner_id"] for row in rows]
@@ -3594,14 +4331,14 @@ def _require_replay_match(
         raise IdempotencyKeyConflict(
             f"owner {owner} reused idempotency key {key} with different normalized input"
         )
-    return RunCreation(run=answer_run_record(row), replayed=True)
+    return RunCreation(run=run_record(row), replayed=True)
 
 
 __all__ = [
-    "ANSWER_RUN_MIGRATIONS",
-    "ANSWER_RUN_MIGRATION_SCOPE",
-    "ANSWER_RUN_SCHEMA_TABLES",
-    "PGAnswerRunStore",
-    "answer_run_columns",
-    "answer_run_record",
+    "RUN_MIGRATIONS",
+    "RUN_MIGRATION_SCOPE",
+    "RUN_SCHEMA_TABLES",
+    "PGRunStore",
+    "run_columns",
+    "run_record",
 ]

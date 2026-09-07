@@ -15,20 +15,35 @@ from dlightrag.adapters.http.client import (
     MAX_RECONNECT_ATTEMPTS,
     AnswerArtifact,
     AnswerAttachmentUpload,
-    AnswerRunCancelledError,
     AnswerRunClient,
-    AnswerRunFailedError,
+    RunCancelledError,
+    RunFailedError,
     parse_sse_frames,
 )
 
 _DESCRIPTOR = {
     "run_id": "run-1",
+    "run_kind": "answer",
+    "lane": "query",
     "status": "queued",
-    "status_url": "/answer/run-1",
-    "events_url": "/answer/run-1/events",
-    "cancel_url": "/answer/run-1",
+    "status_url": "/runs/run-1",
+    "events_url": "/runs/run-1/events",
+    "cancel_url": "/runs/run-1",
 }
 _RESULT = {"answer": "grounded", "contexts": {"chunks": []}}
+_RETRIEVAL_DESCRIPTOR = {**_DESCRIPTOR, "run_kind": "retrieval"}
+_CORPUS_DESCRIPTOR = {
+    **_DESCRIPTOR,
+    "run_kind": "corpus_mutation",
+    "lane": "corpus_mutation",
+}
+_CORPUS_RESULT = {"action": "ingest", "document_count": 1, "documents": []}
+_RETRIEVAL_RESULT = {
+    "contexts": {"chunks": [{"chunk_id": "c1", "content": "evidence"}]},
+    "sources": [{"id": "1", "download_url": None}],
+    "trace": {"count": 1},
+    "image_descriptions": [],
+}
 
 
 @pytest.fixture(autouse=True)
@@ -107,7 +122,177 @@ async def test_answer_creates_then_follows_events_to_the_result() -> None:
 
     assert result.answer == _RESULT["answer"]
     assert tokens == ["grou"]
-    assert seen == ["/answer", "/answer/run-1/events"]
+    assert seen == ["/answer", "/runs/run-1/events"]
+
+
+async def test_retrieve_exposes_create_handle_and_explicit_wait_path() -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/events"):
+            return httpx.Response(
+                200,
+                text=_frame(
+                    1,
+                    "done",
+                    {"status": "succeeded", "result": _RETRIEVAL_RESULT},
+                ),
+            )
+        return httpx.Response(202, json=_RETRIEVAL_DESCRIPTOR)
+
+    http, runs = _client(handler)
+    async with http:
+        descriptor = await runs.create_retrieve({"query": "q"}, idempotency_key="retrieve-1")
+        result = await runs.wait_retrieve(descriptor.run_id)
+
+    assert descriptor.run_kind == "retrieval"
+    assert result.contexts["chunks"][0]["content"] == "evidence"
+    assert result.trace == {"count": 1}
+    assert requests[0].url.path == "/retrieve"
+    assert requests[0].headers["Idempotency-Key"] == "retrieve-1"
+    assert requests[1].url.path == "/runs/run-1/events"
+
+
+async def test_retrieve_convenience_creates_once_then_waits() -> None:
+    seen: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path.endswith("/events"):
+            return httpx.Response(
+                200,
+                text=_frame(
+                    1,
+                    "done",
+                    {"status": "succeeded", "result": _RETRIEVAL_RESULT},
+                ),
+            )
+        return httpx.Response(202, json=_RETRIEVAL_DESCRIPTOR)
+
+    http, runs = _client(handler)
+    async with http:
+        result = await runs.retrieve({"query": "q"})
+
+    assert result.sources[0]["id"] == "1"
+    assert seen == ["/retrieve", "/runs/run-1/events"]
+
+
+async def test_corpus_ingest_uses_the_run_native_route_and_waits_for_terminal_result() -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "POST":
+            return httpx.Response(202, json=_CORPUS_DESCRIPTOR)
+        return httpx.Response(
+            200,
+            json={**_CORPUS_DESCRIPTOR, "status": "succeeded", "result": _CORPUS_RESULT},
+        )
+
+    http, runs = _client(handler)
+    async with http:
+        result = await runs.ingest(
+            {"source_type": "local", "path": "docs", "workspace": "default"},
+            idempotency_key="ingest-1",
+        )
+
+    assert result == _CORPUS_RESULT
+    assert [request.url.path for request in requests] == [
+        "/runs/corpus/ingest",
+        "/runs/run-1",
+    ]
+    assert requests[0].headers["Idempotency-Key"] == "ingest-1"
+
+
+async def test_corpus_wait_returns_waiting_for_repair_status_without_polling_forever() -> None:
+    requests: list[httpx.Request] = []
+    waiting = {
+        **_CORPUS_DESCRIPTOR,
+        "status": "running",
+        "phase": "waiting_for_repair",
+        "repair_reason": "Verify the upstream deletion outcome.",
+        "repair_remedy": "Repair it, then resume this Run.",
+    }
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=waiting)
+
+    http, runs = _client(handler)
+    async with http:
+        result = await runs.wait_corpus_mutation("run-1")
+
+    assert result == waiting
+    assert [request.url.path for request in requests] == ["/runs/run-1"]
+
+
+async def test_http_client_exposes_every_corpus_use_case_through_common_observation() -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "POST":
+            return httpx.Response(202, json=_CORPUS_DESCRIPTOR)
+        return httpx.Response(
+            200,
+            json={**_CORPUS_DESCRIPTOR, "status": "succeeded", "result": _CORPUS_RESULT},
+        )
+
+    http, runs = _client(handler)
+    async with http:
+        assert (await runs.replace({"workspace": "default"}))["action"] == "ingest"
+        assert (await runs.delete({"workspace": "default", "document_ids": ["doc-1"]}))[
+            "action"
+        ] == "ingest"
+        assert (await runs.retry({"workspace": "default", "selector": "all_retryable"}))[
+            "action"
+        ] == "ingest"
+        assert (await runs.reset({"workspace": "default"}))["action"] == "ingest"
+        assert (await runs.resume("run-1"))["action"] == "ingest"
+
+    assert [request.url.path for request in requests] == [
+        "/runs/corpus/replace",
+        "/runs/run-1",
+        "/runs/corpus/delete",
+        "/runs/run-1",
+        "/runs/corpus/retry",
+        "/runs/run-1",
+        "/runs/corpus/reset",
+        "/runs/run-1",
+        "/runs/run-1/resume",
+        "/runs/run-1",
+    ]
+
+
+async def test_http_client_uploads_one_source_then_observes_its_run() -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "POST":
+            assert b'filename="report.pdf"' in request.content
+            assert b'name="content_sha256"' in request.content
+            return httpx.Response(202, json=_CORPUS_DESCRIPTOR)
+        return httpx.Response(
+            200,
+            json={**_CORPUS_DESCRIPTOR, "status": "succeeded", "result": _CORPUS_RESULT},
+        )
+
+    http, runs = _client(handler)
+    async with http:
+        result = await runs.upload(
+            filename="report.pdf",
+            content=b"content",
+            workspace="default",
+            content_sha256="a" * 64,
+        )
+
+    assert result == _CORPUS_RESULT
+    assert [request.url.path for request in requests] == [
+        "/runs/corpus/ingest/upload",
+        "/runs/run-1",
+    ]
 
 
 async def test_multipart_create_sends_the_request_part_and_files() -> None:
@@ -294,7 +479,7 @@ async def test_cancelling_the_wait_detaches_without_cancelling_the_run() -> None
         with pytest.raises(asyncio.CancelledError):
             await waiting
 
-    assert calls == ["POST /answer", "GET /answer/run-1/events"]
+    assert calls == ["POST /answer", "GET /runs/run-1/events"]
 
 
 async def test_a_failed_run_raises_its_public_kind() -> None:
@@ -307,10 +492,11 @@ async def test_a_failed_run_raises_its_public_kind() -> None:
 
     http, runs = _client(handler)
     async with http:
-        with pytest.raises(AnswerRunFailedError) as raised:
+        with pytest.raises(RunFailedError) as raised:
             await runs.answer({"query": "q"})
 
     assert raised.value.error_kind == "run_abandoned"
+    assert raised.value.public_message == "gone"
 
 
 async def test_a_cancelled_run_raises_cancellation() -> None:
@@ -321,7 +507,7 @@ async def test_a_cancelled_run_raises_cancellation() -> None:
 
     http, runs = _client(handler)
     async with http:
-        with pytest.raises(AnswerRunCancelledError):
+        with pytest.raises(RunCancelledError):
             await runs.answer({"query": "q"})
 
 
@@ -356,7 +542,7 @@ async def test_cancel_is_a_plain_delete() -> None:
     async with http:
         assert (await runs.cancel("run-1"))["status"] == "cancelled"
 
-    assert seen == {"method": "DELETE", "path": "/answer/run-1"}
+    assert seen == {"method": "DELETE", "path": "/runs/run-1"}
 
 
 async def test_agent_control_methods_project_the_shared_rest_contract() -> None:
@@ -379,7 +565,6 @@ async def test_agent_control_methods_project_the_shared_rest_contract() -> None:
         await runs.steer("run-1", "focus")
         await runs.follow_up("run-1", "next")
         await runs.fork("run-1", "branch")
-        await runs.resume("run-1")
         await runs.transcript("run-1")
         children = await runs.children("run-1")
 
@@ -391,7 +576,6 @@ async def test_agent_control_methods_project_the_shared_rest_contract() -> None:
         ("POST", "/answer/run-1/steer"),
         ("POST", "/answer/run-1/follow-up"),
         ("POST", "/answer/run-1/fork"),
-        ("POST", "/answer/run-1/resume"),
         ("GET", "/answer/run-1/transcript"),
         ("GET", "/answer/run-1/children"),
     ]

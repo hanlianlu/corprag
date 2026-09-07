@@ -45,6 +45,8 @@ class PGLightRAGContractGuard:
         "aquery_data",
         "apipeline_enqueue_documents",
         "apipeline_process_enqueue_documents",
+        "adelete_by_doc_id",
+        "aget_docs_by_track_id",
     )
     _REQUIRED_ATTRIBUTES = ("chunks_vdb", "text_chunks", "full_docs", "doc_status")
     _REQUIRED_DOC_STATUS_CALLABLES = (
@@ -53,7 +55,7 @@ class PGLightRAGContractGuard:
     )
     _CHUNKS_VDB_COLUMNS = {"id", "content", "content_vector", "workspace", "file_path"}
     _BM25_TABLE = "lightrag_doc_chunks"
-    _BM25_COLUMNS = {"id", "content", "file_path"}
+    _BM25_COLUMNS = {"id", "content", "file_path", "workspace"}
     _CLIENT_MANAGER_CONFIG_PARAMS = ("vector_storage",)
     _CLIENT_MANAGER_BUILD_SIGNATURE_PARAMS = ("config", "vector_storage")
     _CLIENT_MANAGER_ASSERT_SIGNATURE_PARAMS = ("requested_signature",)
@@ -87,19 +89,22 @@ class PGLightRAGContractGuard:
                 + "\n".join(f"  - {error}" for error in errors)
             )
 
-    async def verify_all(self) -> None:
-        """Run all PostgreSQL checks, collect errors, raise if any."""
+    async def verify_all(self, *, vector_storage: str = "PGVectorStorage") -> None:
+        """Validate the PostgreSQL KV/BM25 leg and the selected vector contract."""
         errors: list[str] = []
-        self._require_pg_backend(errors)
+        self._require_pg_text_chunks(errors)
         if not errors:
-            await self._check_chunks_table_schema(errors)
             await self._check_bm25_table(errors)
+            if vector_storage == "PGVectorStorage":
+                self._require_pg_vector(errors)
+                if not errors:
+                    await self._check_chunks_table_schema(errors)
         if errors:
             raise RuntimeError(
                 f"LightRAG contract check failed "
                 f"({len(errors)} issue(s)):\n" + "\n".join(f"  - {e}" for e in errors)
             )
-        logger.info("LightRAG contract check passed (backend=postgresql)")
+        logger.info("LightRAG contract check passed (vector=%s)", vector_storage)
 
     def verify_read_only_attach_contract(self) -> None:
         """Validate the private surfaces the read-only attach adapter relies on."""
@@ -111,18 +116,31 @@ class PGLightRAGContractGuard:
                 f"({len(errors)} issue(s)):\n" + "\n".join(f"  - {e}" for e in errors)
             )
 
-    def _require_pg_backend(self, errors: list[str]) -> None:
-        """Require chunks_vdb to expose PostgreSQL pool access."""
+    def _require_pg_text_chunks(self, errors: list[str]) -> None:
+        """Require the fixed PostgreSQL chunk-KV leg used by BM25 and metadata reads."""
+        chunks = getattr(self._lightrag, "text_chunks", None)
+        if chunks is None:
+            errors.append("text_chunks missing (PGKVStorage required)")
+            return
+        db = getattr(chunks, "db", None)
+        if db is None:
+            errors.append("text_chunks.db missing (PGKVStorage required)")
+            return
+        if not hasattr(db, "pool") or getattr(db, "pool", None) is None:
+            errors.append("text_chunks.db.pool missing (PGKVStorage required)")
+
+    def _require_pg_vector(self, errors: list[str]) -> None:
+        """Require PostgreSQL vector internals only for explicit PGVectorStorage."""
         vdb = getattr(self._lightrag, "chunks_vdb", None)
         if vdb is None:
-            errors.append("chunks_vdb missing (PostgreSQL backend required)")
+            errors.append("chunks_vdb missing (PGVectorStorage required)")
             return
         db = getattr(vdb, "db", None)
         if db is None:
-            errors.append("chunks_vdb.db missing (PostgreSQL backend required)")
+            errors.append("chunks_vdb.db missing (PGVectorStorage required)")
             return
         if not hasattr(db, "pool") or getattr(db, "pool", None) is None:
-            errors.append("chunks_vdb.db.pool missing (PostgreSQL backend required)")
+            errors.append("chunks_vdb.db.pool missing (PGVectorStorage required)")
 
     async def _check_chunks_table_schema(self, errors: list[str]) -> None:
         """Check A: chunks_vdb table has all columns we depend on."""
@@ -144,8 +162,8 @@ class PGLightRAGContractGuard:
             errors.append(f"chunks_vdb table '{table_name}' missing columns: {missing}")
 
     async def _check_bm25_table(self, errors: list[str]) -> None:
-        """Check B: BM25 table exists with required columns."""
-        pool = self._lightrag.chunks_vdb.db.pool
+        """Check B: the PostgreSQL text-chunk/BM25 table has required columns."""
+        pool = self._lightrag.text_chunks.db.pool
         async with pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT column_name FROM information_schema.columns "

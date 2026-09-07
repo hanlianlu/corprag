@@ -215,13 +215,25 @@ def test_invalid_visual_asset_bounds_are_rejected(values: dict[str, Any]) -> Non
         VisualAssetSettings(**values)
 
 
-def test_postgres_only_storage_literals_and_vector_value_type() -> None:
+def test_storage_defaults_and_only_explicit_milvus_vector_alternative() -> None:
     storage = LightRAGStorageSettings(vector_index_type="HNSW_HALFVEC")
     assert storage.vector_storage == "PGVectorStorage"
     assert storage.graph_storage == "PGTableGraphStorage"
     assert storage.kv_storage == "PGKVStorage"
-    with pytest.raises(ValidationError):
-        LightRAGStorageSettings(vector_storage="QdrantStorage")  # type: ignore[arg-type]
+    assert storage.doc_status_storage == "PGDocStatusStorage"
+    assert (
+        LightRAGStorageSettings(vector_storage="MilvusVectorDBStorage").vector_storage
+        == "MilvusVectorDBStorage"
+    )
+    for values in (
+        {"vector_storage": "QdrantStorage"},
+        {"graph_storage": "PGGraphStorage"},
+        {"graph_storage": "AGEStorage"},
+        {"kv_storage": "RedisKVStorage"},
+        {"doc_status_storage": "JsonDocStatusStorage"},
+    ):
+        with pytest.raises(ValidationError):
+            LightRAGStorageSettings(**values)  # type: ignore[arg-type]
 
 
 def test_vector_and_pool_defaults_export_lightrag_environment(
@@ -236,6 +248,89 @@ def test_vector_and_pool_defaults_export_lightrag_environment(
     assert os.environ["POSTGRES_HNSW_EF"] == "256"
     assert os.environ["POSTGRES_VECTOR_INDEX_TYPE"] == "HNSW_HALFVEC"
     assert os.environ["POSTGRES_MAX_CONNECTIONS"] == "16"
+
+
+def test_deployment_workspace_overrides_inherited_lightrag_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("POSTGRES_WORKSPACE", "inherited-workspace")
+    config = DlightragConfig(deployment=DeploymentSettings(workspace="resolved-workspace"))
+
+    config.apply_lightrag_backend_env(force=True)
+
+    assert os.environ["POSTGRES_WORKSPACE"] == "resolved-workspace"
+
+
+def test_milvus_environment_overrides_only_resolved_bindings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MILVUS_URI", "inherited-uri")
+    monkeypatch.setenv("MILVUS_TOKEN", "inherited-token")
+    monkeypatch.setenv("MILVUS_DB_NAME", "inherited-db")
+    config = DlightragConfig(
+        storage=StorageSettings(
+            lightrag=LightRAGStorageSettings(
+                vector_storage="MilvusVectorDBStorage",
+                milvus_uri="resolved-uri",
+                milvus_db_name="resolved-db",
+            )
+        )
+    )
+
+    config.apply_lightrag_backend_env(force=True)
+
+    assert os.environ["MILVUS_URI"] == "resolved-uri"
+    assert os.environ["MILVUS_DB_NAME"] == "resolved-db"
+    assert os.environ["MILVUS_TOKEN"] == "inherited-token"
+
+
+def test_milvus_reader_and_pg_only_options_are_rejected_without_secret_echo() -> None:
+    secret = "never-echo-this-milvus-token"
+    storage = StorageSettings(
+        lightrag=LightRAGStorageSettings(
+            vector_storage="MilvusVectorDBStorage",
+            milvus_uri="https://milvus.example",
+            milvus_token=secret,
+            milvus_db_name="default",
+        )
+    )
+    with pytest.raises(ValidationError) as raised:
+        DlightragConfig(
+            deployment=DeploymentSettings(service_role="reader"),
+            storage=storage,
+        )
+    assert secret not in str(raised.value)
+
+    with pytest.raises(ValidationError, match="require"):
+        LightRAGStorageSettings(milvus_token=secret)
+
+
+def test_milvus_vector_kwargs_are_bounded_and_exclude_credentials() -> None:
+    with pytest.raises(ValidationError, match="unsupported keys"):
+        LightRAGStorageSettings(
+            vector_storage="MilvusVectorDBStorage",
+            vector_db_kwargs={"unknown_index_knob": 1},
+        )
+    with pytest.raises(ValidationError, match="must not contain credentials"):
+        LightRAGStorageSettings(vector_db_kwargs={"token": "secret"})
+    with pytest.raises(ValidationError, match="at most 16"):
+        LightRAGStorageSettings(vector_db_kwargs={f"key_{index}": index for index in range(17)})
+
+
+def test_milvus_rejects_postgres_only_promotion_configuration() -> None:
+    with pytest.raises(ValidationError, match="promotion thresholds require PGVectorStorage"):
+        DlightragConfig(
+            storage=StorageSettings(
+                lightrag=LightRAGStorageSettings(
+                    vector_storage="MilvusVectorDBStorage",
+                    milvus_uri="https://milvus.example",
+                    milvus_db_name="default",
+                )
+            ),
+            corpus=CorpusSettings(
+                promotion={"chunk_threshold": 100},  # type: ignore[arg-type]
+            ),
+        )
 
 
 def test_postgres_ssl_modes_project_to_asyncpg() -> None:
@@ -326,7 +421,8 @@ def test_docling_only_selection_and_sidecar_environment(monkeypatch: pytest.Monk
     config.apply_lightrag_sidecar_env()
     assert config.parser_rules == "*:docling-iteP"
     assert os.environ["DOCLING_ENDPOINT"] == "http://docling:5001"
-    assert "MINERU_LOCAL_ENDPOINT" not in os.environ
+    # Unset optional DlightRAG bindings leave upstream environment behavior untouched.
+    assert os.environ["MINERU_LOCAL_ENDPOINT"] == "stale"
 
 
 def test_mineru_backend_and_vlm_environment_are_canonical(monkeypatch: pytest.MonkeyPatch) -> None:

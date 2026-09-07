@@ -24,8 +24,8 @@ DLIGHTRAG_MODELS__EMBEDDING__API_KEY=...
 DLIGHTRAG_STORAGE__POSTGRES__HOST=postgres
 ```
 
-DlightRAG has eight top-level sections: `deployment`, `storage`, `models`,
-`corpus`, `answer`, `access`, `interfaces`, and `observability`. Removed legacy
+DlightRAG has nine top-level sections: `deployment`, `storage`, `models`,
+`corpus`, `answer`, `runtime`, `access`, `interfaces`, and `observability`. Removed legacy
 flat names are rejected rather than aliased. The ownership decision is recorded
 in [ADR 0006](adr/0006-configuration-ownership-and-deployment-bindings.md).
 
@@ -431,7 +431,9 @@ objects. See [Sources](interfaces.md#sources).
 
 ## PostgreSQL And Process Role
 
-DlightRAG requires PostgreSQL 18. Backend literals normally stay at defaults:
+DlightRAG requires PostgreSQL 18 for KV, graph, document status, BM25, metadata,
+and Operational State. LightRAG's deployment-static storage names normally stay
+at these exact defaults:
 
 ```yaml
 storage:
@@ -447,13 +449,40 @@ storage:
 ```
 
 The domain and LightRAG pools are separate; multiply their sum by process count
-and stay below PostgreSQL `max_connections`.
+and stay below PostgreSQL `max_connections`. `kv_storage`, `graph_storage`, and
+`doc_status_storage` are fixed to the values above. The only supported vector
+alternative is LightRAG's `MilvusVectorDBStorage`; `PGGraphStorage`, AGE, Qdrant,
+and other combinations are rejected rather than substituted.
+
+For a writer deployment using Milvus or a Milvus-compatible Zilliz endpoint,
+install the deterministic client extra (`dlightrag[milvus]`) and select:
+
+```yaml
+storage:
+  lightrag:
+    vector_storage: MilvusVectorDBStorage
+    milvus_uri: https://example-compatible-endpoint
+    milvus_db_name: default
+```
+
+Keep `milvus_token` in `DLIGHTRAG_STORAGE__LIGHTRAG__MILVUS_TOKEN`. Resolved
+DlightRAG values overwrite inherited `MILVUS_URI`, `MILVUS_TOKEN`, and
+`MILVUS_DB_NAME`; an unset optional binding leaves the corresponding upstream
+environment behavior untouched. DlightRAG never connects to Milvus for health
+checks and never creates, copies, or drops Milvus infrastructure itself. Zilliz
+uses `MilvusVectorDBStorage`, not a separate storage class. Reader processes
+must use `PGVectorStorage`: LightRAG 1.5.7 has no public nonmutating reader attach
+for an external vector adapter.
 
 | Field | Default | Meaning |
 |---|---|---|
 | `deployment.service_role` | `writer` | `writer` or `reader` |
 | `deployment.workspace` | `default` | Default workspace |
 | `deployment.working_dir` | `./dlightrag_storage` | Corpus/input/artifact root; resolved absolute |
+| `storage.lightrag.vector_storage` | `PGVectorStorage` | `PGVectorStorage` or explicit `MilvusVectorDBStorage` |
+| `storage.lightrag.milvus_uri` | unset | Optional `MILVUS_URI` bridge; may be a Milvus-compatible Zilliz URI |
+| `storage.lightrag.milvus_token` | unset | Optional secret `MILVUS_TOKEN` bridge |
+| `storage.lightrag.milvus_db_name` | unset | Optional `MILVUS_DB_NAME` bridge |
 | `storage.postgres.host` | `localhost` | PostgreSQL host |
 | `storage.postgres.port` | `5432` | PostgreSQL port |
 | `storage.postgres.user` | `dlightrag` | Login role |
@@ -479,12 +508,17 @@ Multi-host deployments need one shared POSIX `deployment.working_dir` mounted at
 the same absolute path. Production sizing, SSL, indexes, and role details are in
 [PostgreSQL](postgresql.md).
 
-## Ingestion Concurrency And Limits
+## RunRuntime, Ingestion Concurrency, And Limits
 
 | Field | Default | Scope |
 |---|---|---|
 | `models.max_concurrency` | `16` | All provider requests in one process |
-| `answer.runtime.answer_worker_concurrency` | `16` | Durable answer runs per process |
+| `runtime.query.worker_concurrency` | `16` | Query-lane runs per process |
+| `runtime.query.max_active_runs` | `16` | Query-lane claims across the deployment |
+| `runtime.query.max_nonterminal_runs` | `30000` | Query-lane durable admission fuse |
+| `runtime.corpus_mutation.worker_concurrency` | `2` | Validated Corpus Mutation Run workers per writer process |
+| `runtime.corpus_mutation.max_active_runs` | `2` | Validated Corpus Mutation claims across the deployment |
+| `runtime.corpus_mutation.max_nonterminal_runs` | `1000` | Validated Corpus Mutation durable admission fuse |
 | `corpus.ingestion.pipeline.max_concurrency` | `16` | One workspace's LightRAG pipeline |
 | `models.embedding.max_concurrency` | `16` | Embedding calls |
 | `models.embedding.batch_size` | `64` | LightRAG embedding batch size |
@@ -494,7 +528,6 @@ the same absolute path. Production sizing, SSL, indexes, and role details are in
 | `corpus.ingestion.max_upload_bytes` | `104857600` | One ingest file |
 | `corpus.ingestion.url_max_bytes` | `104857600` | One URL download |
 | `corpus.ingestion.url_private_host_allowlist` | `[]` | Explicit private URL hosts |
-| `corpus.ingestion.timeout` | unset | In-process wait only; timeout does not cancel the job |
 | `interfaces.max_upload_size_mb` | `512` | General multipart receive cap |
 
 Advanced stage defaults:
@@ -536,7 +569,7 @@ Advanced fields:
 
 | Field | Default | Meaning |
 |---|---|---|
-| `timeout` | `300` | Caller-awaited retrieval seconds; does not wrap durable answers |
+| `timeout` | `300` | Claimed top-level Retrieval planning/search seconds; excludes queue residence and does not wrap Answer Runs |
 | `bm25_k1` | `1.2` | BM25 term-frequency saturation |
 | `bm25_b` | `0.75` | BM25 length normalization |
 | `bm25_profiles` | built-in language set | pg_textsearch index signatures and language labels |
@@ -558,13 +591,41 @@ are `lease_seconds: 1800`, `retry_backoff_seconds: 600`, and
 `claim_poll_seconds: 5.0`. Visual routes use
 `corpus.visual_assets.thumb_max_px: 300` and `thumb_cache_size: 256`.
 
+## RunRuntime Lanes And Retention
+
+```yaml
+runtime:
+  query:
+    worker_concurrency: 16
+    max_active_runs: 16
+    max_nonterminal_runs: 30000
+  corpus_mutation:
+    worker_concurrency: 2
+    max_active_runs: 2
+    max_nonterminal_runs: 1000
+  run_retention_days: 365
+```
+
+One RunRuntime schedules top-level Retrieval and Answer Runs on the Query Lane
+and all ingest, replace, exact delete, retry, and reset Runs on the Corpus
+Mutation Lane. Each lane has a per-process worker bound, a deployment-wide
+active-claim bound, and a deployment-wide nonterminal admission fuse. The three
+Corpus Mutation defaults above are accepted bounded safety values. The
+[Slice 6 validation report](validation/run-runtime-slice-6.md) records the
+10k-client fake-executor campaign, full-fuse rejection, active ceilings,
+measurements, and limitations.
+
+`run_retention_days` is the per-Run retention selection for terminal Answer
+Runs, their event logs, linked Web turns, and unreferenced Run blobs; the default
+is 365 days. Top-level Retrieval and Corpus Mutation Runs each use a fixed
+seven-day selection. Nonterminal Runs are not retention-pruned, and Conversation
+rows do not extend model history. Full lifecycle rules are in
+[RunRuntime and durable query execution](durable-answer-runs.md).
+
 ## Answer Generation And Attachments
 
 ```yaml
 answer:
-  runtime:
-    answer_worker_concurrency: 16
-    answer_run_retention_days: 365
   generation:
     max_images: 12
     max_attachments: 6
@@ -583,10 +644,6 @@ Attachments are run-scoped Resources. Full bytes do not enter model context;
 text is decoded/converted and figures are inspected on demand. `query_images`
 is a separate retrieve-only path limited to three current images. The final
 answer image count is clamped to the query model's discovered capability.
-
-`answer_run_retention_days` is the floor for terminal runs, event logs, linked
-Web turns, and unreferenced run blobs. Conversation rows do not extend model
-history. Full lifecycle rules are in [Durable Answer Runs](durable-answer-runs.md).
 
 ## Research Agent
 
@@ -779,8 +836,15 @@ storage:
     hnsw_m: 32
     hnsw_ef_construction: 256
     hnsw_ef_search: 256
+    # Bounded scalar adapter options. Milvus accepts only LightRAG's documented
+    # index/metric/HNSW/SQ/IVF keys; credentials do not belong here.
     vector_db_kwargs: {}
 ```
+
+`vector_db_kwargs` accepts at most 16 scalar entries and 4096 encoded bytes.
+Secrets and endpoint URIs are rejected from this mapping. Milvus visual-fusion
+vector overwrite and PostgreSQL hot-workspace promotion are unsupported, and
+those combinations fail deterministically.
 
 An empty `kg_entity_types` uses LightRAG's general taxonomy. For stronger domain
 control, set `corpus.extraction.entity_type_prompt_file` to a file under

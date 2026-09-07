@@ -187,7 +187,6 @@ def corpus_admin_settings(config: DlightragConfig) -> CorpusAdminSettings:
         default_display_name=config.deployment.workspace,
         default_embedding_model=config.models.embedding.model,
         input_root=config.input_dir_path,
-        ingest_timeout_seconds=config.corpus.ingestion.timeout,
         read_only=config.is_reader,
     )
 

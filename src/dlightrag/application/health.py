@@ -1,13 +1,43 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
-"""Process health state shared by composition and status interfaces."""
+"""Bounded process/component health and Operational State readiness."""
 
 from __future__ import annotations
 
 import asyncio
 import time
 from collections.abc import Awaitable, Callable, Mapping
+from typing import Literal
 
 type ReadinessProbe = Callable[[], Awaitable[str | None]]
+type HealthComponentName = Literal[
+    "process",
+    "operational_state",
+    "run_coordinator",
+    "cancellation_listener",
+    "corpus_storage",
+    "parser",
+    "providers",
+]
+type HealthComponentStatus = Literal["healthy", "degraded", "starting", "unknown", "stopped"]
+
+_COMPONENT_ORDER: tuple[HealthComponentName, ...] = (
+    "process",
+    "operational_state",
+    "run_coordinator",
+    "cancellation_listener",
+    "corpus_storage",
+    "parser",
+    "providers",
+)
+_COMPONENT_DETAILS: dict[HealthComponentName, str] = {
+    "process": "Process is stopping",
+    "operational_state": "Operational State unavailable",
+    "run_coordinator": "Run coordinator unavailable",
+    "cancellation_listener": "Run cancellation listener unavailable",
+    "corpus_storage": "Corpus storage unavailable",
+    "parser": "Document parser unavailable",
+    "providers": "Model providers unavailable",
+}
 
 
 class _ReadinessCache:
@@ -47,7 +77,7 @@ class _ReadinessCache:
 
 
 class ApplicationHealth:
-    """Own process state and aggregate it with one injected readiness probe."""
+    """Own liveness, a fixed component view, and control-plane readiness."""
 
     def __init__(
         self,
@@ -58,9 +88,16 @@ class ApplicationHealth:
         self._readiness_probe = readiness_probe
         self._readiness = _ReadinessCache(readiness_cache_seconds)
         self._ready = False
-        self._degraded = False
         self._closed = False
-        self._warnings: list[str] = []
+        self._components: dict[HealthComponentName, HealthComponentStatus] = {
+            "process": "healthy",
+            "operational_state": "starting",
+            "run_coordinator": "starting",
+            "cancellation_listener": "starting",
+            "corpus_storage": "unknown",
+            "parser": "unknown",
+            "providers": "unknown",
+        }
         self._answer_image_capability: dict[str, object] = {
             "status": "unknown",
             "effective_max_images": 0,
@@ -74,7 +111,7 @@ class ApplicationHealth:
 
     @property
     def is_degraded(self) -> bool:
-        return self._degraded
+        return any(status == "degraded" for status in self._components.values())
 
     @property
     def is_closed(self) -> bool:
@@ -82,35 +119,76 @@ class ApplicationHealth:
 
     @property
     def warnings(self) -> tuple[str, ...]:
-        return tuple(self._warnings)
+        """Return at most one fixed public detail for each known component."""
+        return tuple(
+            _COMPONENT_DETAILS[name]
+            for name in _COMPONENT_ORDER
+            if self._components[name] == "degraded"
+        )
+
+    @property
+    def components(self) -> Mapping[str, Mapping[str, str]]:
+        """Return the bounded, I/O-free public component projection."""
+        return {
+            name: {
+                "status": status,
+                **(
+                    {"detail": _COMPONENT_DETAILS[name]}
+                    if status in {"degraded", "stopped"}
+                    else {}
+                ),
+            }
+            for name in _COMPONENT_ORDER
+            if (status := self._components[name])
+        }
 
     @property
     def answer_image_capability(self) -> Mapping[str, object]:
         return dict(self._answer_image_capability)
 
     def add_warning(self, warning: str) -> None:
-        if warning and warning not in self._warnings:
-            self._warnings.append(warning)
+        """Compatibility shim: record a bounded generic dependency warning."""
+        if warning:
+            self.mark_component_degraded("corpus_storage")
+
+    def mark_component_degraded(self, component: HealthComponentName) -> None:
+        if self._closed or component == "process":
+            return
+        self._components[component] = "degraded"
+        if component == "operational_state":
+            self._ready = False
+            self._readiness.invalidate()
+
+    def mark_component_healthy(self, component: HealthComponentName) -> None:
+        if self._closed:
+            return
+        self._components[component] = "healthy"
 
     def mark_ready(self) -> None:
+        """Mark only Operational State admission ready; keep dependency degradation."""
         if self._closed:
             return
         self._ready = True
-        self._degraded = False
+        self._components["operational_state"] = "healthy"
         self._readiness.invalidate()
 
-    def mark_degraded(self, warning: str | None = None) -> None:
+    def mark_not_ready(self) -> None:
         if self._closed:
             return
         self._ready = False
-        self._degraded = True
-        if warning:
-            self.add_warning(warning)
+        self._components["operational_state"] = "degraded"
         self._readiness.invalidate()
+
+    def mark_degraded(self, warning: str | None = None) -> None:
+        """Compatibility transition for a non-authoritative dependency outage."""
+        if self._closed:
+            return
+        self.mark_component_degraded("corpus_storage")
 
     def mark_closed(self) -> None:
         self._ready = False
         self._closed = True
+        self._components["process"] = "stopped"
         self._readiness.invalidate()
 
     def set_answer_image_capability(self, summary: Mapping[str, object]) -> None:
@@ -125,4 +203,9 @@ class ApplicationHealth:
         return await self._readiness.detail(self._readiness_probe)
 
 
-__all__ = ["ApplicationHealth", "ReadinessProbe"]
+__all__ = [
+    "ApplicationHealth",
+    "HealthComponentName",
+    "HealthComponentStatus",
+    "ReadinessProbe",
+]

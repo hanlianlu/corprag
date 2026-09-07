@@ -28,11 +28,13 @@ from httpx import ASGITransport, AsyncClient
 
 from dlightrag.adapters.http.rest.auth import get_current_user
 from dlightrag.adapters.http.server import create_app
-from dlightrag.adapters.postgres.answer.answer_runs import PGAnswerRunStore
+from dlightrag.adapters.postgres.runtime import PGRunBlobStore
+from dlightrag.adapters.postgres.runtime.run_store import PGRunStore
 from dlightrag.application.access import UserContext, owner_id_from_user
 from dlightrag.application.answer_runs import AnswerService
 from dlightrag.application.answer_runs.capabilities import AnswerCapabilities, RequestModelContext
 from dlightrag.application.config import DlightragConfig, set_config
+from dlightrag.application.runs import RunService
 from dlightrag.engine.ai.capacity import ModelProfile
 from dlightrag.engine.ai.fingerprints import ModelFingerprint
 from dlightrag.engine.ai.settings import (
@@ -98,8 +100,8 @@ async def pool() -> AsyncIterator[Any]:
 
 
 @pytest.fixture
-async def store(pool: Any) -> PGAnswerRunStore:
-    created = PGAnswerRunStore(pool=pool)
+async def store(pool: Any) -> PGRunStore:
+    created = PGRunStore(pool=pool)
     await created.initialize()
     return created
 
@@ -107,7 +109,7 @@ async def store(pool: Any) -> PGAnswerRunStore:
 class _StoreScheduler:
     """Wake-free scheduler whose subscriptions replay the real PG event page."""
 
-    def __init__(self, store: PGAnswerRunStore) -> None:
+    def __init__(self, store: PGRunStore) -> None:
         self._store = store
         self.is_started = True
 
@@ -218,15 +220,18 @@ def _fingerprint(role: ModelRole) -> ModelFingerprint:
 class _StoreBackedApplication:
     """Application shell with a real AnswerService wired to the real store."""
 
-    def __init__(self, store: PGAnswerRunStore, config: DlightragConfig) -> None:
+    def __init__(self, store: PGRunStore, config: DlightragConfig) -> None:
         self._store = store
         self.config = config
         self.corpora = SimpleNamespace(
             alist_workspace_records=self._alist_workspace_records,
         )
+        scheduler = _StoreScheduler(store)
+        self.runs = RunService(store=store, scheduler=scheduler)
         self.answers = AnswerService(
             store=store,
-            coordinator=cast(Any, _StoreScheduler(store)),
+            blob_store=PGRunBlobStore(pool=store._operation_pool),  # noqa: SLF001
+            coordinator=cast(Any, scheduler),
             retrieval=cast(Any, _Retrieval()),
             capabilities=cast(Any, _Capabilities()),
             capability_view=cast(Any, _CapabilityView()),
@@ -242,7 +247,7 @@ class _StoreBackedApplication:
 
 
 @pytest.fixture
-def app(store: PGAnswerRunStore, tmp_path) -> Iterator[FastAPI]:
+def app(store: PGRunStore, tmp_path) -> Iterator[FastAPI]:
     config = DlightragConfig(  # pyright: ignore[reportCallIssue, reportArgumentType]
         deployment={
             "working_dir": str(tmp_path / "dlightrag_storage"),
@@ -276,7 +281,7 @@ def _as_user(app: FastAPI, user: UserContext) -> None:
     app.dependency_overrides[get_current_user] = lambda: user
 
 
-async def _claim(store: PGAnswerRunStore, owner: str, run_id: str) -> Any:
+async def _claim(store: PGRunStore, owner: str, run_id: str) -> Any:
     claimed = await store.claim_next(worker_id="worker-1")
     assert claimed is not None
     assert claimed.run.run_id == run_id
@@ -285,7 +290,7 @@ async def _claim(store: PGAnswerRunStore, owner: str, run_id: str) -> Any:
 
 
 async def test_create_persists_the_run_and_its_uploaded_bytes(
-    client: AsyncClient, store: PGAnswerRunStore
+    client: AsyncClient, store: PGRunStore, pool: Any
 ) -> None:
     response = await client.post(
         "/answer",
@@ -303,7 +308,8 @@ async def test_create_persists_the_run_and_its_uploaded_bytes(
     references = await store.list_run_artifacts(owner_id=owner, run_id=run_id)
     assert [reference.filename for reference in references] == ["notes.txt"]
     assert (
-        await store.load_artifact(owner_id=owner, digest=references[0].digest) == b"durable-bytes"
+        await PGRunBlobStore(pool=pool).read(owner_id=owner, digest=references[0].digest)
+        == b"durable-bytes"
     )
 
 
@@ -345,13 +351,13 @@ async def test_another_owner_cannot_read_cancel_or_follow_a_run(
     run_id = (await client.post("/answer", json={"query": "q"})).json()["run_id"]
 
     _as_user(app, _BOB)
-    assert (await client.get(f"/answer/{run_id}")).status_code == 404
-    assert (await client.get(f"/answer/{run_id}/events")).status_code == 404
-    assert (await client.delete(f"/answer/{run_id}")).status_code == 404
+    assert (await client.get(f"/runs/{run_id}")).status_code == 404
+    assert (await client.get(f"/runs/{run_id}/events")).status_code == 404
+    assert (await client.delete(f"/runs/{run_id}")).status_code == 404
 
 
 async def test_reconnect_replays_the_durable_sequence_without_gaps(
-    client: AsyncClient, store: PGAnswerRunStore
+    client: AsyncClient, store: PGRunStore
 ) -> None:
     run_id = (await client.post("/answer", json={"query": "q"})).json()["run_id"]
     owner = owner_id_from_user(_ANON)
@@ -361,15 +367,27 @@ async def test_reconnect_replays_the_durable_sequence_without_gaps(
     await store.record_phase(
         owner_id=owner, run_id=run_id, worker_id=worker, fencing_epoch=epoch, phase="planning"
     )
-    await store.append_token_batch(
-        owner_id=owner, run_id=run_id, worker_id=worker, fencing_epoch=epoch, text="first"
+    await store.append_event(
+        owner_id=owner,
+        run_id=run_id,
+        worker_id=worker,
+        fencing_epoch=epoch,
+        phase=None,
+        event_type="token",
+        payload={"text": "first"},
     )
-    await store.append_token_batch(
-        owner_id=owner, run_id=run_id, worker_id=worker, fencing_epoch=epoch, text="second"
+    await store.append_event(
+        owner_id=owner,
+        run_id=run_id,
+        worker_id=worker,
+        fencing_epoch=epoch,
+        phase=None,
+        event_type="token",
+        payload={"text": "second"},
     )
 
-    full = await client.get(f"/answer/{run_id}/events")
-    resumed = await client.get(f"/answer/{run_id}/events", headers={"Last-Event-ID": "1"})
+    full = await client.get(f"/runs/{run_id}/events")
+    resumed = await client.get(f"/runs/{run_id}/events", headers={"Last-Event-ID": "1"})
 
     assert [line for line in full.text.splitlines() if line.startswith("id: ")] == [
         "id: 1",
@@ -382,24 +400,24 @@ async def test_reconnect_replays_the_durable_sequence_without_gaps(
     ]
 
 
-async def test_cancellation_status_matrix(client: AsyncClient, store: PGAnswerRunStore) -> None:
+async def test_cancellation_status_matrix(client: AsyncClient, store: PGRunStore) -> None:
     queued = (await client.post("/answer", json={"query": "queued"})).json()["run_id"]
     running = (await client.post("/answer", json={"query": "running"})).json()["run_id"]
     owner = owner_id_from_user(_ANON)
 
-    cancelled = await client.delete(f"/answer/{queued}")
+    cancelled = await client.delete(f"/runs/{queued}")
     assert cancelled.status_code == 200
     assert cancelled.json()["status"] == "cancelled"
-    assert (await client.delete(f"/answer/{queued}")).status_code == 200
+    assert (await client.delete(f"/runs/{queued}")).status_code == 200
 
     await _claim(store, owner, running)
-    pending = await client.delete(f"/answer/{running}")
+    pending = await client.delete(f"/runs/{running}")
     assert pending.status_code == 202
     assert pending.json()["cancel_requested"] is True
 
 
 async def test_a_trimmed_event_log_is_gone_but_the_result_remains(
-    client: AsyncClient, store: PGAnswerRunStore, pool: Any
+    client: AsyncClient, store: PGRunStore, pool: Any
 ) -> None:
     run_id = (await client.post("/answer", json={"query": "q"})).json()["run_id"]
     owner = owner_id_from_user(_ANON)
@@ -413,14 +431,14 @@ async def test_a_trimmed_event_log_is_gone_but_the_result_remains(
     )
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE dlightrag_answer_runs SET finished_at = NOW() - INTERVAL '370 days' "
-            "WHERE run_id = $1",
+            "UPDATE dlightrag_runs SET finished_at = NOW() - INTERVAL '370 days', "
+            "purge_after = NOW() - INTERVAL '5 days' WHERE run_id = $1",
             uuid.UUID(run_id),
         )
     assert await store.trim_expired_event_logs() == 1
 
-    events = await client.get(f"/answer/{run_id}/events")
-    status = await client.get(f"/answer/{run_id}")
+    events = await client.get(f"/runs/{run_id}/events")
+    status = await client.get(f"/runs/{run_id}")
 
     assert events.status_code == 410
     assert status.status_code == 200
