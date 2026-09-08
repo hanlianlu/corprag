@@ -152,7 +152,11 @@ make mineru-service-stop
 ```
 
 Use `make mineru-api` for foreground operation where a background user service
-is unavailable.
+is unavailable. MinerU title correction is best-effort: the launcher bounds each
+provider attempt by `MINERU_TITLE_AIDED_ATTEMPT_TIMEOUT_SECONDS` (default 60)
+and stops after `MINERU_TITLE_AIDED_MAX_ATTEMPTS` (default 2), then continues
+parsing without corrected title levels. Set overrides in `.env.mineru` and
+restart the service; diagnostics never log the title-aided API key.
 
 Optional Compose Docling CPU:
 

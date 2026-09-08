@@ -10,6 +10,8 @@ load_mineru_env_key MINERU_API_HOST
 load_mineru_env_key MINERU_API_PORT
 load_mineru_env_key MINERU_SERVICE_VENV
 load_mineru_env_key MINERU_HYBRID_EFFORT
+load_mineru_env_key MINERU_TITLE_AIDED_ATTEMPT_TIMEOUT_SECONDS
+load_mineru_env_key MINERU_TITLE_AIDED_MAX_ATTEMPTS
 
 host="${MINERU_API_HOST:-127.0.0.1}"
 port="${MINERU_API_PORT:-8210}"
@@ -35,8 +37,8 @@ EOF
 fi
 
 # Load scripts/mineru/sitecustomize.py at interpreter startup (also inherited by
-# MinerU's spawned worker processes) to raise Pillow's decompression-bomb ceiling
-# so large multi-page document scans parse instead of failing to load.
+# MinerU's spawned worker processes) to apply the supported parser guards,
+# including the image ceiling and bounded title-aided LLM requests.
 export PYTHONPATH="${mineru_script_dir}${PYTHONPATH:+:${PYTHONPATH}}"
 
 exec "$mineru_api" --host "$host" --port "$port" "$@"

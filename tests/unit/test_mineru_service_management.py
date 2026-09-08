@@ -6,6 +6,7 @@ import os
 import plistlib
 import stat
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -123,6 +124,128 @@ def test_title_aided_script_disables_and_scrubs_existing_config(tmp_path: Path) 
     assert config["model-source"] == "huggingface"
     assert config["llm-aided-config"]["other"] == {"keep": True}
     assert config["llm-aided-config"]["title_aided"] == {"enable": False}
+
+
+def test_mineru_sitecustomize_bounds_title_aided_stream_without_leaking_secret(
+    tmp_path: Path,
+) -> None:
+    fake_modules = tmp_path / "fake-modules"
+    (fake_modules / "uvicorn").mkdir(parents=True)
+    (fake_modules / "uvicorn" / "__init__.py").write_text("", encoding="utf-8")
+    (fake_modules / "uvicorn" / "config.py").write_text(
+        "class Config:\n    def __init__(self, *args, **kwargs):\n        self.kwargs = kwargs\n",
+        encoding="utf-8",
+    )
+    (fake_modules / "PIL.py").write_text(
+        "class Image:\n    MAX_IMAGE_PIXELS = 1\n",
+        encoding="utf-8",
+    )
+    (fake_modules / "mineru" / "utils").mkdir(parents=True)
+    (fake_modules / "mineru" / "cli").mkdir(parents=True)
+    for package in (
+        fake_modules / "mineru",
+        fake_modules / "mineru" / "utils",
+        fake_modules / "mineru" / "cli",
+    ):
+        (package / "__init__.py").write_text("", encoding="utf-8")
+    (fake_modules / "mineru" / "cli" / "backend_options.py").write_text(
+        "HYBRID_EFFORT_CHOICES = ('medium', 'high')\nDEFAULT_HYBRID_EFFORT = 'medium'\n",
+        encoding="utf-8",
+    )
+    (fake_modules / "mineru" / "utils" / "llm_aided.py").write_text(
+        "import json\n"
+        "import time\n"
+        "create_calls = 0\n"
+        "closed_streams = 0\n"
+        "warnings = []\n"
+        "class _Logger:\n"
+        "    def warning(self, message, *args):\n"
+        "        warnings.append(str(message).format(*args))\n"
+        "logger = _Logger()\n"
+        "class _JsonRepair:\n"
+        "    @staticmethod\n"
+        "    def loads(value):\n"
+        "        return json.loads(value)\n"
+        "json_repair = _JsonRepair()\n"
+        "class _Delta:\n"
+        "    content = 'still-streaming'\n"
+        "class _Choice:\n"
+        "    delta = _Delta()\n"
+        "class _Chunk:\n"
+        "    choices = [_Choice()]\n"
+        "class _Stream:\n"
+        "    def __iter__(self):\n"
+        "        while True:\n"
+        "            time.sleep(0.005)\n"
+        "            yield _Chunk()\n"
+        "    def close(self):\n"
+        "        global closed_streams\n"
+        "        closed_streams += 1\n"
+        "class _Completions:\n"
+        "    def create(self, **kwargs):\n"
+        "        global create_calls\n"
+        "        create_calls += 1\n"
+        "        return _Stream()\n"
+        "class _Chat:\n"
+        "    completions = _Completions()\n"
+        "class OpenAI:\n"
+        "    def __init__(self, **kwargs):\n"
+        "        self.chat = _Chat()\n"
+        "    def close(self):\n"
+        "        pass\n"
+        "def _build_title_optimize_prompt(title_dict):\n"
+        "    return 'Input title list:'\n"
+        "def _build_relative_title_optimize_prompt(title_dict):\n"
+        "    return 'Input title list:'\n"
+        "def _request_title_levels(config, title_dict, prompt_builder=None):\n"
+        "    return {'unpatched': 1}\n",
+        encoding="utf-8",
+    )
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "import json\n"
+        "import time\n"
+        "import mineru.utils.llm_aided as aided\n"
+        "started = time.monotonic()\n"
+        "result = aided._request_title_levels(\n"
+        "    {\n"
+        "        'api_key': 'title-aided-test-secret',\n"
+        "        'base_url': 'https://example.invalid',\n"
+        "        'model': 'test-model',\n"
+        "    },\n"
+        "    {0: ['Heading', 12, 1]},\n"
+        ")\n"
+        "print(json.dumps({\n"
+        "    'result': result,\n"
+        "    'elapsed': time.monotonic() - started,\n"
+        "    'create_calls': aided.create_calls,\n"
+        "    'closed_streams': aided.closed_streams,\n"
+        "    'warnings': aided.warnings,\n"
+        "}))\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join((str(MINERU_SCRIPTS), str(fake_modules)))
+    env["MINERU_TITLE_AIDED_ATTEMPT_TIMEOUT_SECONDS"] = "0.02"
+    env["MINERU_TITLE_AIDED_MAX_ATTEMPTS"] = "1"
+
+    completed = subprocess.run(
+        [sys.executable, str(probe)],
+        cwd=ROOT,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=2,
+    )
+
+    payload = json.loads(completed.stdout)
+    assert payload["result"] is None
+    assert payload["elapsed"] < 1
+    assert payload["create_calls"] == 1
+    assert payload["closed_streams"] == 1
+    assert payload["warnings"]
+    assert "title-aided-test-secret" not in completed.stdout + completed.stderr
 
 
 def test_makefile_dispatches_mineru_service_targets() -> None:
@@ -461,12 +584,18 @@ def test_mineru_launcher_reads_mineru_values_from_env_file(tmp_path: Path) -> No
     fake_mineru_api = service_bin / "mineru-api"
     _write_executable(
         fake_mineru_api,
-        '#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$MINERU_CAPTURE"\n',
+        "#!/usr/bin/env bash\n"
+        'printf "%s\\n" "$@" > "$MINERU_CAPTURE"\n'
+        'printf "timeout=%s\\nattempts=%s\\n" '
+        '"$MINERU_TITLE_AIDED_ATTEMPT_TIMEOUT_SECONDS" '
+        '"$MINERU_TITLE_AIDED_MAX_ATTEMPTS" >> "$MINERU_CAPTURE"\n',
     )
     env_file.write_text(
         f"MINERU_SERVICE_VENV={service_env}\n"
         "MINERU_API_HOST=127.9.9.9\n"
         "MINERU_API_PORT=9999\n"
+        "MINERU_TITLE_AIDED_ATTEMPT_TIMEOUT_SECONDS=45\n"
+        "MINERU_TITLE_AIDED_MAX_ATTEMPTS=3\n"
         "MINERU_LOCAL_ENDPOINT=http://ignored-by-launcher:8210\n",
         encoding="utf-8",
     )
@@ -477,6 +606,8 @@ def test_mineru_launcher_reads_mineru_values_from_env_file(tmp_path: Path) -> No
     env.pop("MINERU_SERVICE_VENV", None)
     env.pop("MINERU_API_HOST", None)
     env.pop("MINERU_API_PORT", None)
+    env.pop("MINERU_TITLE_AIDED_ATTEMPT_TIMEOUT_SECONDS", None)
+    env.pop("MINERU_TITLE_AIDED_MAX_ATTEMPTS", None)
 
     subprocess.run(
         [str(MINERU_SCRIPTS / "api.sh")],
@@ -490,6 +621,8 @@ def test_mineru_launcher_reads_mineru_values_from_env_file(tmp_path: Path) -> No
         "127.9.9.9",
         "--port",
         "9999",
+        "timeout=45",
+        "attempts=3",
     ]
 
 

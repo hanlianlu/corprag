@@ -31,6 +31,15 @@ public ``llm_aided_title`` entry point does not expose it, so there is no
 configuration path; the builders are read from module globals at call time,
 which makes rebinding them sufficient.
 
+The title-aided call is also a best-effort parser refinement, not a reason to
+hold the serial parse lane forever. MinerU's streamed OpenAI-compatible request
+has only an inactivity timeout: a provider that keeps emitting partial bytes can
+stay alive indefinitely, and each upstream retry can repeat that stall. Replace
+that request with the same public protocol under both an inactivity timeout and
+a wall-clock deadline. Failure returns no title levels, which is already
+MinerU's supported fallback, and logs only the exception type so credentials in
+the title-aided config never appear in diagnostic tracebacks.
+
 Finally it exposes the hybrid parse effort. ``medium`` force-disables
 image/chart analysis and feeds the VLM pipeline-YOLO layout boxes instead of
 letting it detect blocks itself; ``high`` returns whole figures with bound
@@ -57,6 +66,7 @@ with a single client does not notice.
 
 import os
 import sys
+import time
 from functools import wraps
 
 import uvicorn.config
@@ -99,6 +109,121 @@ def _request_strict_json(builder):
 
 for _name in ("_build_title_optimize_prompt", "_build_relative_title_optimize_prompt"):
     setattr(_llm_aided, _name, _request_strict_json(getattr(_llm_aided, _name)))
+
+
+def _positive_float_env(name, default):
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0
+    if value > 0:
+        return value
+    print(f"sitecustomize: ignoring invalid {name}", file=sys.stderr)
+    return default
+
+
+def _positive_int_env(name, default):
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value > 0:
+        return value
+    print(f"sitecustomize: ignoring invalid {name}", file=sys.stderr)
+    return default
+
+
+def _close_quietly(value):
+    close = getattr(value, "close", None)
+    if close is None:
+        return
+    try:
+        close()
+    except Exception as exc:
+        _llm_aided.logger.debug("Title-aided cleanup failed: {}", type(exc).__name__)
+
+
+_TITLE_AIDED_ATTEMPT_TIMEOUT_SECONDS = _positive_float_env(
+    "MINERU_TITLE_AIDED_ATTEMPT_TIMEOUT_SECONDS", 60.0
+)
+_TITLE_AIDED_MAX_ATTEMPTS = _positive_int_env("MINERU_TITLE_AIDED_MAX_ATTEMPTS", 2)
+_TITLE_AIDED_READ_TIMEOUT_SECONDS = min(_TITLE_AIDED_ATTEMPT_TIMEOUT_SECONDS, 10.0)
+
+
+def _bounded_request_title_levels(title_aided_config, title_dict, prompt_builder=None):
+    if not title_dict:
+        return {}
+
+    builder = prompt_builder or _llm_aided._build_title_optimize_prompt
+    prompt = builder(title_dict)
+    api_params = {
+        "model": title_aided_config["model"],
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.7,
+        "stream": True,
+    }
+    if "enable_thinking" in title_aided_config:
+        api_params["extra_body"] = {"enable_thinking": title_aided_config["enable_thinking"]}
+
+    try:
+        client = _llm_aided.OpenAI(
+            api_key=title_aided_config["api_key"],
+            base_url=title_aided_config["base_url"],
+            timeout=_TITLE_AIDED_READ_TIMEOUT_SECONDS,
+            max_retries=0,
+        )
+    except Exception as exc:
+        _llm_aided.logger.warning("Title-aided LLM client setup failed: {}", type(exc).__name__)
+        return None
+
+    expected_keys = set(range(len(title_dict)))
+    try:
+        for attempt in range(1, _TITLE_AIDED_MAX_ATTEMPTS + 1):
+            completion = None
+            started = time.monotonic()
+            try:
+                completion = client.chat.completions.create(**api_params)
+                content_pieces = []
+                for chunk in completion:
+                    if time.monotonic() - started >= _TITLE_AIDED_ATTEMPT_TIMEOUT_SECONDS:
+                        raise TimeoutError("title-aided wall-clock deadline exceeded")
+                    if chunk.choices and chunk.choices[0].delta.content is not None:
+                        content_pieces.append(chunk.choices[0].delta.content)
+
+                content = "".join(content_pieces).strip()
+                if "</think>" in content:
+                    content = content.split("</think>", 1)[1].strip()
+                parsed = _llm_aided.json_repair.loads(content)
+                levels = {int(key): int(value) for key, value in parsed.items()}
+                if set(levels) == expected_keys:
+                    return levels
+                raise ValueError("title keys did not match")
+            except Exception as exc:
+                _llm_aided.logger.warning(
+                    "Title-aided LLM attempt {}/{} failed: {}",
+                    attempt,
+                    _TITLE_AIDED_MAX_ATTEMPTS,
+                    type(exc).__name__,
+                )
+            finally:
+                _close_quietly(completion)
+    finally:
+        _close_quietly(client)
+
+    _llm_aided.logger.warning(
+        "Title-aided correction skipped after {} bounded attempt(s)",
+        _TITLE_AIDED_MAX_ATTEMPTS,
+    )
+    return None
+
+
+_llm_aided._request_title_levels = _bounded_request_title_levels
 
 import mineru.cli.backend_options as _backend_options  # noqa: E402  # type: ignore[import-not-found]
 

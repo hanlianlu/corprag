@@ -386,6 +386,28 @@ async def test_fresh_ingest_handoffs_once_and_records_its_settled_window() -> No
     )
 
 
+@pytest.mark.parametrize("active_status", ["parsing", "analyzing", "processing", "preprocessed"])
+async def test_recovered_ingest_does_not_redrive_an_active_tracked_pipeline(
+    active_status: str,
+) -> None:
+    runtime = _runtime(tracked={"doc-1": {"status": active_status}})
+    executor, _pool, _store = _executor(runtime)
+    session = _Session(
+        _payload(
+            "ingest",
+            source={"source_type": "s3", "bucket": "documents", "replace": False},
+            staged_sources=[],
+        ),
+        handoff_started=True,
+    )
+
+    outcome = await executor.execute(cast(Any, session))
+
+    assert isinstance(outcome, Deferred)
+    runtime.lightrag.apipeline_process_enqueue_documents.assert_not_awaited()
+    runtime.aretry_failed_docs.assert_not_awaited()
+
+
 async def test_recovered_replace_reconciles_tracked_state_without_repeating_replace() -> None:
     runtime = _runtime(tracked={"doc-1": {"status": "processed"}})
     executor, _pool, _store = _executor(runtime)

@@ -1014,7 +1014,6 @@ class TestWebFiles:
         assert response.json()["run_kind"] == "corpus_mutation"
         mock_application.corpus_mutations.create_retry.assert_awaited_once_with(
             workspace="default",
-            document_ids=None,
             selector="all_retryable",
             submitted_by=DEPLOYMENT_OWNER_ID,
         )

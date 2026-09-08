@@ -604,6 +604,14 @@ class _TrackedPipelineNotSettled(RuntimeError):
     """A recoverable tracked LightRAG cohort has not reached a terminal status."""
 
 
+_TRACKED_PIPELINE_ACTIVE_STATUSES = {
+    "parsing",
+    "analyzing",
+    "processing",
+    "preprocessed",
+}
+
+
 class CorpusMutationExecutor(RunExecutor):
     """Recoverable five-action executor using public Workspace/LightRAG operations."""
 
@@ -776,6 +784,12 @@ class CorpusMutationExecutor(RunExecutor):
             for item in checkpoint.get("upstream_documents") or ()
             if isinstance(item, Mapping) and item.get("document_id")
         }
+        if any(status in _TRACKED_PIPELINE_ACTIVE_STATUSES for status in states.values()):
+            # Another LightRAG queue owner is still advancing this cohort. Calling
+            # the public sweep here can register a pending follow-up sweep that
+            # reprocesses the same files after the authoritative run finalizes and
+            # archives its staging source.
+            raise _TrackedPipelineNotSettled
         if any(status not in {"processed", "failed"} for status in states.values()):
             await session.enter_phase("recovering_upstream_pipeline")
             async with self._maintenance.workspace_write_gate(session.owner_id):

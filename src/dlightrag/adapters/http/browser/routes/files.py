@@ -269,7 +269,6 @@ async def start_failed_file_retry(
     try:
         creation = await get_application(request).corpus_mutations.create_retry(
             workspace=selected_workspace,
-            document_ids=None,
             selector="all_retryable",
             submitted_by=owner_id_from_user(getattr(request.state, "user_context", None)),
         )
