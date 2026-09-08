@@ -307,6 +307,23 @@ class AgentExecutionConfig(BaseModel):
             raise ValueError("skill roots must be absolute paths when set")
         return value
 
+    @field_validator("search_tool_cache_root")
+    @classmethod
+    def _validate_search_tool_cache_root(cls, value: str | None) -> str | None:
+        if value is not None and not Path(value).expanduser().is_absolute():
+            raise ValueError("search tool cache root must be absolute when set")
+        return value
+
+    @field_validator("fd_path", "ripgrep_path")
+    @classmethod
+    def _validate_search_tool_path(cls, value: str) -> str:
+        if not value.strip() or "\x00" in value:
+            raise ValueError("search tool paths must be non-empty")
+        candidate = Path(value).expanduser()
+        if "/" in value and not candidate.is_absolute():
+            raise ValueError("search tool paths containing directories must be absolute")
+        return value
+
     execution_environment: Literal["disabled", "trust", "sandbox"] = Field(
         default="trust",
         description=(
@@ -338,6 +355,25 @@ class AgentExecutionConfig(BaseModel):
             "~/.dlightrag/owner_skills. Users publish their own skills here "
             "through the validated publish_skill tool; the global root stays "
             "operator-provisioned and read-only."
+        ),
+    )
+    fd_path: str = Field(
+        default="fd",
+        description="Absolute fd executable path or PATH command name (minimum 10.5.0).",
+    )
+    ripgrep_path: str = Field(
+        default="rg",
+        description="Absolute ripgrep executable path or PATH command name (minimum 15.2.0).",
+    )
+    search_tool_cache_root: str | None = Field(
+        default=None,
+        description="Absolute managed fd/ripgrep cache; defaults to ~/.dlightrag/tools.",
+    )
+    search_tool_auto_install: bool = Field(
+        default=False,
+        description=(
+            "Allow runtime download of the latest compatible fd/ripgrep GitHub releases "
+            "with published SHA-256 verification. Disabled by default for services."
         ),
     )
     publication: ArtifactPublicationConfig = Field(default_factory=ArtifactPublicationConfig)

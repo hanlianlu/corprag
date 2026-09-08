@@ -1,6 +1,7 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
 """Answer LLM image budgeting."""
 
+import base64
 import ipaddress
 import logging
 import socket
@@ -166,6 +167,39 @@ class AnswerImageBudget:
         self.count = budget.count
         self.used_bytes = budget.used_bytes
         return bounded
+
+    def reserve_prepared(self, data: bytes, *, label: str) -> bool:
+        """Reserve an already-persisted derivative without changing its bytes.
+
+        Recovery may run under a stricter policy than the execution that wrote
+        the attachment. In that case the attachment is omitted rather than
+        silently re-encoded behind its durable digest metadata.
+        """
+        candidate = AnswerImageBudget(
+            max_images=self.max_images,
+            max_total_bytes=self.max_total_bytes,
+            max_bytes_per_image=self.max_bytes_per_image,
+            max_pixels=self.max_pixels,
+            max_px=self.max_px,
+            min_px=self.min_px,
+            quality=self.quality,
+            min_quality=self.min_quality,
+            count=self.count,
+            used_bytes=self.used_bytes,
+        )
+        bounded = candidate._bound_base64(base64.b64encode(data).decode("ascii"), label=label)
+        if bounded is None:
+            return False
+        uri, _size = bounded
+        try:
+            restored = base64.b64decode(uri.partition(",")[2], validate=True)
+        except ValueError:
+            return False
+        if restored != data:
+            return False
+        self.count = candidate.count
+        self.used_bytes = candidate.used_bytes
+        return True
 
     def add_user_image(self, value: str | dict[str, Any], *, label: str) -> dict[str, Any] | None:
         """Add a user image after validating its source URL.

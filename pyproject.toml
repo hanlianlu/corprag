@@ -35,7 +35,6 @@ dependencies = [
     "pyyaml>=6.0",
     # Utils
     "httpx>=0.28.1",
-    "pathspec>=1.0.4",
     "pillow>=12.3.0",
     # Request-local lexical retrieval for Web Composer documents.
     "bm25s>=0.3.11",
@@ -98,6 +97,7 @@ Issues = "https://github.com/hanlianlu/dlightrag/issues"
 [project.scripts]
 dlightrag-mcp = "dlightrag.adapters.mcp.cli:main"
 dlightrag-api = "dlightrag.adapters.http.server:main"
+dlight-tools = "dlightrag.engine.agent.environment.toolchain:main"
 dlightrag-rebuild-bm25 = "dlightrag.engine.rag.corpus.rebuild_bm25:main"
 dlightrag-rebuild-vdb = "dlightrag.engine.rag.corpus.rebuild_vdb:main"
 

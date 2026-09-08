@@ -1,5 +1,5 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
-"""Explicit functional environment for Bash and ripgrep children."""
+"""Explicit functional environment for Bash, fd, and ripgrep children."""
 
 from __future__ import annotations
 

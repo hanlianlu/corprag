@@ -1,6 +1,8 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
 """Research Host migration through the canonical AgentSessionRuntime."""
 
+import base64
+import hashlib
 from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,8 +40,12 @@ from dlightrag.engine.ai.fingerprints import ModelFingerprint
 from dlightrag.engine.ai.messages import AssistantTurn, ToolCall
 from dlightrag.engine.ai.telemetry import NOOP_TELEMETRY
 from dlightrag.engine.ai.tokens import estimate_tokens
+from dlightrag.engine.answer.images import AnswerImageBudget
 from dlightrag.engine.answer.orchestration import AnswerOrchestrator
-from dlightrag.engine.answer.orchestration.orchestrator import _hydrate_attachment_messages
+from dlightrag.engine.answer.orchestration.orchestrator import (
+    _admit_durable_attachment_messages,
+    _hydrate_attachment_messages,
+)
 from dlightrag.engine.answer.publication import PublicationLimits
 from dlightrag.engine.answer.research.runtime import (
     FetchedResourceBuffer,
@@ -556,6 +562,47 @@ def test_web_image_effect_deduplicates_its_tool_attachment_settlement() -> None:
 
     assert len(update.fetched) == 1
     assert update.fetched[0].resource.capabilities["resource_kind"] == "web"
+
+
+def test_recovery_rebuilds_image_budget_once_and_omits_excess_attachments() -> None:
+    image = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    )
+    digest = hashlib.sha256(image).hexdigest()
+    messages = [
+        {
+            "role": "tool",
+            "attachments": [
+                {
+                    "resource_id": resource_id,
+                    "media_type": "image/png",
+                    "content_digest": digest,
+                    "size_bytes": len(image),
+                }
+                for resource_id in ("first", "second")
+            ],
+        }
+    ]
+    budget = AnswerImageBudget(
+        max_images=1,
+        max_total_bytes=len(image),
+        max_bytes_per_image=len(image),
+        max_pixels=100,
+        max_px=10,
+        min_px=1,
+        quality=85,
+        min_quality=70,
+    )
+    snapshots = {"first": image, "second": image}
+
+    admissions = _admit_durable_attachment_messages(messages, snapshots, budget)
+    _hydrate_attachment_messages(messages, snapshots, admissions=admissions)
+
+    assert admissions == {"first": 1}
+    assert budget.count == 1
+    assert budget.used_bytes == len(image)
+    assert "data_url" in messages[0]["attachments"][0]
+    assert "data_url" not in messages[0]["attachments"][1]
 
 
 def test_durable_tool_attachment_is_hydrated_for_provider_projection() -> None:

@@ -43,6 +43,12 @@ class AnswerImageCapabilityResponse(_StatusModel):
     model: str | None = None
 
 
+class SearchToolProvenanceResponse(_StatusModel):
+    path: str
+    version: str
+    sha256: str
+
+
 class HealthResponse(_StatusModel):
     status: Literal["healthy", "degraded"]
     rag_initialized: bool
@@ -53,6 +59,7 @@ class HealthResponse(_StatusModel):
     components: dict[str, HealthComponentResponse]
     warnings: list[str] | None = None
     answer_image_capability: AnswerImageCapabilityResponse | None = None
+    search_toolchain: dict[str, SearchToolProvenanceResponse] | None = None
 
 
 class ReadinessResponse(_StatusModel):
@@ -95,6 +102,7 @@ async def health(request: Request) -> dict[str, object]:
         },
         "components": application_health.components,
         "answer_image_capability": application_health.answer_image_capability,
+        "search_toolchain": application_health.search_toolchain or None,
     }
     if warnings:
         status["warnings"] = warnings

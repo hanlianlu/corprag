@@ -10,6 +10,8 @@ from typing import Protocol
 from dlightrag.engine.agent.environment.local import ProcessChunk
 from dlightrag.engine.agent.tools.contracts import CommittedOutput
 
+_SINGLE_CHARACTER_LINE_BREAKS = frozenset("\v\f\x1c\x1d\x1e\x85\u2028\u2029")
+
 
 class OutputStage(Protocol):
     """One uncommitted full-output staging object."""
@@ -53,9 +55,10 @@ class StreamingToolOutput:
         }
         self._tail = ""
         self._total_bytes = 0
-        self._newlines = 0
+        self._line_breaks = 0
         self._has_text = False
-        self._ends_with_newline = False
+        self._ends_with_line_break = False
+        self._last_character_was_cr = False
         self._finished = False
 
     def append(self, chunk: ProcessChunk) -> ToolOutputSnapshot:
@@ -81,23 +84,39 @@ class StreamingToolOutput:
         if self._stage is not None:
             self._stage.discard()
 
-    async def finish(self) -> ToolOutputSnapshot:
+    async def finish(
+        self,
+        *,
+        reserve_bytes: int = 0,
+        reserve_lines: int = 0,
+    ) -> ToolOutputSnapshot:
+        """Finish while reserving final-result space for mandatory tool framing."""
         if self._finished:
             raise RuntimeError("streaming output is already finished")
+        if not 0 <= reserve_bytes < self._max_bytes or not 0 <= reserve_lines < self._max_lines:
+            raise ValueError("streaming output reserves must be smaller than their bounds")
         for decoder in self._decoders.values():
             self._append_text(decoder.decode(b"", final=True))
         self._finished = True
+        final_max_bytes = self._max_bytes - reserve_bytes
+        final_max_lines = self._max_lines - reserve_lines
+        truncated = self._total_bytes > final_max_bytes or self._total_lines > final_max_lines
+        tail = _bounded_complete_line_tail(
+            self._tail,
+            max_bytes=final_max_bytes,
+            max_lines=final_max_lines,
+        )
         receipt: CommittedOutput | None = None
-        if self._is_truncated:
+        if truncated:
             if self._stage is not None:
                 receipt = await self._stage.commit()
         elif self._stage is not None:
             self._stage.discard()
         return ToolOutputSnapshot(
-            text=self._tail,
+            text=tail,
             total_bytes=self._total_bytes,
             total_lines=self._total_lines,
-            truncated=self._is_truncated,
+            truncated=truncated,
             receipt=receipt,
         )
 
@@ -105,7 +124,7 @@ class StreamingToolOutput:
     def _total_lines(self) -> int:
         if not self._has_text:
             return 0
-        return self._newlines + (0 if self._ends_with_newline else 1)
+        return self._line_breaks + (0 if self._ends_with_line_break else 1)
 
     @property
     def _is_truncated(self) -> bool:
@@ -118,9 +137,17 @@ class StreamingToolOutput:
         if self._stage is not None:
             self._stage.append(data)
         self._total_bytes += len(data)
-        self._newlines += text.count("\n")
+        for character in text:
+            if character == "\n":
+                if not self._last_character_was_cr:
+                    self._line_breaks += 1
+            elif character == "\r" or character in _SINGLE_CHARACTER_LINE_BREAKS:
+                self._line_breaks += 1
+            self._last_character_was_cr = character == "\r"
+            self._ends_with_line_break = (
+                character in _SINGLE_CHARACTER_LINE_BREAKS or character in {"\r", "\n"}
+            )
         self._has_text = True
-        self._ends_with_newline = text.endswith("\n")
         self._tail = _bounded_complete_line_tail(
             self._tail + text,
             max_bytes=self._max_bytes,

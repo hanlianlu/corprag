@@ -43,6 +43,7 @@ from dlightrag.application.answer_runs.routing import AnswerRoutingStore, decide
 from dlightrag.application.answer_runs.sources import project_contexts_for_client
 from dlightrag.engine.agent.environment import (
     ExecutionEnvironment,
+    SearchToolchain,
     resolve_execution_adapter,
 )
 from dlightrag.engine.agent.session.effects import (
@@ -706,6 +707,7 @@ class AnswerExecutor:
         model_fingerprint_for_role: Callable[[ModelRole], ModelFingerprint],
         execution_environment: str = "trust",
         workspace_root: str | None = None,
+        search_toolchain: SearchToolchain | None = None,
         working_dir: str = "./dlightrag_storage",
         memory_store: MemoryStore | None = None,
         memory_recall_enabled: Callable[..., Awaitable[bool]] | None = None,
@@ -730,6 +732,7 @@ class AnswerExecutor:
         self._model_fingerprint_for_role = model_fingerprint_for_role
         self._execution_environment = execution_environment
         self._workspace_root_setting = workspace_root
+        self._search_toolchain = search_toolchain
         self._working_dir = working_dir
         self._memory_store = memory_store
         self._memory = Memory(memory_store) if memory_store is not None else None
@@ -1159,6 +1162,10 @@ class AnswerExecutor:
                 owner_id=session.owner_id,
                 run_id=str(session.run_id),
             )
+        attachment_admissions = run.orchestrator.admit_durable_attachments(
+            authoritative_messages,
+            attachment_snapshots,
+        )
         auth_mode = str((session.prepared_input or {}).get("auth_mode") or "none")
         prepared_input = session.prepared_input or {}
         recall_allowed = resolved_mode == "research" and bool(
@@ -1295,6 +1302,7 @@ class AnswerExecutor:
                     query_images=run.query_images,
                     registry=run.registry,
                     attachment_snapshots=attachment_snapshots,
+                    attachment_admissions=attachment_admissions,
                 )
                 self.validate_pinned_model_profiles(request)
                 self.validate_pinned_agent_run_plan(request, prepared_early.tools)
@@ -1887,6 +1895,7 @@ class AnswerExecutor:
                 publication_limits=self._settings.publication,
                 telemetry=self._telemetry,
                 environment=environment,
+                search_toolchain=self._search_toolchain,
                 resolved_mode=resolved_mode,
                 subagent_host=SubagentHost() if resolved_mode == "research" else None,
                 memory_host=(

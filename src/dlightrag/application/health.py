@@ -104,6 +104,7 @@ class ApplicationHealth:
             "configured_ceiling": 0,
             "model": None,
         }
+        self._search_toolchain: dict[str, dict[str, str]] = {}
 
     @property
     def is_ready(self) -> bool:
@@ -145,6 +146,10 @@ class ApplicationHealth:
     @property
     def answer_image_capability(self) -> Mapping[str, object]:
         return dict(self._answer_image_capability)
+
+    @property
+    def search_toolchain(self) -> Mapping[str, Mapping[str, str]]:
+        return {name: dict(provenance) for name, provenance in self._search_toolchain.items()}
 
     def add_warning(self, warning: str) -> None:
         """Compatibility shim: record a bounded generic dependency warning."""
@@ -193,6 +198,17 @@ class ApplicationHealth:
 
     def set_answer_image_capability(self, summary: Mapping[str, object]) -> None:
         self._answer_image_capability = dict(summary)
+
+    def set_search_toolchain(self, summary: Mapping[str, Mapping[str, str]]) -> None:
+        self._search_toolchain = {
+            name: {
+                key: value
+                for key, value in provenance.items()
+                if key in {"path", "version", "sha256"}
+            }
+            for name, provenance in summary.items()
+            if name in {"fd", "rg"}
+        }
 
     async def readiness_detail(self) -> str | None:
         if not self._ready or self._closed:

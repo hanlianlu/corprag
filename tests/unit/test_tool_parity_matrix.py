@@ -1,10 +1,9 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
 """Test-maintained parity matrix: DlightRAG base tools vs the Pi baseline.
 
-Pi 0.84.2 exposes seven first-class filesystem tools in this exact order:
-read, bash, edit, write, grep, find, ls. This matrix pins names, order,
-argument surfaces, defaults, and replay/contract facts so drift from the
-negotiated baseline fails CI instead of passing silently.
+Pi exposes seven first-class filesystem tools in this exact order:
+read, bash, edit, write, grep, find, ls. DlightRAG keeps that argument surface
+while versioning its stronger persistence, cursor, and safety semantics here.
 """
 
 from pathlib import Path
@@ -26,16 +25,16 @@ MATRIX: dict[str, tuple[tuple[str, ...], dict[str, object], str, int]] = {
             "cursor": None,
         },
         "replayable",
-        2,
+        3,
     ),
-    "bash": (("command",), {"timeout_seconds": None}, "never", 2),
+    "bash": (("command",), {"timeout_seconds": None}, "never", 3),
     "edit": (
         ("path", "edits"),
         {},
         "never",
-        2,
+        3,
     ),
-    "write": (("path", "content"), {}, "never", 2),
+    "write": (("path", "content"), {}, "never", 3),
     "grep": (
         ("pattern",),
         {
@@ -47,10 +46,10 @@ MATRIX: dict[str, tuple[tuple[str, ...], dict[str, object], str, int]] = {
             "limit": 100,
         },
         "replayable",
-        2,
+        3,
     ),
-    "find": (("pattern",), {"path": ".", "limit": 1000}, "replayable", 1),
-    "ls": ((), {"path": ".", "limit": 500}, "replayable", 1),
+    "find": (("pattern",), {"path": ".", "limit": 1000}, "replayable", 2),
+    "ls": ((), {"path": ".", "limit": 500, "cursor": None}, "replayable", 2),
 }
 
 

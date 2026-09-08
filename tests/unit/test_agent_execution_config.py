@@ -146,3 +146,34 @@ def test_owner_skills_root_defaults_to_none_and_accepts_absolute() -> None:
 def test_owner_skills_root_rejects_a_relative_path() -> None:
     with pytest.raises(ValidationError, match="skill roots must be absolute paths"):
         AgentExecutionConfig.model_validate({"owner_skills_root": "owner_skills"})
+
+
+def test_search_tool_configuration_defaults_and_absolute_paths() -> None:
+    default = AgentExecutionConfig()
+    assert default.fd_path == "fd"
+    assert default.ripgrep_path == "rg"
+    assert default.search_tool_cache_root is None
+    assert default.search_tool_auto_install is False
+
+    configured = AgentExecutionConfig.model_validate(
+        {
+            "fd_path": "/opt/bin/fd",
+            "ripgrep_path": "/opt/bin/rg",
+            "search_tool_cache_root": "/var/cache/dlightrag-tools",
+            "search_tool_auto_install": True,
+        }
+    )
+    assert configured.search_tool_auto_install is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("fd_path", "relative/bin/fd"),
+        ("ripgrep_path", "relative/bin/rg"),
+        ("search_tool_cache_root", "relative-cache"),
+    ],
+)
+def test_search_tool_directories_must_be_absolute(field: str, value: str) -> None:
+    with pytest.raises(ValidationError):
+        AgentExecutionConfig.model_validate({field: value})

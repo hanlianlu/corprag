@@ -99,6 +99,21 @@ class _Capabilities(_Collaborator):
         self._record("probe_all")
 
 
+class _SearchToolchain:
+    def __init__(self, recorder: _Recorder) -> None:
+        self._recorder = recorder
+        self.error: Exception | None = None
+        self.provenance = {
+            "fd": {"path": "/bin/fd", "version": "10.5.0", "sha256": "a" * 64},
+            "rg": {"path": "/bin/rg", "version": "15.2.0", "sha256": "b" * 64},
+        }
+
+    async def ensure(self) -> None:
+        self._recorder.add("search_toolchain:ensure")
+        if self.error is not None:
+            raise self.error
+
+
 class _Pool(_Collaborator):
     def __init__(self, recorder: _Recorder) -> None:
         super().__init__(recorder, "pool")
@@ -232,6 +247,7 @@ class _Parts:
         self.runs = object()
         self.answers = object()
         self.web_conversations = _WebConversations(self.recorder)
+        self.search_toolchain: _SearchToolchain | None = None
 
     def application(
         self,
@@ -258,6 +274,7 @@ class _Parts:
                 memory_store=cast(Any, self.memory_store),
                 memory_embedder=cast(Any, self.memory_embedder),
                 web_conversations=cast(WebConversationService, self.web_conversations),
+                search_toolchain=cast(Any, self.search_toolchain),
             ),
             web_enabled=web_enabled,
         )
@@ -391,6 +408,34 @@ async def test_application_exposes_only_typed_services_and_closes_in_dependency_
     await application.aclose()
 
     assert parts.recorder.closed() == _CLOSE_ORDER
+    assert application.health.is_closed is True
+
+
+async def test_search_toolchain_is_preflighted_before_readiness(
+    test_config: DlightragConfig,
+) -> None:
+    parts = _Parts()
+    parts.search_toolchain = _SearchToolchain(parts.recorder)
+    application = parts.application(test_config)
+
+    await application.astart()
+
+    assert parts.recorder.started()[0] == "search_toolchain:ensure"
+    assert application.health.search_toolchain["fd"]["version"] == "10.5.0"
+    await application.aclose()
+
+
+async def test_search_toolchain_preflight_failure_closes_startup(
+    test_config: DlightragConfig,
+) -> None:
+    parts = _Parts()
+    parts.search_toolchain = _SearchToolchain(parts.recorder)
+    parts.search_toolchain.error = RuntimeError("fd unavailable")
+    application = parts.application(test_config)
+
+    with pytest.raises(RuntimeError, match="fd unavailable"):
+        await application.astart()
+
     assert application.health.is_closed is True
 
 

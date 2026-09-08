@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 from dlightrag.application.application import Application, _ApplicationComponents
 from dlightrag.application.config import DlightragConfig, get_config
 from dlightrag.application.opaque_cursor import CursorSecretBox
 from dlightrag.application.skills import skills_bundle_factory
+from dlightrag.engine.agent.environment.toolchain import SearchToolchain
 from dlightrag.engine.ai.embedding import MultimodalEmbedder
 from dlightrag.engine.ai.scheduler import ModelScheduler
 from dlightrag.engine.ai.telemetry import Telemetry
@@ -327,6 +329,17 @@ def _compose(config: DlightragConfig) -> _ApplicationComponents:
             for server in config.answer.agent.outbound_mcp
         )
     )
+    agent_config = config.answer.agent
+    search_toolchain = SearchToolchain(
+        fd=agent_config.fd_path,
+        ripgrep=agent_config.ripgrep_path,
+        cache_root=(
+            Path(agent_config.search_tool_cache_root)
+            if agent_config.search_tool_cache_root is not None
+            else None
+        ),
+        auto_install=agent_config.search_tool_auto_install,
+    )
     answer_executor = AnswerExecutor(
         store=run_store,
         blob_store=run_blob_store,
@@ -344,6 +357,7 @@ def _compose(config: DlightragConfig) -> _ApplicationComponents:
         ),
         execution_environment=config.answer.agent.execution_environment,
         workspace_root=config.answer.agent.workspace_root,
+        search_toolchain=search_toolchain,
         working_dir=config.deployment.working_dir,
         memory_store=memory_store,
         memory_recall_enabled=memory.recall_enabled,
@@ -450,6 +464,7 @@ def _compose(config: DlightragConfig) -> _ApplicationComponents:
         memory_store=memory_store,
         memory_embedder=memory_embedder,
         web_conversations=web_conversations,
+        search_toolchain=search_toolchain,
         initialize_process=_initialize_process,
         close_process=_close_process,
     )

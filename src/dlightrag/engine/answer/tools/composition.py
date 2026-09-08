@@ -10,8 +10,9 @@ from pydantic import BaseModel
 from dlightrag.application.answer_runs.errors import InvalidToolConfigurationError
 from dlightrag.engine.agent.environment import AccessScheduler
 from dlightrag.engine.agent.environment.execution import ExecutionEnvironment
+from dlightrag.engine.agent.environment.toolchain import SearchToolchain
 from dlightrag.engine.agent.tools import AgentTool, ToolResult, ToolRuntime
-from dlightrag.engine.agent.tools.files import path_tools, read_tool
+from dlightrag.engine.agent.tools.files import ImagePreparer, path_tools, read_tool
 from dlightrag.engine.agent.tools.registry import DuplicateToolError, ToolRegistry
 from dlightrag.engine.answer.evidence import EvidenceLedger
 from dlightrag.engine.answer.publication import PublicationLimits
@@ -48,6 +49,8 @@ def compose_research_tools(
     artifacts_root: Path | None = None,
     publication_limits: PublicationLimits | None = None,
     ripgrep: str = "rg",
+    search_toolchain: SearchToolchain | None = None,
+    image_preparer: ImagePreparer | None = None,
     subagent_host: SubagentHost | None = None,
     memory_host: MemoryHost | None = None,
     skill_tools: list[AgentTool] | None = None,
@@ -75,7 +78,13 @@ def compose_research_tools(
     if resource_reader is not None:
         tools.append(
             _ledger_backed(
-                read_tool(environment, access, resource_reader=resource_reader, spill=spill),
+                read_tool(
+                    environment,
+                    access,
+                    resource_reader=resource_reader,
+                    spill=spill,
+                    image_preparer=image_preparer,
+                ),
                 evidence,
             )
         )
@@ -92,6 +101,8 @@ def compose_research_tools(
             environment,
             scheduler=access,
             ripgrep=ripgrep,
+            search_toolchain=search_toolchain,
+            image_preparer=image_preparer,
             spill=spill,
             output_stage_factory=output_stage_factory,
         )

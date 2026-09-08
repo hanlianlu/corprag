@@ -1324,6 +1324,20 @@ class TestHealthEndpoint:
 
         probe = AsyncMock(return_value="off")
         monkeypatch.setattr(pg_pool, "run_once", probe)
+        mock_application.health.set_search_toolchain(
+            {
+                "fd": {
+                    "path": "/usr/local/bin/fd",
+                    "version": "10.5.0",
+                    "sha256": "a" * 64,
+                },
+                "rg": {
+                    "path": "/usr/local/bin/rg",
+                    "version": "15.2.0",
+                    "sha256": "b" * 64,
+                },
+            }
+        )
         app.state.application = mock_application
         resp = await client.get("/health")
         assert resp.status_code == 200
@@ -1347,6 +1361,8 @@ class TestHealthEndpoint:
         assert cap["effective_max_images"] == 8
         assert cap["configured_ceiling"] == 8
         assert cap["model"] == "test-model"
+        assert body["search_toolchain"]["fd"]["version"] == "10.5.0"
+        assert body["search_toolchain"]["rg"]["sha256"] == "b" * 64
 
 
 # ---------------------------------------------------------------------------

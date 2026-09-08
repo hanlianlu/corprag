@@ -27,6 +27,13 @@ from dlightrag.engine.agent.environment.execution import (
     TrustExecutionAdapter,
     resolve_execution_adapter,
 )
+from dlightrag.engine.agent.environment.toolchain import (
+    FD_MIN_VERSION,
+    RG_MIN_VERSION,
+    SearchToolBinary,
+    SearchToolchain,
+    SearchToolUnavailable,
+)
 
 __all__ = [
     "TOOL_RESULT_MAX_BYTES",
@@ -43,7 +50,12 @@ __all__ = [
     "FullOutputUnavailable",
     "PathAccess",
     "PathRejected",
+    "FD_MIN_VERSION",
+    "RG_MIN_VERSION",
     "SandboxUnavailableError",
+    "SearchToolBinary",
+    "SearchToolUnavailable",
+    "SearchToolchain",
     "ToolAccess",
     "TrustExecutionAdapter",
     "WorkspaceQuotaExceeded",

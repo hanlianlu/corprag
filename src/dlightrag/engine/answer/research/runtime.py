@@ -592,6 +592,8 @@ class ResearchRuntimeEffects:
         for attachment in tool_content_attachments(durable.parts):
             if attachment.data:
                 self._prepared.attachment_snapshots[attachment.resource_id] = attachment.data
+                admissions = self._prepared.attachment_admissions
+                admissions[attachment.resource_id] = admissions.get(attachment.resource_id, 0) + 1
         delta = _build_effect_host_update(
             session_id=self._session_id,
             intent=intent,

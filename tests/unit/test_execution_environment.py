@@ -35,6 +35,65 @@ def test_write_is_atomic_and_creates_parents(tmp_path: Path) -> None:
     assert leftovers == []
 
 
+def test_atomic_overwrite_preserves_mode_and_extended_attributes(tmp_path: Path) -> None:
+    target = tmp_path / "script.sh"
+    target.write_bytes(b"old")
+    target.chmod(0o751)
+    xattr_name = "user.dlightrag-test"
+    xattrs_supported = False
+    set_xattr = getattr(os, "setxattr", None)
+    get_xattr = getattr(os, "getxattr", None)
+    if callable(set_xattr) and callable(get_xattr):
+        try:
+            set_xattr(target, xattr_name, b"kept")
+            xattrs_supported = True
+        except OSError:
+            pass
+    env = LocalExecutionEnvironment(tmp_path)
+
+    env.write_bytes(target, b"new")
+
+    assert target.read_bytes() == b"new"
+    assert target.stat().st_mode & 0o777 == 0o751
+    if xattrs_supported and callable(get_xattr):
+        assert get_xattr(target, xattr_name) == b"kept"
+
+
+def test_write_failure_after_parent_creation_restores_accounting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = LocalExecutionEnvironment(tmp_path)
+
+    def fail_mkstemp(*_args: object, **_kwargs: object) -> tuple[int, str]:
+        raise OSError("temporary creation failed")
+
+    monkeypatch.setattr("tempfile.mkstemp", fail_mkstemp)
+    with pytest.raises(OSError, match="temporary creation failed"):
+        env.write_bytes(env.resolve("new/parent/file.txt"), b"content")
+
+    assert not (tmp_path / "new").exists()
+    assert env._usage_entries == 0
+    assert env._usage_bytes == 0
+    assert env.integrity_violations == ()
+    assert env.quota_violation is None
+
+
+def test_write_quota_uses_incremental_accounting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = LocalExecutionEnvironment(tmp_path)
+
+    def fail_rescan() -> tuple[int, int]:
+        raise AssertionError("ordinary writes must not rescan the workspace")
+
+    monkeypatch.setattr(env, "_scan_workspace_usage", fail_rescan)
+    env.write_bytes(env.resolve("one.txt"), b"one")
+    env.write_bytes(env.resolve("nested/two.txt"), b"two")
+    assert (tmp_path / "nested" / "two.txt").read_bytes() == b"two"
+
+
 def test_utf8_and_bom_tagged_utf16_round_trip() -> None:
     utf8 = decode_workspace_text("café\n".encode())
     assert utf8.text == "café\n"
@@ -86,6 +145,18 @@ async def test_process_run_streams_output_before_exit(tmp_path: Path) -> None:
     assert b"first" in b"".join(chunk.data for chunk in chunks)
     assert b"second" in b"".join(chunk.data for chunk in chunks)
     assert {chunk.stream for chunk in chunks} == {"stdout"}
+
+
+async def test_successful_process_run_terminates_background_process_group(tmp_path: Path) -> None:
+    env = LocalExecutionEnvironment(tmp_path)
+    late_path = tmp_path / "late.txt"
+    command = f"(sleep 0.2; printf late > {late_path!s}) >/dev/null 2>&1 &"
+
+    completed = await env.run(("/bin/bash", "-lc", command), env=os.environ)
+    await asyncio.sleep(0.4)
+
+    assert completed.returncode == 0
+    assert not late_path.exists()
 
 
 async def test_cancelling_process_run_terminates_its_process_group(tmp_path: Path) -> None:

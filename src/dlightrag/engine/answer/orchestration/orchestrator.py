@@ -28,6 +28,7 @@ from dlightrag.application.answer_runs.mode import ResolvedMode
 from dlightrag.engine.agent.environment.access import AccessScheduler
 from dlightrag.engine.agent.environment.errors import TOOL_RESULT_MAX_BYTES, TOOL_RESULT_MAX_LINES
 from dlightrag.engine.agent.environment.execution import ExecutionEnvironment
+from dlightrag.engine.agent.environment.toolchain import SearchToolchain
 from dlightrag.engine.agent.events import AgentEvent
 from dlightrag.engine.agent.session.entries import AssistantMessageEntry, CompactionEntry
 from dlightrag.engine.agent.session.fold import (
@@ -57,13 +58,18 @@ from dlightrag.engine.agent.tools import (
     ToolRuntime,
 )
 from dlightrag.engine.agent.tools.contracts import ToolModelFunc
-from dlightrag.engine.agent.tools.files import ResourceReader, ResourceReadRequest
+from dlightrag.engine.agent.tools.files import (
+    PreparedImageAttachment,
+    ResourceReader,
+    ResourceReadRequest,
+)
 from dlightrag.engine.agent.tools.registry import DuplicateToolError, ToolRegistry
 from dlightrag.engine.ai.capacity import (
     CONTEXT_POLICY,
     ContextPolicy,
     ModelProfile,
 )
+from dlightrag.engine.ai.media import decode_image_base64, detect_image_mime
 from dlightrag.engine.ai.messages import AssistantTurn, ToolDefinition
 from dlightrag.engine.ai.telemetry import Telemetry
 from dlightrag.engine.ai.tokens import estimate_tokens
@@ -123,6 +129,7 @@ class PreparedRun:
     stream_model_func: StreamModel | None
     model_profile: ModelProfile
     attachment_snapshots: dict[str, bytes] = field(default_factory=dict)
+    attachment_admissions: dict[str, int] = field(default_factory=dict)
     model_role: str = "query"
     agent_turn_count: int = 0
     stop_reason: str = "model_stop"
@@ -152,6 +159,7 @@ class AnswerOrchestrator:
         publication_limits: PublicationLimits | None = None,
         telemetry: Telemetry,
         environment: ExecutionEnvironment | None = None,
+        search_toolchain: SearchToolchain | None = None,
         resource_reader: ResourceReader | None = None,
         resolved_mode: ResolvedMode,
         subagent_host: SubagentHost | None = None,
@@ -175,6 +183,7 @@ class AnswerOrchestrator:
         self._publication_limits = publication_limits or PublicationLimits()
         self._telemetry = telemetry
         self._environment = environment
+        self._search_toolchain = search_toolchain
         self._resource_reader = resource_reader
         self._workspace: RunWorkspace | None = None
         self._resolved_mode: ResolvedMode = resolved_mode
@@ -231,13 +240,29 @@ class AnswerOrchestrator:
             selected.tree.ancestry(runtime_context.lane_id),
             selected.active_projection,
         )
-        _hydrate_attachment_messages(messages, run.attachment_snapshots)
+        _hydrate_attachment_messages(
+            messages,
+            run.attachment_snapshots,
+            admissions=run.attachment_admissions,
+        )
         self._subagent_host.context_snapshot = ChildContextSnapshot.from_values(
             parent_session_id=runtime_context.session_id,
             parent_entry_id=parent_entry_id,
             depth=self._subagent_host.depth,
             messages=messages,
             evidence_state=run.evidence.durable_state(),
+        )
+
+    def admit_durable_attachments(
+        self,
+        messages: list[dict[str, Any]],
+        snapshots: Mapping[str, bytes],
+    ) -> dict[str, int]:
+        """Reserve retained attachment payloads once in this run's shared budget."""
+        return _admit_durable_attachment_messages(
+            messages,
+            snapshots,
+            self._image_budget,
         )
 
     def bind_memory(
@@ -488,6 +513,7 @@ class AnswerOrchestrator:
         query_images: list[dict[str, Any]] | None = None,
         registry: ResourceRegistry | None = None,
         attachment_snapshots: Mapping[str, bytes] | None = None,
+        attachment_admissions: Mapping[str, int] | None = None,
         agent_turn_count: int = 0,
     ) -> PreparedRun:
         """Build one run's memory and the tools bound to it, before any restore."""
@@ -525,6 +551,7 @@ class AnswerOrchestrator:
             registry=registry,
             trace=trace,
             attachment_snapshots=dict(attachment_snapshots or {}),
+            attachment_admissions=dict(attachment_admissions or {}),
             model_func=self._model_func,
             stream_model_func=self._stream_model_func,
             model_profile=self._model_profile,
@@ -599,7 +626,11 @@ class AnswerOrchestrator:
         graph = getattr(snapshot, "graph", None)
         entries = graph.ancestry() if graph is not None else snapshot.entries
         messages = project_session_messages(entries, projection)
-        _hydrate_attachment_messages(messages, run.attachment_snapshots)
+        _hydrate_attachment_messages(
+            messages,
+            run.attachment_snapshots,
+            admissions=run.attachment_admissions,
+        )
         working = WorkingContextProjection(
             retained_tail_tokens=self._context_policy.retained_tail_target(run.model_profile)
         )
@@ -666,6 +697,8 @@ class AnswerOrchestrator:
             resource_reader=self._resource_reader_for_run(),
             environment=self._environment,
             scheduler=self._access,
+            search_toolchain=self._search_toolchain,
+            image_preparer=self._prepare_local_image,
             spill=(None if self._workspace is None else self._spill_writer()),
             output_stage_factory=(
                 None if self._workspace is None else self._output_stage_factory()
@@ -693,6 +726,27 @@ class AnswerOrchestrator:
                 if child
                 else (),
             )
+        )
+
+    def _prepare_local_image(
+        self,
+        data: bytes,
+        path: str,
+    ) -> PreparedImageAttachment | None:
+        budget = self._image_budget
+        if budget is None:
+            return None
+        block = budget.add_base64(base64.b64encode(data).decode("ascii"), label=path)
+        if block is None:
+            return None
+        value = block.get("image_url")
+        if not isinstance(value, dict) or not isinstance(value.get("url"), str):
+            return None
+        prepared, declared_media_type = decode_image_base64(value["url"])
+        return PreparedImageAttachment(
+            data=prepared,
+            media_type=detect_image_mime(prepared, fallback=declared_media_type),
+            transformed=prepared != data,
         )
 
     def _resource_reader_for_run(self) -> ResourceReader | None:
@@ -775,11 +829,44 @@ class AnswerOrchestrator:
             raise AnswerInputOverflowError(str(exc)) from exc
 
 
+def _admit_durable_attachment_messages(
+    messages: list[dict[str, Any]],
+    snapshots: Mapping[str, bytes],
+    budget: AnswerImageBudget | None,
+) -> dict[str, int]:
+    """Rebuild one run's image budget from retained durable attachment occurrences."""
+    admitted: dict[str, int] = {}
+    for message in messages:
+        attachments = message.get("attachments")
+        if not isinstance(attachments, list):
+            continue
+        for attachment in attachments:
+            if not isinstance(attachment, dict):
+                continue
+            resource_id = str(attachment.get("resource_id") or "")
+            content = snapshots.get(resource_id)
+            if content is None:
+                continue
+            _validate_attachment_snapshot(attachment, content)
+            media_type = str(attachment.get("media_type") or "application/octet-stream")
+            if media_type.startswith("image/"):
+                if budget is None or not budget.reserve_prepared(
+                    content,
+                    label=f"durable_attachment:{resource_id}",
+                ):
+                    continue
+            admitted[resource_id] = admitted.get(resource_id, 0) + 1
+    return admitted
+
+
 def _hydrate_attachment_messages(
     messages: list[dict[str, Any]],
     snapshots: Mapping[str, bytes],
+    *,
+    admissions: Mapping[str, int] | None = None,
 ) -> None:
     """Restore transport-private attachment bytes after durable Session decode."""
+    occurrences: dict[str, int] = {}
     for message in messages:
         attachments = message.get("attachments")
         if not isinstance(attachments, list):
@@ -787,16 +874,25 @@ def _hydrate_attachment_messages(
         for attachment in attachments:
             if not isinstance(attachment, dict) or attachment.get("data_url"):
                 continue
-            content = snapshots.get(str(attachment.get("resource_id") or ""))
+            resource_id = str(attachment.get("resource_id") or "")
+            content = snapshots.get(resource_id)
             if content is None:
                 continue
-            digest = str(attachment.get("content_digest") or "")
-            size = int(attachment.get("size_bytes") or 0)
-            if hashlib.sha256(content).hexdigest() != digest or len(content) != size:
-                raise ValueError("durable tool attachment does not match its Blob snapshot")
+            occurrence = occurrences.get(resource_id, 0) + 1
+            occurrences[resource_id] = occurrence
+            if admissions is not None and occurrence > admissions.get(resource_id, 0):
+                continue
+            _validate_attachment_snapshot(attachment, content)
             media_type = str(attachment.get("media_type") or "application/octet-stream")
             encoded = base64.b64encode(content).decode("ascii")
             attachment["data_url"] = f"data:{media_type};base64,{encoded}"
+
+
+def _validate_attachment_snapshot(attachment: Mapping[str, Any], content: bytes) -> None:
+    digest = str(attachment.get("content_digest") or "")
+    size = int(attachment.get("size_bytes") or 0)
+    if hashlib.sha256(content).hexdigest() != digest or len(content) != size:
+        raise ValueError("durable tool attachment does not match its Blob snapshot")
 
 
 def _read_committed_spill(

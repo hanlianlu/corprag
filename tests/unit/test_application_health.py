@@ -55,6 +55,25 @@ def test_health_owns_image_capability_summary() -> None:
     assert health.answer_image_capability == summary
 
 
+def test_health_owns_bounded_search_tool_provenance() -> None:
+    health = ApplicationHealth(readiness_probe=None)
+    health.set_search_toolchain(
+        {
+            "fd": {
+                "path": "/opt/bin/fd",
+                "version": "10.5.0",
+                "sha256": "a" * 64,
+                "ignored": "value",
+            },
+            "unknown": {"path": "/tmp/unknown"},
+        }
+    )
+
+    assert health.search_toolchain == {
+        "fd": {"path": "/opt/bin/fd", "version": "10.5.0", "sha256": "a" * 64}
+    }
+
+
 def test_health_defaults_image_capability_to_fail_closed_unknown() -> None:
     health = ApplicationHealth(readiness_probe=None)
 

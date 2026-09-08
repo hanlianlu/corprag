@@ -55,6 +55,7 @@ class _ApplicationComponents:
     memory_store: Any
     memory_embedder: Any
     web_conversations: WebConversationService
+    search_toolchain: Any | None = None
     model_catalogue: ModelCatalogueAdmin | None = None
     corpus_mutations: CorpusMutationService | None = None
     initialize_process: Callable[[DlightragConfig], None] = _noop_initialize_process
@@ -158,6 +159,7 @@ class Application:
         )
         components.initialize_process(self._config)
         try:
+            await self._initialize_search_toolchain()
             catalogue_ready = await self._initialize_model_catalogue()
             components.capabilities.resolve_profiles()
             await self._initialize_run_stores()
@@ -192,6 +194,14 @@ class Application:
             components.health.mark_ready()
         else:
             components.health.mark_not_ready()
+
+    async def _initialize_search_toolchain(self) -> None:
+        """Fail startup before admission when required path executables are unusable."""
+        toolchain = self._components.search_toolchain
+        if toolchain is None or self._config.answer.agent.execution_environment == "disabled":
+            return
+        await toolchain.ensure()
+        self._components.health.set_search_toolchain(toolchain.provenance)
 
     async def _initialize_model_catalogue(self) -> bool:
         """Synchronize the runtime overlay before resolving any model profile."""
