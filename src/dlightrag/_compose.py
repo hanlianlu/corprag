@@ -466,6 +466,7 @@ def _compose(config: DlightragConfig) -> _ApplicationComponents:
         web_conversations=web_conversations,
         search_toolchain=search_toolchain,
         initialize_process=_initialize_process,
+        close_agent_execution=answer_executor.aclose,
         close_process=_close_process,
     )
 

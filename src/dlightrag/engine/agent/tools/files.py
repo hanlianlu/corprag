@@ -773,7 +773,7 @@ def bash_tool(
                     return ToolResult.text(str(exc), is_error=True)
                 try:
                     completed = await environment.run(
-                        ["/bin/bash", "-lc", args.command],
+                        ["/bin/bash", "--noprofile", "--norc", "-c", args.command],
                         env=build_child_environment(home=home, tmp=tmp),
                         cwd=environment.root,
                         timeout_seconds=args.timeout_seconds,

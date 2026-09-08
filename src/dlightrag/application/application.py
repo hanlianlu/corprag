@@ -59,6 +59,7 @@ class _ApplicationComponents:
     model_catalogue: ModelCatalogueAdmin | None = None
     corpus_mutations: CorpusMutationService | None = None
     initialize_process: Callable[[DlightragConfig], None] = _noop_initialize_process
+    close_agent_execution: Callable[[], Awaitable[None]] = _noop_close_process
     close_process: Callable[[], Awaitable[None]] = _noop_close_process
 
 
@@ -451,6 +452,7 @@ class Application:
         for label, close in (
             ("memory janitor", self._stop_memory_janitor),
             ("corpus admin promotion worker", components.corpora.aclose),
+            ("Agent execution", components.close_agent_execution),
             ("the durable answer coordinator", components.coordinator.aclose),
             ("the cancellation listener", components.cancellation_listener.aclose),
             ("Web conversation retention", components.web_conversations.aclose),

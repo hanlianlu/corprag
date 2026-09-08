@@ -3,12 +3,13 @@
 
 import asyncio
 import os
+import signal
 import sys
 from pathlib import Path
 
 import pytest
 
-from dlightrag.engine.agent.environment import PathRejected
+from dlightrag.engine.agent.environment import PathRejected, TrustExecutionAdapter
 from dlightrag.engine.agent.environment.local import LocalExecutionEnvironment, ProcessChunk
 from dlightrag.engine.agent.environment.text import decode_workspace_text, encode_workspace_text
 
@@ -159,6 +160,138 @@ async def test_successful_process_run_terminates_background_process_group(tmp_pa
     assert not late_path.exists()
 
 
+async def test_timed_out_process_run_terminates_its_process_group(tmp_path: Path) -> None:
+    env = LocalExecutionEnvironment(tmp_path)
+    parent_path = tmp_path / "timeout-parent-pid"
+    child_path = tmp_path / "timeout-child-pid"
+    script = (
+        "import os,subprocess,sys,time; "
+        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); "
+        f"open({str(parent_path)!r}, 'w').write(str(os.getpid())); "
+        f"open({str(child_path)!r}, 'w').write(str(child.pid)); "
+        "time.sleep(60)"
+    )
+
+    completed = await env.run(
+        (sys.executable, "-c", script),
+        env=os.environ,
+        timeout_seconds=0.5,
+    )
+
+    assert completed.timed_out is True
+    assert parent_path.exists() and child_path.exists()
+    pids = (
+        int(parent_path.read_text(encoding="utf-8")),
+        int(child_path.read_text(encoding="utf-8")),
+    )
+    alive: list[int] = []
+    for _ in range(100):
+        alive = []
+        for pid in pids:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                continue
+            alive.append(pid)
+        if not alive:
+            break
+        await asyncio.sleep(0.01)
+    assert alive == []
+
+
+async def test_timed_out_process_run_drains_output_before_returning(tmp_path: Path) -> None:
+    env = LocalExecutionEnvironment(tmp_path)
+    pid_path = tmp_path / "drain-parent-pid"
+    first_chunk = asyncio.Event()
+    release_sink = asyncio.Event()
+    chunks: list[ProcessChunk] = []
+
+    async def slow_sink(chunk: ProcessChunk) -> None:
+        chunks.append(chunk)
+        if not first_chunk.is_set():
+            first_chunk.set()
+            await release_sink.wait()
+
+    async def release_after_process_exit() -> None:
+        await first_chunk.wait()
+        while not pid_path.exists():
+            await asyncio.sleep(0)
+        pid = int(pid_path.read_text(encoding="utf-8"))
+        while True:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            await asyncio.sleep(0.005)
+        release_sink.set()
+
+    release = asyncio.create_task(release_after_process_exit())
+    try:
+        completed = await env.run(
+            (
+                sys.executable,
+                "-c",
+                (
+                    "import os,time; "
+                    f"open({str(pid_path)!r}, 'w').write(str(os.getpid())); "
+                    "print('first', flush=True); "
+                    "time.sleep(0.05); "
+                    "print('second', flush=True); "
+                    "time.sleep(60)"
+                ),
+            ),
+            env=os.environ,
+            timeout_seconds=0.2,
+            on_output=slow_sink,
+        )
+    finally:
+        release_sink.set()
+        if not release.done():
+            release.cancel()
+        await asyncio.gather(release, return_exceptions=True)
+
+    assert completed.timed_out is True
+    output = b"".join(chunk.data for chunk in chunks)
+    assert b"first" in output
+    assert b"second" in output
+
+
+async def test_descendant_holding_output_pipe_cannot_block_process_completion(
+    tmp_path: Path,
+) -> None:
+    env = LocalExecutionEnvironment(tmp_path)
+    chunks: list[ProcessChunk] = []
+
+    async def record(chunk: ProcessChunk) -> None:
+        chunks.append(chunk)
+
+    pid_path = tmp_path / "escaped-pipe-holder-pid"
+    script = (
+        "import subprocess,sys; "
+        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'], "
+        "start_new_session=True); "
+        f"open({str(pid_path)!r}, 'w').write(str(child.pid)); "
+        "print('spawned', flush=True)"
+    )
+    try:
+        completed = await asyncio.wait_for(
+            env.run(
+                (sys.executable, "-c", script),
+                env=os.environ,
+                on_output=record,
+            ),
+            timeout=2,
+        )
+        assert completed.returncode == 0
+        assert b"spawned" in b"".join(chunk.data for chunk in chunks)
+    finally:
+        if pid_path.exists():
+            try:
+                os.kill(int(pid_path.read_text(encoding="utf-8")), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
 async def test_cancelling_process_run_terminates_its_process_group(tmp_path: Path) -> None:
     env = LocalExecutionEnvironment(tmp_path)
     parent_path = tmp_path / "parent-pid"
@@ -198,6 +331,45 @@ async def test_cancelling_process_run_terminates_its_process_group(tmp_path: Pat
             break
         await asyncio.sleep(0.01)
     assert alive == []
+
+
+async def test_closing_trust_adapter_terminates_and_reaps_active_process(
+    tmp_path: Path,
+) -> None:
+    adapter = TrustExecutionAdapter()
+    env = adapter.create(tmp_path)
+    pid_path = tmp_path / "adapter-close-pid"
+    task = asyncio.create_task(
+        env.run(
+            (
+                sys.executable,
+                "-c",
+                (
+                    "import os,time; "
+                    f"open({str(pid_path)!r}, 'w').write(str(os.getpid())); "
+                    "time.sleep(60)"
+                ),
+            ),
+            env=os.environ,
+        )
+    )
+    for _ in range(100):
+        if pid_path.exists():
+            break
+        await asyncio.sleep(0.01)
+    assert pid_path.exists()
+    pid = int(pid_path.read_text(encoding="utf-8"))
+
+    await adapter.aclose()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    with pytest.raises(RuntimeError, match="closed"):
+        adapter.create(tmp_path / "later")
+    with pytest.raises(RuntimeError, match="closed"):
+        await env.run((sys.executable, "-c", "pass"), env=os.environ)
 
 
 async def test_cancelling_process_run_terminates_and_reaps_process(tmp_path: Path) -> None:

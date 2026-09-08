@@ -642,6 +642,26 @@ def test_bash_timeout_must_be_positive_finite_and_process_safe(timeout: float) -
 
 
 @pytest.mark.asyncio
+async def test_bash_does_not_load_workspace_login_profile(tmp_path: Path) -> None:
+    env, scheduler = _env(tmp_path)
+    home, _tmp = env.prepare_process_directories()
+    marker = tmp_path / "profile-ran"
+    (home / ".bash_profile").write_text(
+        f"printf profile > {shlex.quote(str(marker))}\n",
+        encoding="utf-8",
+    )
+
+    result = await bash_tool(env, scheduler).execute(
+        BashArgs(command="printf command"),
+        tool_runtime(),
+    )
+
+    assert result.is_error is False
+    assert result.text_content.startswith("command")
+    assert not marker.exists()
+
+
+@pytest.mark.asyncio
 async def test_bash_does_not_inherit_seeded_secrets(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

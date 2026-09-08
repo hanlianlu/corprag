@@ -40,6 +40,10 @@ class ProcessChunk:
 
 type ProcessOutputSink = Callable[[ProcessChunk], Awaitable[None]]
 
+_POST_EXIT_OUTPUT_IDLE_SECONDS = 0.1
+_PROCESS_CLEANUP_CEILING_SECONDS = 1.0
+_ENVIRONMENT_CLOSE_CEILING_SECONDS = _PROCESS_CLEANUP_CEILING_SECONDS + 0.5
+
 
 @dataclass(frozen=True, slots=True)
 class CompletedProcess:
@@ -67,6 +71,11 @@ class LocalExecutionEnvironment:
             entries=self._usage_entries,
             total_bytes=self._usage_bytes,
         )
+        self._spawn_lock = asyncio.Lock()
+        self._active_processes: set[asyncio.subprocess.Process] = set()
+        self._active_processes_empty = asyncio.Event()
+        self._active_processes_empty.set()
+        self._closing = False
 
     @property
     def root(self) -> Path:
@@ -297,6 +306,25 @@ class LocalExecutionEnvironment:
         self._usage_bytes = proposed_bytes
         self._quota_violation = None
 
+    async def aclose(self) -> None:
+        """Stop accepting processes, terminate active groups, and await their cleanup."""
+        async with self._spawn_lock:
+            self._closing = True
+            active = tuple(self._active_processes)
+        for process in active:
+            self._terminate_group(process)
+        if not active:
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(self._active_processes_empty.wait()),
+                timeout=_ENVIRONMENT_CLOSE_CEILING_SECONDS,
+            )
+        except TimeoutError:
+            for process in active:
+                self._terminate_group(process)
+            await asyncio.gather(*(process.wait() for process in active), return_exceptions=True)
+
     async def run(
         self,
         argv: Sequence[str],
@@ -308,67 +336,137 @@ class LocalExecutionEnvironment:
     ) -> CompletedProcess:
         if not argv:
             raise ValueError("process argv cannot be empty")
-        process = await asyncio.create_subprocess_exec(
-            *argv,
-            cwd=str(cwd or self._root),
-            env=dict(env),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
-        )
+        async with self._spawn_lock:
+            if self._closing:
+                raise RuntimeError("execution environment is closed")
+            process = await asyncio.create_subprocess_exec(
+                *argv,
+                cwd=str(cwd or self._root),
+                env=dict(env),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+            self._active_processes.add(process)
+            self._active_processes_empty.clear()
 
         async def discard(_chunk: ProcessChunk) -> None:
             return None
 
         sink = on_output or discard
 
+        process_exited = asyncio.Event()
+        output_activity = asyncio.Event()
+        last_output_at = asyncio.get_running_loop().time()
+
         async def pump(
             reader: asyncio.StreamReader | None,
             stream: Literal["stdout", "stderr"],
         ) -> None:
+            nonlocal last_output_at
             if reader is None:
                 return
             while chunk := await reader.read(64 * 1024):
+                last_output_at = asyncio.get_running_loop().time()
+                output_activity.set()
                 await sink(ProcessChunk(stream=stream, data=chunk))
 
         async def wait_and_terminate_descendants() -> int:
+            nonlocal last_output_at
             returncode = await process.wait()
             # A successful shell may leave redirected background jobs in its
             # process group. End them before Bash releases WorkspaceAccess and
             # performs its final integrity/quota scan.
             self._terminate_group(process)
+            last_output_at = asyncio.get_running_loop().time()
+            process_exited.set()
+            output_activity.set()
             return returncode
 
-        tasks = (
-            asyncio.create_task(wait_and_terminate_descendants()),
+        wait_task = asyncio.create_task(wait_and_terminate_descendants())
+        pump_tasks = (
             asyncio.create_task(pump(process.stdout, "stdout")),
             asyncio.create_task(pump(process.stderr, "stderr")),
         )
+
+        def terminate_after_output_failure(task: asyncio.Task[None]) -> None:
+            if not task.cancelled() and task.exception() is not None:
+                self._terminate_group(process)
+
+        for task in pump_tasks:
+            task.add_done_callback(terminate_after_output_failure)
+
+        async def bound_post_exit_output() -> None:
+            await process_exited.wait()
+            cleanup_deadline = asyncio.get_running_loop().time() + _PROCESS_CLEANUP_CEILING_SECONDS
+            while not all(task.done() for task in pump_tasks):
+                now = asyncio.get_running_loop().time()
+                remaining = min(
+                    _POST_EXIT_OUTPUT_IDLE_SECONDS - (now - last_output_at),
+                    cleanup_deadline - now,
+                )
+                if remaining <= 0:
+                    break
+                output_activity.clear()
+                try:
+                    await asyncio.wait_for(output_activity.wait(), timeout=remaining)
+                except TimeoutError:
+                    break
+            for task in pump_tasks:
+                if not task.done():
+                    task.cancel()
+
+        output_bound_task = asyncio.create_task(bound_post_exit_output())
+
+        async def settle() -> int:
+            results = await asyncio.gather(
+                wait_task,
+                *pump_tasks,
+                output_bound_task,
+                return_exceptions=True,
+            )
+            process_result = results[0]
+            if isinstance(process_result, BaseException):
+                raise process_result
+            for result in results[1:3]:
+                if isinstance(result, BaseException) and not isinstance(
+                    result, asyncio.CancelledError
+                ):
+                    raise result
+            return process_result
+
+        settlement = asyncio.create_task(settle())
+
+        def unregister_settled_process(_task: asyncio.Task[int]) -> None:
+            self._active_processes.discard(process)
+            if not self._active_processes:
+                self._active_processes_empty.set()
+
+        settlement.add_done_callback(unregister_settled_process)
         try:
-            await asyncio.wait_for(asyncio.gather(*tasks), timeout=timeout_seconds)
+            returncode = await asyncio.wait_for(asyncio.shield(settlement), timeout=timeout_seconds)
         except TimeoutError:
+            if settlement.done():
+                raise
             self._terminate_group(process)
-            await asyncio.shield(process.wait())
-            await asyncio.gather(*tasks[1:], return_exceptions=True)
+            returncode = await asyncio.shield(settlement)
+            if self._closing:
+                raise asyncio.CancelledError() from None
             return CompletedProcess(
-                returncode=process.returncode or -signal.SIGKILL,
+                returncode=returncode or -signal.SIGKILL,
                 timed_out=True,
             )
         except asyncio.CancelledError:
             self._terminate_group(process)
-            await asyncio.shield(process.wait())
-            for task in tasks[1:]:
-                task.cancel()
-            await asyncio.gather(*tasks[1:], return_exceptions=True)
+            await asyncio.shield(asyncio.gather(settlement, return_exceptions=True))
             raise
         except BaseException:
             self._terminate_group(process)
-            await asyncio.shield(process.wait())
-            for task in tasks[1:]:
-                task.cancel()
-            await asyncio.gather(*tasks[1:], return_exceptions=True)
+            await asyncio.shield(asyncio.gather(settlement, return_exceptions=True))
             raise
-        return CompletedProcess(returncode=process.returncode or 0)
+        if self._closing:
+            raise asyncio.CancelledError
+        return CompletedProcess(returncode=returncode or 0)
 
     def _terminate_group(self, process: object) -> None:
         pid = getattr(process, "pid", None)

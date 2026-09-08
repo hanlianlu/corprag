@@ -38,6 +38,7 @@ from tests.config_helpers import mutate_config
 
 _CLOSE_ORDER = [
     "close:corpora",
+    "close:agent_execution",
     "close:coordinator",
     "close:listener",
     "close:web_conversations",
@@ -240,6 +241,7 @@ class _Parts:
         self.web_store = _WebStore(self.recorder)
         self.memory_store = _MemoryStore(self.recorder)
         self.memory_embedder = _Collaborator(self.recorder, "memory_embedder")
+        self.agent_execution = _Collaborator(self.recorder, "agent_execution")
         self.coordinator = _Coordinator(self.recorder)
         self.cancellation_listener = _CancellationListener(self.recorder)
         self.corpora = _Corpora(self.recorder)
@@ -275,6 +277,7 @@ class _Parts:
                 memory_embedder=cast(Any, self.memory_embedder),
                 web_conversations=cast(WebConversationService, self.web_conversations),
                 search_toolchain=cast(Any, self.search_toolchain),
+                close_agent_execution=self.agent_execution.aclose,
             ),
             web_enabled=web_enabled,
         )

@@ -749,6 +749,11 @@ class AnswerExecutor:
             execution_environment,  # type: ignore[arg-type]
         )
 
+    async def aclose(self) -> None:
+        """Close process execution before the durable coordinator drains runs."""
+        if self._execution_adapter is not None:
+            await self._execution_adapter.aclose()
+
     def acceptance_research_tools(self) -> tuple[AgentTool, ...]:
         """Return non-resource definitions execution may expose to Research.
 

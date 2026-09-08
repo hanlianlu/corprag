@@ -8,9 +8,11 @@ supply a sandbox adapter or startup fails.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Literal, Protocol
+from weakref import WeakSet
 
 from dlightrag.engine.agent.environment.local import (
     CompletedProcess,
@@ -64,12 +66,26 @@ class ExecutionEnvironmentAdapter(Protocol):
 
     def create(self, workspace: Path) -> ExecutionEnvironment: ...
 
+    async def aclose(self) -> None: ...
+
 
 class TrustExecutionAdapter:
     """Bind DlightRAG's rooted host environment. This is not a sandbox."""
 
+    def __init__(self) -> None:
+        self._environments: WeakSet[LocalExecutionEnvironment] = WeakSet()
+        self._closed = False
+
     def create(self, workspace: Path) -> LocalExecutionEnvironment:
-        return LocalExecutionEnvironment(workspace)
+        if self._closed:
+            raise RuntimeError("execution adapter is closed")
+        environment = LocalExecutionEnvironment(workspace)
+        self._environments.add(environment)
+        return environment
+
+    async def aclose(self) -> None:
+        self._closed = True
+        await asyncio.gather(*(environment.aclose() for environment in tuple(self._environments)))
 
 
 class SandboxUnavailableError(RuntimeError):
