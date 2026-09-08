@@ -76,7 +76,7 @@ class PGWorkspaceStore:
                 ):
                     return HandoffLeaseLost()
                 current = await conn.fetchval(
-                    "SELECT workspace_epoch FROM dlightrag_runs"
+                    "SELECT agent_workspace_epoch FROM dlightrag_runs"
                     " WHERE owner_id = $1 AND run_id = $2 FOR UPDATE",
                     self._owner_id,
                     self._run_id,
@@ -87,9 +87,10 @@ class PGWorkspaceStore:
                         expected_epoch=expected_epoch, current_epoch=current_epoch
                     )
                 updated = await conn.fetchval(
-                    "UPDATE dlightrag_runs SET workspace_epoch = $3, updated_at = NOW()"
-                    " WHERE owner_id = $1 AND run_id = $2 AND workspace_epoch IS NOT DISTINCT FROM $4"
-                    " RETURNING workspace_epoch",
+                    "UPDATE dlightrag_runs SET agent_workspace_epoch = $3, updated_at = NOW()"
+                    " WHERE owner_id = $1 AND run_id = $2"
+                    " AND agent_workspace_epoch IS NOT DISTINCT FROM $4"
+                    " RETURNING agent_workspace_epoch",
                     self._owner_id,
                     self._run_id,
                     destination_epoch,

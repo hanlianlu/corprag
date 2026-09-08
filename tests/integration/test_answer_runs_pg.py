@@ -22,6 +22,7 @@ from typing import Any
 import asyncpg
 import pytest
 
+from dlightrag.adapters.postgres.answer.workspace import PGWorkspaceStore
 from dlightrag.adapters.postgres.runtime.run_blob_store import (
     BlobSizeConflict,
     PGRunBlobStore,
@@ -33,6 +34,7 @@ from dlightrag.engine.agent.session.ids import StageIntentId
 from dlightrag.engine.runtime import (
     MAX_RECLAIMS_WITHOUT_PROGRESS,
     RUN_ABANDONED_ERROR_KIND,
+    HandoffCommit,
     IdempotencyKeyConflict,
     PendingArtifact,
     PendingArtifactReference,
@@ -1143,6 +1145,32 @@ class TestClaiming:
         assert reclaim.run.fencing_epoch == 2
         assert reclaim.run.reclaims_without_progress == 1
         assert reclaim.run.lease_owner == "worker-2"
+
+    async def test_claimed_workspace_handoff_persists_agent_workspace_epoch(
+        self, store, pool
+    ) -> None:
+        creation = await store.create_run(owner_id=_OWNER, request=_request())
+        claim = await _claimed(store)
+        workspace = PGWorkspaceStore(
+            pool=pool,
+            owner_id=_OWNER,
+            run_id=uuid.UUID(creation.run.run_id),
+            worker_id=_WORKER,
+            lease_owner=_WORKER,
+            fencing_epoch=claim.run.fencing_epoch,
+        )
+
+        outcome = await workspace.handoff_epoch(
+            expected_epoch=None,
+            destination_epoch=claim.run.fencing_epoch,
+            inventory=(),
+        )
+
+        assert isinstance(outcome, HandoffCommit)
+        assert outcome.workspace_epoch == claim.run.fencing_epoch
+        record = await store.get_run(owner_id=_OWNER, run_id=creation.run.run_id)
+        assert record is not None
+        assert record.agent_workspace_epoch == claim.run.fencing_epoch
 
     async def test_reclaim_abandonment_persists_the_exact_public_error(self, store, pool) -> None:
         creation = await store.create_run(owner_id=_OWNER, request=_request())
