@@ -2,7 +2,7 @@
 
 [project]
 name = "dlightrag"
-version = "2.0.5"
+version = "2.0.6"
 description = "Multimodal RAG with knowledge graph and contextual intelligence"
 readme = "README.md"
 requires-python = ">=3.14"
@@ -11,7 +11,7 @@ license-files = ["LICENSE", "NOTICE"]
 maintainers = [{ name = "HanlianLyu" }, { name = "hllyu" }]
 dependencies = [
     # Standalone workspace package
-    "dlightrag-memory==2.0.5",
+    "dlightrag-memory==2.0.6",
     # Built-in model providers (batteries included)
     "openai>=2.54.0",
     "anthropic>=1.4.0",
@@ -20,9 +20,9 @@ dependencies = [
     # Built-in RAG and source capabilities
     "lightrag-hku>=1.5.7",
     "aiofiles>=24.1.0",
-    "aiobotocore>=3.9.0",
+    "aiobotocore>=3.9.1",
     "azure-storage-blob>=12.30.1",
-    "botocore>=1.43.3",
+    "botocore>=1.43.75",
     "lingua-language-detector>=2.2.0",
     # PostgreSQL
     "asyncpg>=0.31.0",
@@ -42,7 +42,7 @@ dependencies = [
     # LightRAG paragraph_semantic chunker fallback
     "langchain-text-splitters",
     # MCP server
-    "mcp>=2.1.1",
+    "mcp>=2.2.0",
     # REST API server
     "PyJWT>=2.8.0",
     "fastapi>=0.141.1",
