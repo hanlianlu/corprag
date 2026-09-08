@@ -11,16 +11,11 @@ import pytest
 
 from dlightrag.adapters.postgres.model_catalogue import PGModelCatalogueStore
 from dlightrag.engine.ai.catalog import catalogue_overlay_revision
+from tests.integration.pg_conn import PG_CONN_KWARGS
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
-_PG_CONN_KWARGS: dict[str, Any] = {
-    "host": "localhost",
-    "port": 5432,
-    "user": "dlightrag",
-    "password": "dlightrag",
-    "database": "dlightrag",
-}
+_PG_CONN_KWARGS: dict[str, Any] = PG_CONN_KWARGS
 
 
 async def _pg_available() -> bool:

@@ -9,9 +9,8 @@ the unified run/Session retention floor, and the cascade that removes a pruned
 run's visible turn while leaving only empty conversation navigation state.
 
 Every test runs inside a throwaway database created and dropped per test, so the
-developer's ``dlightrag`` database is never mutated.
-
-Requires PostgreSQL at localhost:5432 (dlightrag/dlightrag); skipped otherwise.
+configured administrative database is never mutated. Connection settings come
+from the shared integration-test PostgreSQL environment; skipped if unavailable.
 """
 
 from __future__ import annotations
@@ -49,19 +48,14 @@ from dlightrag.engine.runtime import (
     run_request_fingerprint,
 )
 from tests.conftest import FingerprintingRunStore
+from tests.integration.pg_conn import PG_CONN_KWARGS
 
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.asyncio,
 ]
 
-_PG_CONN_KWARGS: dict[str, Any] = dict(
-    host="localhost",
-    port=5432,
-    user="dlightrag",
-    password="dlightrag",
-    database="dlightrag",
-)
+_PG_CONN_KWARGS: dict[str, Any] = PG_CONN_KWARGS
 
 _OWNER = "principal-alpha"
 _OTHER_OWNER = "principal-beta"

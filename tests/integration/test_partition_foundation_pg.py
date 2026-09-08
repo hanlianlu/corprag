@@ -18,13 +18,14 @@ Proves on compact fixtures:
 
 import hashlib
 import json
-import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
 import asyncpg
 import pytest
+
+from tests.integration.pg_conn import PG_CONN_KWARGS
 
 pytestmark = [
     pytest.mark.integration,
@@ -38,12 +39,7 @@ _EXTENSIONS = ("vector", "pg_textsearch", "pg_trgm")
 _WORKSPACE_A = "pf_it_ws_a"
 _WORKSPACE_HOT = "pf_it_ws_hot"
 
-_DEFAULT_KWARGS = dict(
-    host=os.environ.get("DLIGHTRAG_STORAGE__POSTGRES__HOST", "localhost"),
-    port=int(os.environ.get("DLIGHTRAG_STORAGE__POSTGRES__PORT", "5432")),
-    user=os.environ.get("DLIGHTRAG_STORAGE__POSTGRES__USER", "dlightrag"),
-    password=os.environ.get("DLIGHTRAG_STORAGE__POSTGRES__PASSWORD", "dlightrag"),
-)
+_DEFAULT_KWARGS: dict[str, Any] = PG_CONN_KWARGS
 
 
 def _kwargs(database: str) -> dict[str, Any]:

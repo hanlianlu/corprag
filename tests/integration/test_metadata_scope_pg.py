@@ -22,7 +22,6 @@ import asyncio
 import datetime
 import hashlib
 import json
-import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -31,6 +30,7 @@ import asyncpg
 import pytest
 
 from dlightrag.engine.rag.retrieval import MetadataFilter, MetadataScope
+from tests.integration.pg_conn import PG_CONN_KWARGS
 
 pytestmark = [
     pytest.mark.integration,
@@ -45,12 +45,7 @@ _EXTENSIONS = ("vector", "pg_textsearch", "pg_trgm")
 _WORKSPACE = "ms_it_ws"
 _THRESHOLD = 2
 
-_DEFAULT_KWARGS = dict(
-    host=os.environ.get("DLIGHTRAG_STORAGE__POSTGRES__HOST", "localhost"),
-    port=int(os.environ.get("DLIGHTRAG_STORAGE__POSTGRES__PORT", "5432")),
-    user=os.environ.get("DLIGHTRAG_STORAGE__POSTGRES__USER", "dlightrag"),
-    password=os.environ.get("DLIGHTRAG_STORAGE__POSTGRES__PASSWORD", "dlightrag"),
-)
+_DEFAULT_KWARGS: dict[str, Any] = PG_CONN_KWARGS
 
 
 def _kwargs(database: str) -> dict[str, Any]:

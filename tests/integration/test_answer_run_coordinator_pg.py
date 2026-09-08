@@ -7,9 +7,8 @@ replay across a reconnect, observed cancellation, graceful-shutdown requeue,
 and Session Entry/register round trips through JSONB.
 
 Every test runs inside a throwaway database created and dropped per test, so the
-developer's ``dlightrag`` database is never mutated.
-
-Requires PostgreSQL at localhost:5432 (dlightrag/dlightrag); skipped otherwise.
+configured administrative database is never mutated. Connection settings come
+from the shared integration-test PostgreSQL environment; skipped if unavailable.
 """
 
 import asyncio

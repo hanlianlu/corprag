@@ -8,9 +8,8 @@ compare-and-set, terminal transitions, graceful requeue, the crash-recovery boun
 event trimming, retention pruning, and ownership-safe artifact cleanup.
 
 Every test runs inside a throwaway database created and dropped per test, so the
-developer's ``dlightrag`` database is never mutated.
-
-Requires PostgreSQL at localhost:5432 (dlightrag/dlightrag); skipped otherwise.
+configured administrative database is never mutated. Connection settings come
+from the shared integration-test PostgreSQL environment; skipped if unavailable.
 """
 
 import asyncio

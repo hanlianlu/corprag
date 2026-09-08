@@ -7,9 +7,8 @@ in PostgreSQL itself. Reader startup must validate the migrated domain schema
 without issuing any DDL and must fail before serving when that schema is absent.
 
 Every test runs inside a throwaway database created and dropped per test, so the
-developer's ``dlightrag`` database is never mutated.
-
-Requires PostgreSQL at localhost:5432 (dlightrag/dlightrag); skipped otherwise.
+configured administrative database is never mutated. Connection settings come
+from the shared integration-test PostgreSQL environment; skipped if unavailable.
 """
 
 import os
@@ -47,19 +46,14 @@ from dlightrag.application.config import (
 )
 from dlightrag.engine.ai.settings import EmbeddingSettings, ModelsSettings
 from dlightrag.engine.rag.workspace.ports import CorpusSchemaError
+from tests.integration.pg_conn import PG_CONN_KWARGS
 
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.asyncio,
 ]
 
-_PG_CONN_KWARGS: dict[str, Any] = dict(
-    host="localhost",
-    port=5432,
-    user="dlightrag",
-    password="dlightrag",
-    database="dlightrag",
-)
+_PG_CONN_KWARGS: dict[str, Any] = PG_CONN_KWARGS
 
 
 async def apply_migrations(conn: Any, **kwargs: Any) -> None:

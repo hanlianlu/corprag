@@ -27,7 +27,6 @@ that this module creates and drops itself. Proves on compact fixtures:
 
 import asyncio
 import datetime
-import os
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -47,6 +46,7 @@ from dlightrag.adapters.postgres.corpus.promotion_worker import (
 )
 from dlightrag.adapters.postgres.corpus.workspaces import PGWorkspaceRegistry
 from dlightrag.engine.rag.workspace.ports import WorkspaceWriteFencedError
+from tests.integration.pg_conn import PG_CONN_KWARGS
 
 pytestmark = [
     pytest.mark.integration,
@@ -74,12 +74,7 @@ _METADATA_TABLE = "dlightrag_doc_metadata"
 _VECTOR_TABLE = "lightrag_vdb_chunks_8"
 _CHUNK_SCOPE_INDEX = "idx_lightrag_doc_chunks_dlightrag_full_doc_id"
 
-_DEFAULT_KWARGS = dict(
-    host=os.environ.get("DLIGHTRAG_STORAGE__POSTGRES__HOST", "localhost"),
-    port=int(os.environ.get("DLIGHTRAG_STORAGE__POSTGRES__PORT", "5432")),
-    user=os.environ.get("DLIGHTRAG_STORAGE__POSTGRES__USER", "dlightrag"),
-    password=os.environ.get("DLIGHTRAG_STORAGE__POSTGRES__PASSWORD", "dlightrag"),
-)
+_DEFAULT_KWARGS: dict[str, Any] = PG_CONN_KWARGS
 
 
 def _kwargs(database: str) -> dict[str, Any]:

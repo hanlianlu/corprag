@@ -1,17 +1,21 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
-"""Integration tests for the native development reset against a dedicated database.
+"""Integration tests for the native development reset against an isolated database.
 
-These tests use their own dedicated database ``dlightrag_reset_test``; the real
-development database is never touched by the suite.
+The suite derives its server connection from the shared integration-test
+environment and creates a uniquely named database that it alone force-drops.
 """
 
 import importlib.util
+import os
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
 import asyncpg
 import pytest
+
+from tests.integration.pg_conn import PG_CONN_KWARGS
 
 _reset_path = Path(__file__).resolve().parents[2] / "scripts" / "reset_development.py"
 _spec = importlib.util.spec_from_file_location("reset_development_cli_pg", _reset_path)
@@ -22,10 +26,9 @@ _spec.loader.exec_module(_reset)
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
-_ADMIN: dict[str, Any] = dict(
-    host="localhost", port=5432, user="dlightrag", password="dlightrag", database="dlightrag"
-)
-_TEST_DATABASE = "dlightrag_reset_test"
+_ADMIN: dict[str, Any] = PG_CONN_KWARGS
+_TEST_DATABASE = f"dlightrag_reset_{os.getpid()}_{uuid.uuid4().hex[:12]}"
+_TEST_CONN_KWARGS = {**PG_CONN_KWARGS, "database": _TEST_DATABASE}
 
 _EXTENSIONS = ("vector", "pg_textsearch", "pg_jieba")
 
@@ -61,11 +64,11 @@ async def _drop_test_database() -> None:
 
 def _test_target() -> Any:
     return _reset.PostgresTarget(
-        host="localhost",
-        port=5432,
-        user="dlightrag",
-        password="dlightrag",
-        database=_TEST_DATABASE,
+        host=str(_TEST_CONN_KWARGS["host"]),
+        port=int(_TEST_CONN_KWARGS["port"]),
+        user=str(_TEST_CONN_KWARGS["user"]),
+        password=str(_TEST_CONN_KWARGS["password"]),
+        database=str(_TEST_CONN_KWARGS["database"]),
     )
 
 
@@ -86,9 +89,7 @@ async def test_native_reset_replaces_public_schema_and_recreates_extensions(
     (working_dir / "old-file").write_text("stale")
 
     # Seed an application-shaped schema and a table.
-    seed = await asyncpg.connect(
-        host="localhost", port=5432, user="dlightrag", password="dlightrag", database=_TEST_DATABASE
-    )
+    seed = await asyncpg.connect(**_TEST_CONN_KWARGS)
     try:
         await seed.execute("CREATE TABLE dlightrag_seed(value int)")
         await seed.execute("INSERT INTO dlightrag_seed VALUES (1)")
@@ -105,9 +106,7 @@ async def test_native_reset_replaces_public_schema_and_recreates_extensions(
     assert list(working_dir.iterdir()) == []
     assert _reset.verify_working_dir_empty(working_dir) == []
 
-    conn = await asyncpg.connect(
-        host="localhost", port=5432, user="dlightrag", password="dlightrag", database=_TEST_DATABASE
-    )
+    conn = await asyncpg.connect(**_TEST_CONN_KWARGS)
     try:
         assert await _reset._verify_empty_postgres(conn) == []
         extensions = {
@@ -144,9 +143,7 @@ async def test_rerun_after_success_converges_to_the_same_empty_state(tmp_path: P
     assert list(working_dir.iterdir()) == []
     assert _reset.verify_working_dir_empty(working_dir) == []
 
-    conn = await asyncpg.connect(
-        host="localhost", port=5432, user="dlightrag", password="dlightrag", database=_TEST_DATABASE
-    )
+    conn = await asyncpg.connect(**_TEST_CONN_KWARGS)
     try:
         assert await _reset._verify_empty_postgres(conn) == []
     finally:
@@ -157,9 +154,7 @@ async def test_active_sessions_are_refused_without_force_disconnect(tmp_path: Pa
     working_dir = tmp_path / "dlightrag_storage"
     working_dir.mkdir()
 
-    other = await asyncpg.connect(
-        host="localhost", port=5432, user="dlightrag", password="dlightrag", database=_TEST_DATABASE
-    )
+    other = await asyncpg.connect(**_TEST_CONN_KWARGS)
     try:
         refused = _reset.ResetReport(mode="native")
         await _reset._native_pg_work(
@@ -188,9 +183,7 @@ async def test_dry_run_reports_without_mutation(tmp_path: Path) -> None:
     working_dir.mkdir()
     (working_dir / "file").write_text("keep")
 
-    seed = await asyncpg.connect(
-        host="localhost", port=5432, user="dlightrag", password="dlightrag", database=_TEST_DATABASE
-    )
+    seed = await asyncpg.connect(**_TEST_CONN_KWARGS)
     try:
         await seed.execute("CREATE TABLE dlightrag_keep(value int)")
     finally:
@@ -206,9 +199,7 @@ async def test_dry_run_reports_without_mutation(tmp_path: Path) -> None:
     assert any("dry-run-ddl" in step for step, _ in report.steps)
     # Nothing was mutated.
     assert (working_dir / "file").exists()
-    conn = await asyncpg.connect(
-        host="localhost", port=5432, user="dlightrag", password="dlightrag", database=_TEST_DATABASE
-    )
+    conn = await asyncpg.connect(**_TEST_CONN_KWARGS)
     try:
         remains = await conn.fetchval("SELECT to_regclass('dlightrag_keep') IS NOT NULL")
         assert remains is True

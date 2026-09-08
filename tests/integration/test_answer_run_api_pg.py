@@ -8,9 +8,9 @@ unknown one, that a reconnecting subscriber replays the durable sequence without
 gaps or duplicates, and that cancellation and event trimming return the exact
 documented statuses.
 
-Every test runs inside a throwaway database, so the developer's ``dlightrag``
-database is never mutated. Requires PostgreSQL at localhost:5432; skipped
-otherwise.
+Every test runs inside a throwaway database, so the configured administrative
+database is never mutated. Connection settings come from the shared
+integration-test PostgreSQL environment; skipped if unavailable.
 """
 
 import json

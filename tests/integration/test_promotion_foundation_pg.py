@@ -9,11 +9,12 @@ drive these rows.
 """
 
 import datetime
-import os
 from typing import Any
 
 import asyncpg
 import pytest
+
+from tests.integration.pg_conn import PG_CONN_KWARGS
 
 pytestmark = [
     pytest.mark.integration,
@@ -25,12 +26,7 @@ _TEST_DB = "dlightrag_partition_foundation_test"
 _WORKSPACE = "pf_promotion_ws"
 _WORKSPACE_B = "pf_promotion_ws_b"
 
-_DEFAULT_KWARGS = dict(
-    host=os.environ.get("DLIGHTRAG_STORAGE__POSTGRES__HOST", "localhost"),
-    port=int(os.environ.get("DLIGHTRAG_STORAGE__POSTGRES__PORT", "5432")),
-    user=os.environ.get("DLIGHTRAG_STORAGE__POSTGRES__USER", "dlightrag"),
-    password=os.environ.get("DLIGHTRAG_STORAGE__POSTGRES__PASSWORD", "dlightrag"),
-)
+_DEFAULT_KWARGS: dict[str, Any] = PG_CONN_KWARGS
 
 
 def _kwargs(database: str) -> dict[str, Any]:
