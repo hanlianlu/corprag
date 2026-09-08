@@ -256,6 +256,22 @@ class TestMetadataSQL:
         assert "OLD._dlightrag_finalization_complete IS TRUE" in sql
         assert "metadata._dlightrag_finalization_complete IS TRUE" in sql
 
+    def test_legacy_visibility_migration_publishes_only_pre_journal_processed_rows(self):
+        migration = next(
+            item
+            for item in _SCHEMA_MIGRATIONS
+            if item.version == "publish_legacy_processed_documents"
+        )
+        sql = migration.statements[0]
+
+        assert "to_regclass('public.lightrag_doc_status') IS NOT NULL" in sql
+        assert "metadata._dlightrag_finalization_complete IS FALSE" in sql
+        assert "migration.version = 'product_document_visibility'" in sql
+        assert "COALESCE(metadata.ingested_at, '-infinity'::timestamptz) <=" in sql
+        assert "status.workspace = metadata.workspace" in sql
+        assert "status.id = metadata.doc_id" in sql
+        assert "status.status = 'processed'" in sql
+
     def test_metadata_schema_migrations_cover_registry_columns_and_indexes(self):
         versions = {migration.version for migration in _SCHEMA_MIGRATIONS}
         sql = "\n".join(stmt for migration in _SCHEMA_MIGRATIONS for stmt in migration.statements)
@@ -283,6 +299,7 @@ class TestMetadataSQL:
                 "index_filename_trgm",
                 "metadata_field_stats",
                 "product_document_visibility",
+                "publish_legacy_processed_documents",
             }
             | {f"column_{field_id}" for field_id in declared}
             | {f"index_{field_id}_canonical" for field_id in declared}

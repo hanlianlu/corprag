@@ -250,7 +250,7 @@ def test_vector_and_pool_defaults_export_lightrag_environment(
     assert os.environ["POSTGRES_MAX_CONNECTIONS"] == "16"
 
 
-def test_deployment_workspace_overrides_inherited_lightrag_binding(
+def test_backend_env_disables_global_lightrag_workspace_binding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("POSTGRES_WORKSPACE", "inherited-workspace")
@@ -258,7 +258,7 @@ def test_deployment_workspace_overrides_inherited_lightrag_binding(
 
     config.apply_lightrag_backend_env(force=True)
 
-    assert os.environ["POSTGRES_WORKSPACE"] == "resolved-workspace"
+    assert os.environ["POSTGRES_WORKSPACE"] == ""
 
 
 def test_milvus_environment_overrides_only_resolved_bindings(

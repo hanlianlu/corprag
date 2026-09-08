@@ -148,6 +148,34 @@ WHERE custom_metadata_search
       IS DISTINCT FROM dlightrag_canonical_custom_metadata(custom_metadata)
 """
 
+# Rows written before the publication journal existed were completed under the
+# legacy contract. Publish only rows LightRAG durably marked processed before
+# the journal migration; post-migration interrupted commits remain hidden.
+_PUBLISH_LEGACY_PROCESSED_DOCUMENTS = f"""
+DO $$
+BEGIN
+    IF to_regclass('public.lightrag_doc_status') IS NOT NULL THEN
+        UPDATE dlightrag_doc_metadata AS metadata
+        SET {_FINALIZATION_COMPLETE_COLUMN} = TRUE
+        WHERE metadata.{_FINALIZATION_COMPLETE_COLUMN} IS FALSE
+          AND COALESCE(metadata.ingested_at, '-infinity'::timestamptz) <= (
+              SELECT migration.applied_at
+              FROM dlightrag_schema_migrations AS migration
+              WHERE migration.scope = 'doc_metadata'
+                AND migration.version = 'product_document_visibility'
+          )
+          AND EXISTS (
+              SELECT 1
+              FROM lightrag_doc_status AS status
+              WHERE status.workspace = metadata.workspace
+                AND status.id = metadata.doc_id
+                AND status.status = 'processed'
+          );
+    END IF;
+END
+$$
+"""  # noqa: S608 - fixed internal column
+
 _METADATA_TABLE = "dlightrag_doc_metadata"
 _SEARCH_COLUMN = "custom_metadata_search"
 
@@ -482,6 +510,13 @@ def _build_schema_migrations() -> tuple[Migration, ...]:
                 f"TRUNCATE TABLE {_FIELD_STATS_TABLE}",
                 _BACKFILL_FIELD_STATS,
             ),
+        )
+    )
+    migrations.append(
+        Migration(
+            "publish_legacy_processed_documents",
+            "Publish verified processed documents written before the visibility journal",
+            (_PUBLISH_LEGACY_PROCESSED_DOCUMENTS,),
         )
     )
     return tuple(migrations)

@@ -63,6 +63,83 @@ async def test_pg18_extensions_and_preload_are_ready(pg_conn) -> None:
     assert report.missing_preload_libraries == []
 
 
+async def test_initialized_default_runtime_does_not_capture_tenant_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pg_conn,
+) -> None:
+    from dlightrag.adapters.observability import LangfuseTelemetry
+    from dlightrag.adapters.postgres.core._pool import pg_pool
+    from dlightrag.adapters.postgres.corpus.corpus import build_pg_corpus_backend
+    from dlightrag.application.settings import rag_settings
+    from dlightrag.engine.rag.workspace.workspace_rag import WorkspaceRag
+
+    conn_kwargs = pg_conn_kwargs_from_env()
+    deployment_workspace = make_workspace_name("deployment")
+    tenant_workspace = make_workspace_name("tenant")
+    deployment_cfg = make_e2e_config(
+        working_dir=tmp_path / "storage",
+        workspace=deployment_workspace,
+        conn_kwargs=conn_kwargs,
+    )
+    tenant_cfg = clone_config(deployment_cfg)
+    mutate_config(tenant_cfg, "deployment.workspace", tenant_workspace)
+    set_config(deployment_cfg)
+    install_fake_model_functions(monkeypatch, dim=deployment_cfg.models.embedding.dim)
+    scheduler = ModelScheduler(max_concurrency=deployment_cfg.models.max_concurrency)
+
+    deployment = await WorkspaceRag.acreate(
+        workspace_id=deployment_workspace,
+        settings=rag_settings(deployment_cfg),
+        backend=build_pg_corpus_backend(deployment_cfg),
+        scheduler=scheduler,
+        telemetry=LangfuseTelemetry(),
+    )
+    tenant = None
+    try:
+        tenant = await WorkspaceRag.acreate(
+            workspace_id=tenant_workspace,
+            settings=rag_settings(tenant_cfg),
+            backend=build_pg_corpus_backend(tenant_cfg),
+            scheduler=scheduler,
+            telemetry=LangfuseTelemetry(),
+        )
+        doc_path = tmp_path / "workspace-isolation.md"
+        doc_path.write_text("Tenant workspace isolation marker.", encoding="utf-8")
+        result = await tenant.aingest(
+            source_type="local",
+            path=str(doc_path),
+            replace=True,
+            title="Workspace isolation",
+        )
+
+        assert (
+            await pg_conn.fetchval(
+                "SELECT COUNT(*) FROM lightrag_doc_full WHERE workspace = $1 AND id = $2",
+                tenant_workspace,
+                result["doc_id"],
+            )
+            == 1
+        )
+        assert (
+            await pg_conn.fetchval(
+                "SELECT COUNT(*) FROM lightrag_doc_full WHERE workspace = $1 AND id = $2",
+                deployment_workspace,
+                result["doc_id"],
+            )
+            == 0
+        )
+    finally:
+        if tenant is not None:
+            if tenant._initialized:
+                await tenant.areset(keep_files=False)
+            await tenant.aclose()
+        if deployment._initialized:
+            await deployment.areset(keep_files=False)
+        await deployment.aclose()
+        await pg_pool.close()
+
+
 async def test_unified_text_ingest_replace_and_filtered_retrieval(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

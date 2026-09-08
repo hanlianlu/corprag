@@ -1022,8 +1022,11 @@ class DlightragConfig(BaseSettings):
     def apply_lightrag_backend_env(self, *, force: bool = False) -> None:
         pg, vector = self.storage.postgres, self.storage.lightrag
         active = self.pg_connection_kwargs()
+        # DlightRAG multiplexes WorkspaceRag instances in one process. Disable
+        # LightRAG's process-global PostgreSQL workspace override so each
+        # storage instance keeps the workspace supplied by WorkspaceRag.
+        os.environ["POSTGRES_WORKSPACE"] = ""
         values: dict[str, Any] = {
-            "POSTGRES_WORKSPACE": self.deployment.workspace,
             "POSTGRES_HOST": active["host"],
             "POSTGRES_PORT": active["port"],
             "POSTGRES_USER": active["user"],

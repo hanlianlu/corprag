@@ -271,16 +271,24 @@ async def test_finalization_marker_round_trips_and_partial_updates_preserve_true
     assert preserved is not None
     assert preserved["title"] == "partial update"
     assert preserved["_dlightrag_finalization_complete"] is True
+    await index.upsert("doc-unfinished", {"filename": "unfinished.pdf"})
 
     # Reproduce an already-partitioned pre-marker schema. Foundation validation
     # must allow the append-only migration to add the column before the final
-    # schema verifier requires it.
+    # schema verifier requires it. A durable LightRAG PROCESSED record proves a
+    # legacy document was complete; rows without that proof stay hidden.
     conn = await asyncpg.connect(**_kwargs(_TEST_DB))
     try:
         await conn.execute(
+            "INSERT INTO lightrag_doc_status "
+            "(workspace, id, status, file_path) "
+            "VALUES ('ms_finalization_marker', 'doc-marker', 'processed', 'marker.pdf')"
+        )
+        await conn.execute(
             "DELETE FROM dlightrag_schema_migrations "
             "WHERE scope = 'doc_metadata' AND version IN "
-            "('column_finalization_complete', 'product_document_visibility')"
+            "('column_finalization_complete', 'product_document_visibility', "
+            "'publish_legacy_processed_documents')"
         )
         await conn.execute(
             "ALTER TABLE dlightrag_doc_metadata DROP COLUMN _dlightrag_finalization_complete"
@@ -289,8 +297,11 @@ async def test_finalization_marker_round_trips_and_partial_updates_preserve_true
         await conn.close()
     await index.initialize()
     migrated = await index.get("doc-marker")
+    unfinished = await index.get("doc-unfinished")
     assert migrated is not None
-    assert migrated["_dlightrag_finalization_complete"] is False
+    assert unfinished is not None
+    assert migrated["_dlightrag_finalization_complete"] is True
+    assert unfinished["_dlightrag_finalization_complete"] is False
 
 
 async def test_field_schema_stats_follow_writes_deletes_clear_and_workspace_union(
