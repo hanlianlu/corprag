@@ -46,8 +46,8 @@ class IdempotencyKeyConflict(RuntimeError):
     """A caller reused a submission key with different normalized input."""
 
 
-class RunCapacityExceededError(RuntimeError):
-    """The deployment-wide nonterminal admission fuse is full."""
+class RunAdmissionLimitExceededError(RuntimeError):
+    """The deployment-wide nonterminal admission limit was reached."""
 
 
 class RunRuntimeUnavailableError(RuntimeError):
@@ -254,7 +254,7 @@ __all__ = [
     "IdempotencyKeyConflict",
     "RunCancellation",
     "RunCancelledError",
-    "RunCapacityExceededError",
+    "RunAdmissionLimitExceededError",
     "RunCreation",
     "RunEvent",
     "RunFailedError",

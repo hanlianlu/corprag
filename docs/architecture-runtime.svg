@@ -98,7 +98,7 @@
   <rect class="module" x="110" y="820" width="260" height="115" rx="12"/>
   <text class="node-title" x="240" y="860" text-anchor="middle">engine.runtime</text>
   <text class="node-copy" x="240" y="890" text-anchor="middle">Query + Corpus Mutation dispatch · leases</text>
-  <text class="node-copy" x="240" y="913" text-anchor="middle">capacity · fencing · durable events</text>
+  <text class="node-copy" x="240" y="913" text-anchor="middle">local worker bounds · admission · fencing · events</text>
 
   <rect class="module" x="430" y="820" width="280" height="115" rx="12"/>
   <text class="node-title" x="570" y="860" text-anchor="middle">engine.answer</text>

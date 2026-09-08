@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable
 from typing import Annotated, Any, Literal
 
 from mcp.types import ToolAnnotations
@@ -34,6 +35,15 @@ from dlightrag.application.corpus_admin import (
     normalize_workspace,
     validate_workspace_name,
 )
+from dlightrag.application.runs import RunAdmissionLimitExceededError, RunCreation
+
+
+async def _accepted_corpus_mutation(operation: Awaitable[RunCreation]) -> dict[str, Any]:
+    try:
+        creation = await operation
+    except RunAdmissionLimitExceededError:
+        raise ValueError("Deployment-wide nonterminal admission limit reached") from None
+    return mcp_server._run_descriptor(creation.run)
 
 
 @mcp_app.tool(
@@ -178,13 +188,14 @@ async def reset_corpus_tool(
         normalized_workspace,
         application=application,
     )
-    creation = await application.corpus_mutations.create_reset(
-        workspace=normalized_workspace,
-        submitted_by=mcp_server._owner_id(),
-        supersedes_run_id=supersedes_run_id,
-        idempotency_key=idempotency_key,
+    return await _accepted_corpus_mutation(
+        application.corpus_mutations.create_reset(
+            workspace=normalized_workspace,
+            submitted_by=mcp_server._owner_id(),
+            supersedes_run_id=supersedes_run_id,
+            idempotency_key=idempotency_key,
+        )
     )
-    return mcp_server._run_descriptor(creation.run)
 
 
 @mcp_app.tool(
@@ -355,13 +366,14 @@ async def ingest_tool(
             workspace=workspace_name,
         )
         ingest_spec = ingest_spec.model_copy(update={"path": path, "documents": managed_documents})
-    creation = await application.corpus_mutations.create_ingest(
-        workspace=workspace_name,
-        spec=ingest_spec,
-        submitted_by=mcp_server._owner_id(),
-        idempotency_key=args.idempotency_key,
+    return await _accepted_corpus_mutation(
+        application.corpus_mutations.create_ingest(
+            workspace=workspace_name,
+            spec=ingest_spec,
+            submitted_by=mcp_server._owner_id(),
+            idempotency_key=args.idempotency_key,
+        )
     )
-    return mcp_server._run_descriptor(creation.run)
 
 
 @mcp_app.tool(
@@ -461,14 +473,15 @@ async def retry_files_tool(
         workspace_name,
         application=application,
     )
-    creation = await application.corpus_mutations.create_retry(
-        workspace=workspace_name,
-        submitted_by=mcp_server._owner_id(),
-        document_ids=args.document_ids or (),
-        selector=args.selector,
-        idempotency_key=args.idempotency_key,
+    return await _accepted_corpus_mutation(
+        application.corpus_mutations.create_retry(
+            workspace=workspace_name,
+            submitted_by=mcp_server._owner_id(),
+            document_ids=args.document_ids or (),
+            selector=args.selector,
+            idempotency_key=args.idempotency_key,
+        )
     )
-    return mcp_server._run_descriptor(creation.run)
 
 
 @mcp_app.tool(
@@ -509,12 +522,13 @@ async def delete_files_tool(
         workspace_name,
         application=application,
     )
-    creation = await application.corpus_mutations.create_delete(
-        workspace=workspace_name,
-        submitted_by=mcp_server._owner_id(),
-        filenames=args.filenames or (),
-        file_paths=args.file_paths or (),
-        document_ids=args.document_ids or (),
-        idempotency_key=args.idempotency_key,
+    return await _accepted_corpus_mutation(
+        application.corpus_mutations.create_delete(
+            workspace=workspace_name,
+            submitted_by=mcp_server._owner_id(),
+            filenames=args.filenames or (),
+            file_paths=args.file_paths or (),
+            document_ids=args.document_ids or (),
+            idempotency_key=args.idempotency_key,
+        )
     )
-    return mcp_server._run_descriptor(creation.run)

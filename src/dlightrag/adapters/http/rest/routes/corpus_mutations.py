@@ -35,7 +35,7 @@ from dlightrag.application.corpus_admin import (
 )
 from dlightrag.application.runs import (
     IdempotencyKeyConflict,
-    RunCapacityExceededError,
+    RunAdmissionLimitExceededError,
     RunCreation,
     RunRuntimeUnavailableError,
 )
@@ -69,8 +69,10 @@ async def _accept(call: Callable[[], Awaitable[RunCreation]]) -> dict[str, Any]:
             status_code=409,
             detail="Idempotency-Key was reused with a different Corpus Mutation request",
         ) from None
-    except RunCapacityExceededError:
-        raise HTTPException(status_code=503, detail="Run admission capacity is full") from None
+    except RunAdmissionLimitExceededError:
+        raise HTTPException(
+            status_code=503, detail="Deployment-wide nonterminal admission limit reached"
+        ) from None
     except RunRuntimeUnavailableError:
         raise HTTPException(status_code=503, detail="Run runtime is unavailable") from None
     except ValueError as exc:

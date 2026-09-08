@@ -140,9 +140,10 @@ states and the common `GET|DELETE /runs/{run_id}` plus
 `GET /runs/{run_id}/events` observation routes. Cancellation closes at the
 durable upstream handoff. A multi-document mutation with any failed document is
 `failed`, not partially successful. Acceptance is atomically bounded by the
-validated 1,000 nonterminal Corpus Mutation fuse; a full lane returns HTTP 503
-before inserting a Run. Accepted work remains durable and independently claims
-at no more than two mutations deployment-wide.
+1,000-Run Corpus Mutation deployment-wide nonterminal admission limit; reaching
+it returns HTTP 503 before inserting a Run. Accepted work remains durable, and
+each writer process executes at most two Corpus Mutations concurrently by
+default.
 
 The terminal result carries the action, stable `track_id`, bounded per-document
 outcomes, `document_count`, and `details_truncated`. An ambiguous destructive
@@ -664,10 +665,12 @@ Stable top-level Retrieval terminal error kinds are `retrieval_timeout`,
 Internal exception text and schema detail are not public.
 
 Accepted Retrieval and Answer Runs queue under worker saturation while the Query
-Lane has fewer than 30,000 nonterminal Runs; the deployment-wide fuse rejects
-later admission with HTTP 503. Corpus Mutation admission uses its independent
-validated 1,000-Run fuse and the same pre-insert 503 behavior. The controlled
-failure and full-fuse evidence is linked from the
+Lane has fewer than 30,000 nonterminal Runs; its deployment-wide nonterminal
+admission limit rejects later admission with HTTP 503. Corpus Mutation admission
+uses its independent 1,000-Run limit and the same pre-insert 503 behavior. REST,
+MCP, and same-origin browser commands report the retriable message
+`Deployment-wide nonterminal admission limit reached`. The controlled failure
+and admission-limit evidence is linked from the
 [Slice 6 validation report](validation/run-runtime-slice-6.md). Queue residence
 has no application timeout. Top-level Retrieval applies
 `corpus.retrieval.timeout` only during claimed

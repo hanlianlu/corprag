@@ -171,12 +171,14 @@ in-process WAF or rate limiter. SIEM systems such as Sentinel observe/correlate;
 they are not an inline blocker.
 
 Accepted Retrieval and Answer Runs queue rather than fail under local worker
-saturation, up to the deployment-wide nonterminal Query-lane fuse (30,000 by
-default). Corpus Mutation Runs use a separate validated 1,000-Run admission
-fuse and deployment-wide active bound of two. The controlled full-fuse,
-authorization, sanitation, and 10k-client evidence is recorded in the
-[Slice 6 validation report](validation/run-runtime-slice-6.md). Monitor
-PostgreSQL/blob growth and rate-limit acceptance before either safety bound.
+saturation, up to the deployment-wide Query-lane nonterminal admission limit
+(30,000 by default). Corpus Mutation Runs use a separate 1,000-Run limit. Each
+writer process executes at most two Corpus Mutations concurrently by default;
+deployment configuration owns process count and total active capacity. The
+controlled admission-limit, authorization, sanitation, and 10k-client evidence
+is recorded in the [Slice 6 validation report](validation/run-runtime-slice-6.md).
+Monitor PostgreSQL/blob growth and rate-limit acceptance before either admission
+limit.
 `none` and `simple` collapse callers into one deployment owner and require an
 already restricted network boundary.
 

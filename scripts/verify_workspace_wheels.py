@@ -879,7 +879,7 @@ def _smoke_root_interfaces() -> None:
     from dlightrag.application.access import DEPLOYMENT_OWNER_ID
     from dlightrag.application.config import (
         DlightragConfig,
-        QueryLaneRuntimeConfig,
+        LaneRuntimeConfig,
         RuntimeConfig,
     )
     from dlightrag.application.corpus_admin import CorpusAdmin, CorpusAdminSettings
@@ -1019,7 +1019,12 @@ def _smoke_root_interfaces() -> None:
 
     config = DlightragConfig(
         models=ModelsSettings(max_concurrency=2),
-        runtime=RuntimeConfig(query=QueryLaneRuntimeConfig(worker_concurrency=3)),
+        runtime=RuntimeConfig(
+            query=LaneRuntimeConfig(
+                worker_concurrency=3,
+                max_nonterminal_runs=30_000,
+            )
+        ),
         corpus=CorpusSettings(
             ingestion=IngestionSettings(pipeline=PipelineSettings(max_concurrency=5))
         ),

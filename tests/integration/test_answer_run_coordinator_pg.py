@@ -32,7 +32,7 @@ from dlightrag.adapters.postgres.runtime.run_store import PGRunStore
 from dlightrag.adapters.postgres.web.web_conversations import PGWebConversationStore
 from dlightrag.application import Application
 from dlightrag.application.answer_runs.execution import AnswerRunInput, PinnedModelProfile
-from dlightrag.application.config import DlightragConfig, QueryLaneRuntimeConfig, RuntimeConfig
+from dlightrag.application.config import DlightragConfig, LaneRuntimeConfig, RuntimeConfig
 from dlightrag.application.settings import answer_executor_settings, answer_resource_settings
 from dlightrag.engine.agent.session.effects import canonical_json
 from dlightrag.engine.agent.session.entries import UserMessageEntry
@@ -1266,9 +1266,8 @@ def _answer_runtime(
     """Compose the final executor and coordinator over the throwaway database."""
     config = DlightragConfig(  # pyright: ignore[reportCallIssue, reportArgumentType]
         runtime=RuntimeConfig(
-            query=QueryLaneRuntimeConfig(
+            query=LaneRuntimeConfig(
                 worker_concurrency=1,
-                max_active_runs=1,
                 max_nonterminal_runs=30_000,
             )
         ),

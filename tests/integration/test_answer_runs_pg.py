@@ -37,7 +37,7 @@ from dlightrag.engine.runtime import (
     IdempotencyKeyConflict,
     PendingArtifact,
     PendingArtifactReference,
-    RunCapacityExceededError,
+    RunAdmissionLimitExceededError,
     StageTerminalCommit,
     run_request_fingerprint,
 )
@@ -350,7 +350,7 @@ async def _assert_run_event_parent_guard(store: FingerprintingRunStore, pool: An
     await _claimed(store)
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE dlightrag_runs SET active_permit = FALSE, lease_owner = NULL, "
+            "UPDATE dlightrag_runs SET lease_owner = NULL, "
             "lease_expires_at = NULL, next_event_sequence = 2 WHERE run_id = $1",
             uuid.UUID(creation.run.run_id),
         )
@@ -554,6 +554,33 @@ class TestSchema:
     async def test_fresh_schema_enforces_run_event_parent_contract(self, store, pool) -> None:
         await _assert_run_event_parent_guard(store, pool)
 
+    async def test_current_schema_migration_drops_active_permit(self, store, pool) -> None:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "ALTER TABLE dlightrag_runs "
+                "ADD COLUMN active_permit BOOLEAN NOT NULL DEFAULT FALSE, "
+                "ADD CONSTRAINT dlightrag_runs_permit_check "
+                "CHECK (NOT active_permit OR (status = 'running' AND lease_owner IS NOT NULL))"
+            )
+            await conn.execute(
+                "DELETE FROM dlightrag_schema_migrations "
+                "WHERE scope = 'runs' AND version = 'remove_run_active_permit'"
+            )
+
+        migrated = PGRunStore(pool=pool)
+        await migrated.initialize()
+
+        async with pool.acquire() as conn:
+            assert not await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'dlightrag_runs' AND column_name = 'active_permit')"
+            )
+            assert not await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM pg_constraint "
+                "WHERE conrelid = 'dlightrag_runs'::regclass "
+                "AND conname = 'dlightrag_runs_permit_check')"
+            )
+
     async def test_creates_exactly_the_answer_schema_tables(self, store, pool) -> None:
         async with pool.acquire() as conn:
             rows = await conn.fetch(
@@ -690,7 +717,6 @@ class TestSchema:
             "retention_seconds",
             "purge_after",
             "next_attempt_at",
-            "active_permit",
             "checkpoint_json",
             "handoff_started_at",
             "superseded_by_run_id",
@@ -777,7 +803,7 @@ class TestSchema:
 
 
 class TestCreation:
-    async def test_nonterminal_admission_fuse_is_atomic_across_submitters(self, pool) -> None:
+    async def test_nonterminal_admission_limit_is_atomic_across_submitters(self, pool) -> None:
         first_store = FingerprintingRunStore(pool=pool, query_max_nonterminal_runs=1)
         second_store = FingerprintingRunStore(pool=pool, query_max_nonterminal_runs=1)
         await first_store.initialize()
@@ -786,7 +812,7 @@ class TestCreation:
             second_store.create_run(owner_id=_OTHER_OWNER, request=_request("b")),
             return_exceptions=True,
         )
-        assert sum(isinstance(result, RunCapacityExceededError) for result in results) == 1
+        assert sum(isinstance(result, RunAdmissionLimitExceededError) for result in results) == 1
         assert sum(not isinstance(result, BaseException) for result in results) == 1
 
     async def test_creates_queued_run_with_uuid7_identity(self, store) -> None:
@@ -911,7 +937,7 @@ class TestCancellation:
                 "UPDATE dlightrag_runs SET status = 'running', lease_owner = 'claiming-worker', "
                 "lease_expires_at = NOW() + INTERVAL '30 seconds', "
                 "fencing_epoch = fencing_epoch + 1, started_at = NOW(), "
-                "active_permit = TRUE, updated_at = NOW() "
+                "updated_at = NOW() "
                 "WHERE owner_id = $1 AND run_id = $2",
                 _OWNER,
                 uuid.UUID(creation.run.run_id),
@@ -1089,31 +1115,17 @@ class TestClaiming:
         assert len(claimed) == 2
         assert len({claim.run.run_id for claim in claimed}) == 2
 
-    async def test_deployment_wide_query_claims_stop_at_the_atomic_active_ceiling(
-        self, store
-    ) -> None:
-        for index in range(17):
+    async def test_concurrent_query_claimers_claim_every_eligible_run_once(self, store) -> None:
+        for index in range(24):
             await store.create_run(owner_id=_OWNER, request=_request(f"run-{index}"))
 
         attempts = await asyncio.gather(
             *(store.claim_next(worker_id=f"host-{index}") for index in range(24))
         )
         claimed = [claim for claim in attempts if claim is not None]
-        assert len(claimed) == 16
-        assert len({claim.run.run_id for claim in claimed}) == 16
-        assert await store.claim_next(worker_id="over-cap") is None
-
-        released = claimed[0]
-        await store.finish_success(
-            owner_id=_OWNER,
-            run_id=released.run.run_id,
-            worker_id=str(released.run.lease_owner),
-            fencing_epoch=released.run.fencing_epoch,
-            result={"answer": "done"},
-        )
-        final = await store.claim_next(worker_id="after-release")
-        assert final is not None
-        assert final.run.run_id not in {claim.run.run_id for claim in claimed}
+        assert len(claimed) == 24
+        assert len({claim.run.run_id for claim in claimed}) == 24
+        assert await store.claim_next(worker_id="no-work-left") is None
 
     async def test_returns_none_when_no_row_is_eligible(self, store) -> None:
         assert await store.claim_next(worker_id=_WORKER) is None

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from dlightrag.application.config import DlightragConfig, _find_yaml_config
+from dlightrag.application.config import DlightragConfig, LaneRuntimeConfig, _find_yaml_config
 
 
 def test_nested_yaml_loads_and_environment_wins(
@@ -83,7 +83,46 @@ def test_nested_runtime_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     monkeypatch.setitem(DlightragConfig.model_config, "env_file", None)
     monkeypatch.setenv("DLIGHTRAG_RUNTIME__QUERY__WORKER_CONCURRENCY", "7")
 
-    assert DlightragConfig().runtime.query.worker_concurrency == 7
+    runtime = DlightragConfig().runtime
+
+    assert runtime.query.worker_concurrency == 7
+    assert runtime.query.max_nonterminal_runs == 30_000
+
+
+def test_nested_runtime_yaml_retains_the_other_lane_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "config.yaml").write_text(
+        "runtime:\n  corpus_mutation:\n    max_nonterminal_runs: 57\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setitem(DlightragConfig.model_config, "env_file", None)
+
+    runtime = DlightragConfig().runtime
+
+    assert runtime.corpus_mutation.worker_concurrency == 2
+    assert runtime.corpus_mutation.max_nonterminal_runs == 57
+
+
+def test_runtime_lanes_share_one_required_config_type_with_lane_defaults() -> None:
+    runtime = DlightragConfig(_env_file=None).runtime
+
+    assert type(runtime.query) is LaneRuntimeConfig
+    assert type(runtime.corpus_mutation) is LaneRuntimeConfig
+    assert set(LaneRuntimeConfig.model_fields) == {
+        "worker_concurrency",
+        "max_nonterminal_runs",
+    }
+    assert all(field.is_required() for field in LaneRuntimeConfig.model_fields.values())
+    assert runtime.query == LaneRuntimeConfig(
+        worker_concurrency=16,
+        max_nonterminal_runs=30_000,
+    )
+    assert runtime.corpus_mutation == LaneRuntimeConfig(
+        worker_concurrency=2,
+        max_nonterminal_runs=1_000,
+    )
 
 
 def test_flat_runtime_environment_is_rejected(

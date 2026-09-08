@@ -134,8 +134,7 @@ Concurrency knobs affect different bottlenecks:
 | `corpus.ingestion.pipeline.max_parallel_analyze` | visual/multimodal analysis workers | VLM endpoint limits |
 | `models.max_concurrency` | Process-wide AI provider request concurrency | model endpoint throughput |
 | `runtime.query.worker_concurrency` | Query-lane runs executed per process | run throughput, CPU, and memory |
-| `runtime.query.max_active_runs` | Atomic deployment-wide Query-lane claim ceiling | database and worker pressure |
-| `runtime.query.max_nonterminal_runs` | Atomic deployment-wide Query-lane admission fuse | durable backlog growth |
+| `runtime.query.max_nonterminal_runs` | Atomic deployment-wide Query-lane nonterminal admission limit | durable backlog growth |
 | `corpus.ingestion.pipeline.max_concurrency` | LightRAG pipeline LLM request concurrency | LLM endpoint limits |
 | `models.embedding.max_concurrency` | embedding request concurrency | embedding endpoint and vector writes |
 
@@ -217,7 +216,7 @@ routing, Session, control, child, and blob-reference state:
 
 | Table | Key | Holds |
 | --- | --- | --- |
-| `dlightrag_runs` | `(owner_id, run_id)` plus globally unique `run_id` | kind, lane, submitter/access scope, submission key, status, retry/permit/checkpoint, retention, cancellation, fenced lease, Prepared Input, Corpus Mutation handoff/repair state, result or terminal error |
+| `dlightrag_runs` | `(owner_id, run_id)` plus globally unique `run_id` | kind, lane, submitter/access scope, submission key, status, retry/checkpoint, retention, cancellation, fenced lease, Prepared Input, Corpus Mutation handoff/repair state, result or terminal error |
 | `dlightrag_run_events` | `(owner_id, run_id, event_sequence)` | gap-free executor-owned events, including Answer `progress` / `token` / `reset` / tool / terminal events |
 | `dlightrag_blobs` | `(owner_id, digest)` | immutable content-addressed blob metadata within one owner |
 | `dlightrag_answer_run_artifacts` | `(owner_id, run_id, resource_id)` | ordered request attachments and Published Artifact bytes |
@@ -241,7 +240,7 @@ The Query and Corpus Mutation claim paths share the bounded
 `idx_dlightrag_runs_mutation_fifo`, and event reconnect uses the event primary
 key. The [Slice 6 validation report](validation/run-runtime-slice-6.md) records
 `EXPLAIN (ANALYZE, BUFFERS)` evidence at representative bounded backlogs. A
-compact sequential scan chosen for a 1,000-row fuse is not by itself an index
+compact sequential scan chosen for a 1,000-row admission count is not by itself an index
 regression; the structural integration test separately proves the ordered
 indexes remain usable.
 

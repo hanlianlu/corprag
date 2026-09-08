@@ -17,8 +17,8 @@ from uuid import uuid7
 from dlightrag.application.errors import CorpusUnavailableError
 from dlightrag.application.runs import (
     IdempotencyKeyConflict,
+    RunAdmissionLimitExceededError,
     RunCancelledError,
-    RunCapacityExceededError,
     RunCreation,
     RunEvent,
     RunFailedError,
@@ -63,7 +63,7 @@ from dlightrag.engine.runtime import (
     IdempotencyKeyConflict as RuntimeIdempotencyKeyConflict,
 )
 from dlightrag.engine.runtime import (
-    RunCapacityExceededError as RuntimeRunCapacityExceededError,
+    RunAdmissionLimitExceededError as RuntimeRunAdmissionLimitExceededError,
 )
 from dlightrag.engine.runtime import (
     RunCreation as RuntimeRunCreation,
@@ -456,8 +456,8 @@ class RetrievalService:
                 coordinator.wake()
         except RuntimeIdempotencyKeyConflict as exc:
             raise IdempotencyKeyConflict(str(exc)) from exc
-        except RuntimeRunCapacityExceededError as exc:
-            raise RunCapacityExceededError(str(exc)) from exc
+        except RuntimeRunAdmissionLimitExceededError as exc:
+            raise RunAdmissionLimitExceededError(str(exc)) from exc
         return RunCreation.from_runtime(creation)
 
     def _normalized_run_input(

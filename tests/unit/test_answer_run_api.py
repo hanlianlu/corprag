@@ -61,7 +61,6 @@ def _record(**overrides: Any) -> RunRecord:
         "finished_at": None,
         "purge_after": None,
         "next_attempt_at": None,
-        "active_permit": False,
         "checkpoint": None,
     }
     fields.update(overrides)

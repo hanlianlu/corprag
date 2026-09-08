@@ -59,7 +59,11 @@ from dlightrag.application.retrieval import (
     restore_retrieval_result,
 )
 from dlightrag.application.retrieval._answer_projection import project_answer_retrieval
-from dlightrag.application.runs import IdempotencyKeyConflict, RunCapacityExceededError, RunView
+from dlightrag.application.runs import (
+    IdempotencyKeyConflict,
+    RunAdmissionLimitExceededError,
+    RunView,
+)
 from dlightrag.application.settings import authentication_settings
 from dlightrag.engine.rag.retrieval import RetrievalResult
 from dlightrag.engine.runtime import (
@@ -1819,18 +1823,18 @@ class TestAnswerEndpoint:
         resp = await client.post("/answer", json={"query": "hello"})
         assert resp.status_code == 503
 
-    async def test_answer_admission_capacity_is_rejected_before_acceptance(
+    async def test_answer_admission_limit_is_rejected_before_acceptance(
         self, client: AsyncClient, mock_config: DlightragConfig, mock_application
     ) -> None:
         mock_application.answers.create = AsyncMock(
-            side_effect=RunCapacityExceededError("query lane is full")
+            side_effect=RunAdmissionLimitExceededError("limit reached")
         )
         app.state.application = mock_application
 
         response = await client.post("/answer", json={"query": "hello"})
 
         assert response.status_code == 503
-        assert response.json()["detail"] == "Run admission capacity is full"
+        assert response.json()["detail"] == "Deployment-wide nonterminal admission limit reached"
 
     async def test_answer_runtime_unavailable_503(
         self, client: AsyncClient, mock_config: DlightragConfig, mock_application

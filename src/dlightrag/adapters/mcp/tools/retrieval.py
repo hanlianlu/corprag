@@ -20,7 +20,7 @@ from dlightrag.adapters.mcp.server import (
 )
 from dlightrag.application.retrieval import MetadataFilter
 from dlightrag.application.retrieval import RetrieveRequest as ServiceRequest
-from dlightrag.application.runs import IdempotencyKeyConflict, RunCapacityExceededError
+from dlightrag.application.runs import IdempotencyKeyConflict, RunAdmissionLimitExceededError
 
 
 @mcp_app.tool(
@@ -99,6 +99,6 @@ async def retrieve_tool(
         raise ValueError(
             "idempotency_key was already used for a different retrieval request"
         ) from None
-    except RunCapacityExceededError:
-        raise ValueError("Run admission capacity is full") from None
+    except RunAdmissionLimitExceededError:
+        raise ValueError("Deployment-wide nonterminal admission limit reached") from None
     return mcp_server._run_descriptor(creation.run)

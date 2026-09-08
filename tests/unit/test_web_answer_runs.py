@@ -31,7 +31,7 @@ from dlightrag.application.answer_runs import (
 )
 from dlightrag.application.runs import (
     IdempotencyKeyConflict,
-    RunCapacityExceededError,
+    RunAdmissionLimitExceededError,
     RunEvent,
 )
 from dlightrag.application.web_conversations import (
@@ -145,17 +145,17 @@ async def client(service: AsyncMock, application_double: AsyncMock, test_config)
 # ---------------------------------------------------------------------------
 
 
-async def test_submission_capacity_rejection_is_typed_and_precedes_202(
+async def test_submission_admission_limit_is_typed_and_precedes_202(
     client: AsyncClient, service: AsyncMock
 ) -> None:
-    service.start_answer.side_effect = RunCapacityExceededError("query lane is full")
+    service.start_answer.side_effect = RunAdmissionLimitExceededError("limit reached")
 
     response = await client.post("/web/api/answer", json=_BODY)
 
     assert response.status_code == 503
     assert response.json() == {
         "kind": "service_unavailable",
-        "message": "Answer submission is temporarily unavailable",
+        "message": "Deployment-wide nonterminal admission limit reached",
     }
 
 

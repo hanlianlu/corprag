@@ -27,6 +27,7 @@ from dlightrag.application.corpus_admin import (
     WorkspaceCatalogPageRequest,
     normalize_workspace,
 )
+from dlightrag.application.runs import RunAdmissionLimitExceededError
 
 if TYPE_CHECKING:
     from dlightrag.application import Application
@@ -242,6 +243,8 @@ async def reset_workspace(
             workspace=ws,
             submitted_by=owner_id_from_user(getattr(request.state, "user_context", None)),
         )
+    except RunAdmissionLimitExceededError:
+        return _error("Deployment-wide nonterminal admission limit reached", status_code=503)
     except Exception:
         logger.exception("Workspace reset Run acceptance failed")
         return _error(

@@ -66,8 +66,8 @@ from dlightrag.engine.runtime.records import (
     ReclaimDecision,
     ReclaimState,
     RunAccessScope,
+    RunAdmissionLimitExceededError,
     RunArtifactReference,
-    RunCapacityExceededError,
     RunCreation,
     RunDeletion,
     RunEvent,
@@ -88,11 +88,9 @@ RUN_MIGRATION_SCOPE = "runs"
 _ABANDONED_ERROR_MESSAGE = "Run exceeded its reclaim-without-progress bound."
 _BATCH_LIMIT = 200
 _EVENT_PAGE_LIMIT = 500
-DEFAULT_QUERY_MAX_ACTIVE_RUNS = 16
 DEFAULT_QUERY_MAX_NONTERMINAL_RUNS = 30_000
 # Validated by the deterministic bounded-control-plane campaign documented in
 # docs/validation/run-runtime-slice-6.md.
-DEFAULT_CORPUS_MUTATION_MAX_ACTIVE_RUNS = 2
 DEFAULT_CORPUS_MUTATION_MAX_NONTERMINAL_RUNS = 1_000
 
 _MIGRATE_ANSWER_RUNTIME = """
@@ -146,7 +144,6 @@ ALTER TABLE dlightrag_runs
     ADD COLUMN IF NOT EXISTS retention_seconds BIGINT NOT NULL DEFAULT 31536000,
     ADD COLUMN IF NOT EXISTS purge_after TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ,
-    ADD COLUMN IF NOT EXISTS active_permit BOOLEAN NOT NULL DEFAULT FALSE,
     ADD COLUMN IF NOT EXISTS checkpoint_json JSONB,
     ADD COLUMN IF NOT EXISTS handoff_started_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS superseded_by_run_id UUID;
@@ -203,8 +200,6 @@ ALTER TABLE dlightrag_runs
                AND reclaims_without_progress >= 0 AND retention_seconds >= 1),
     ADD CONSTRAINT dlightrag_runs_lease_check
         CHECK ((lease_owner IS NULL) = (lease_expires_at IS NULL)),
-    ADD CONSTRAINT dlightrag_runs_permit_check
-        CHECK (NOT active_permit OR (status = 'running' AND lease_owner IS NOT NULL)),
     ADD CONSTRAINT dlightrag_runs_terminal_check
         CHECK ((status IN ('succeeded', 'failed', 'cancelled')) = (finished_at IS NOT NULL)),
     ADD CONSTRAINT dlightrag_runs_result_check
@@ -256,7 +251,6 @@ CREATE TABLE IF NOT EXISTS dlightrag_runs (
     retention_seconds   BIGINT      NOT NULL,
     purge_after         TIMESTAMPTZ,
     next_attempt_at     TIMESTAMPTZ,
-    active_permit       BOOLEAN     NOT NULL DEFAULT FALSE,
     checkpoint_json     JSONB,
     handoff_started_at  TIMESTAMPTZ,
     superseded_by_run_id UUID,
@@ -282,8 +276,6 @@ CREATE TABLE IF NOT EXISTS dlightrag_runs (
                AND reclaims_without_progress >= 0 AND retention_seconds >= 1),
     CONSTRAINT dlightrag_runs_lease_check
         CHECK ((lease_owner IS NULL) = (lease_expires_at IS NULL)),
-    CONSTRAINT dlightrag_runs_permit_check
-        CHECK (NOT active_permit OR (status = 'running' AND lease_owner IS NOT NULL)),
     CONSTRAINT dlightrag_runs_terminal_check
         CHECK ((status IN ('succeeded', 'failed', 'cancelled')) = (finished_at IS NOT NULL)),
     CONSTRAINT dlightrag_runs_result_check
@@ -919,6 +911,15 @@ RUN_MIGRATIONS = (
         "Enforce event sequence, parent lifecycle, and terminal payload integrity",
         (_ENFORCE_RUN_EVENT_CONSTRAINTS, _CREATE_RUN_EVENT_CONSTRAINT_TRIGGER),
     ),
+    Migration(
+        "remove_run_active_permit",
+        "Remove the obsolete Run occupancy column",
+        (
+            "ALTER TABLE dlightrag_runs "
+            "DROP CONSTRAINT IF EXISTS dlightrag_runs_permit_check, "
+            "DROP COLUMN IF EXISTS active_permit",
+        ),
+    ),
 )
 
 RUN_SCHEMA_TABLES = (
@@ -953,7 +954,6 @@ RUN_SCHEMA_TABLES = (
             "retention_seconds",
             "purge_after",
             "next_attempt_at",
-            "active_permit",
             "checkpoint_json",
             "handoff_started_at",
             "superseded_by_run_id",
@@ -971,7 +971,6 @@ RUN_SCHEMA_TABLES = (
             "dlightrag_runs_status_check",
             "dlightrag_runs_counter_check",
             "dlightrag_runs_lease_check",
-            "dlightrag_runs_permit_check",
             "dlightrag_runs_terminal_check",
             "dlightrag_runs_result_check",
             "dlightrag_runs_error_check",
@@ -1391,7 +1390,6 @@ _RUN_COLUMN_SPECS: tuple[tuple[str, str], ...] = (
     ("finished_at", "finished_at"),
     ("purge_after", "purge_after"),
     ("next_attempt_at", "next_attempt_at"),
-    ("active_permit", "active_permit"),
     ("checkpoint_json", "checkpoint_json"),
     ("handoff_started_at", "handoff_started_at"),
     ("superseded_by_run_id::text", "superseded_by_run_id"),
@@ -1824,7 +1822,6 @@ SET status = 'running',
     reclaims_without_progress = $5,
     last_reclaim_progress_version = $6,
     started_at = COALESCE(started_at, NOW()),
-    active_permit = TRUE,
     next_attempt_at = NULL,
     updated_at = NOW()
 WHERE owner_id = $1 AND run_id = $2
@@ -1905,7 +1902,6 @@ WITH bumped AS (
         prepared_input_json = NULL,
         lease_owner = NULL,
         lease_expires_at = NULL,
-        active_permit = FALSE,
         finished_at = NOW(),
         purge_after = NOW() + make_interval(secs => retention_seconds::double precision),
         updated_at = NOW(),
@@ -1937,7 +1933,7 @@ WITH updated AS (
         ),
         prepared_input_json = NULL,
         superseded_by_run_id = $3::uuid,
-        lease_owner = NULL, lease_expires_at = NULL, active_permit = FALSE,
+        lease_owner = NULL, lease_expires_at = NULL,
         finished_at = NOW(),
         purge_after = NOW() + make_interval(secs => retention_seconds::double precision),
         updated_at = NOW(), next_event_sequence = next_event_sequence + 1
@@ -1983,7 +1979,6 @@ UPDATE dlightrag_runs
 SET status = 'queued',
     lease_owner = NULL,
     lease_expires_at = NULL,
-    active_permit = FALSE,
     updated_at = NOW()
 WHERE owner_id = $1 AND run_id = $2
   AND lease_owner = $3 AND fencing_epoch = $4
@@ -1996,7 +1991,7 @@ _DEFER_RUN = """
 UPDATE dlightrag_runs
 SET status = 'queued', phase = 'deferred', checkpoint_json = $5::jsonb,
     next_attempt_at = $6, lease_owner = NULL, lease_expires_at = NULL,
-    active_permit = FALSE, updated_at = NOW()
+    updated_at = NOW()
 WHERE owner_id = $1 AND run_id = $2 AND lease_owner = $3
   AND fencing_epoch = $4 AND status = 'running' AND lease_expires_at > NOW()
 RETURNING 1
@@ -2022,7 +2017,7 @@ _WAIT_FOR_REPAIR = """
 UPDATE dlightrag_runs
 SET phase = 'waiting_for_repair', checkpoint_json = $5::jsonb,
     next_attempt_at = NULL, lease_owner = NULL, lease_expires_at = NULL,
-    active_permit = FALSE, updated_at = NOW()
+    updated_at = NOW()
 WHERE owner_id = $1 AND run_id = $2 AND lease_owner = $3
   AND fencing_epoch = $4 AND status = 'running' AND lease_expires_at > NOW()
 RETURNING 1
@@ -2370,7 +2365,6 @@ def run_record(row: Any) -> RunRecord:
         finished_at=row["finished_at"],
         purge_after=row["purge_after"],
         next_attempt_at=row["next_attempt_at"],
-        active_permit=bool(row["active_permit"]),
         checkpoint=(
             _json_object(row["checkpoint_json"]) if row["checkpoint_json"] is not None else None
         ),
@@ -2412,18 +2406,14 @@ class PGRunStore(PostgresOperationRunner):
         *,
         pool: ConnectionPool | None = None,
         retention_seconds: int = DEFAULT_RUN_RETENTION_SECONDS,
-        query_max_active_runs: int = DEFAULT_QUERY_MAX_ACTIVE_RUNS,
         query_max_nonterminal_runs: int = DEFAULT_QUERY_MAX_NONTERMINAL_RUNS,
-        corpus_mutation_max_active_runs: int = DEFAULT_CORPUS_MUTATION_MAX_ACTIVE_RUNS,
         corpus_mutation_max_nonterminal_runs: int = DEFAULT_CORPUS_MUTATION_MAX_NONTERMINAL_RUNS,
         promotion_doc_threshold: int | None = None,
         promotion_chunk_threshold: int | None = None,
     ) -> None:
         super().__init__(pool=pool)
         self._retention_seconds = retention_seconds
-        self._query_max_active_runs = max(1, int(query_max_active_runs))
         self._query_max_nonterminal_runs = max(1, int(query_max_nonterminal_runs))
-        self._corpus_mutation_max_active_runs = max(1, int(corpus_mutation_max_active_runs))
         self._corpus_mutation_max_nonterminal_runs = max(
             1, int(corpus_mutation_max_nonterminal_runs)
         )
@@ -2592,8 +2582,8 @@ class PGRunStore(PostgresOperationRunner):
                     else self._corpus_mutation_max_nonterminal_runs
                 )
                 if nonterminal >= max_nonterminal:
-                    raise RunCapacityExceededError(
-                        f"{envelope.lane} lane nonterminal admission fuse is full"
+                    raise RunAdmissionLimitExceededError(
+                        "Deployment-wide nonterminal admission limit reached"
                     )
                 await self._write_blobs(conn, owner, blobs)
                 row = await conn.fetchrow(
@@ -2792,8 +2782,8 @@ class PGRunStore(PostgresOperationRunner):
             )
         nonterminal = int(await conn.fetchval(_COUNT_NONTERMINAL_LANE, envelope.lane) or 0)
         if nonterminal >= self._query_max_nonterminal_runs:
-            raise RunCapacityExceededError(
-                f"{envelope.lane} lane nonterminal admission fuse is full"
+            raise RunAdmissionLimitExceededError(
+                "Deployment-wide nonterminal admission limit reached"
             )
         await self._write_blobs(conn, owner, artifacts)
         row = await conn.fetchrow(
@@ -3709,7 +3699,7 @@ class PGRunStore(PostgresOperationRunner):
         run_kinds: Sequence[RunKind] = ("answer",),
         lanes: Sequence[RunLane] = ("query",),
     ) -> ClaimedRun | None:
-        """Claim the oldest eligible registered kind under one lane's ceiling."""
+        """Claim the oldest eligible registered kind without double-claiming."""
         worker = str(worker_id).strip()
         if not worker:
             raise ValueError("worker_id cannot be empty")
@@ -3717,29 +3707,9 @@ class PGRunStore(PostgresOperationRunner):
         if len(requested_lanes) != 1:
             raise ValueError("claim_next requires exactly one execution lane")
         lane = requested_lanes[0]
-        max_active = (
-            self._query_max_active_runs
-            if lane == "query"
-            else self._corpus_mutation_max_active_runs
-        )
 
         async def _operation(conn: Any) -> ClaimedRun | None:
             while True:
-                await conn.execute(
-                    "SELECT pg_advisory_xact_lock(hashtext($1))",
-                    f"dlightrag:run-claim:{lane}",
-                )
-                active = int(
-                    await conn.fetchval(
-                        "SELECT COUNT(*) FROM dlightrag_runs "
-                        "WHERE lane = $1 AND active_permit = TRUE "
-                        "AND status = 'running' AND lease_expires_at > NOW()",
-                        lane,
-                    )
-                    or 0
-                )
-                if active >= max_active:
-                    return None
                 candidate = await conn.fetchrow(
                     _SELECT_CLAIM_CANDIDATE,
                     MAX_RECLAIMS_WITHOUT_PROGRESS,

@@ -23,7 +23,6 @@ WITH bumped AS (
         prepared_input_json = NULL,
         lease_owner = NULL,
         lease_expires_at = NULL,
-        active_permit = FALSE,
         finished_at = NOW(),
         purge_after = NOW() + make_interval(secs => retention_seconds::double precision),
         updated_at = NOW(),

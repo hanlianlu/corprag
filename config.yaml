@@ -87,12 +87,10 @@ corpus:
 runtime:
   query:
     worker_concurrency: 16
-    max_active_runs: 16
     max_nonterminal_runs: 30000
   # Validated bounded defaults; see docs/validation/run-runtime-slice-6.md.
   corpus_mutation:
     worker_concurrency: 2
-    max_active_runs: 2
     max_nonterminal_runs: 1000
   run_retention_days: 365
 

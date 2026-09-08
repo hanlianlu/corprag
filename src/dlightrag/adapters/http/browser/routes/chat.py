@@ -60,7 +60,7 @@ from dlightrag.application.answer_runs.results import (
 )
 from dlightrag.application.answer_runs.sources import SourceDownloadLinkBuilder
 from dlightrag.application.corpus_admin import normalize_workspace_ids
-from dlightrag.application.runs import IdempotencyKeyConflict, RunCapacityExceededError
+from dlightrag.application.runs import IdempotencyKeyConflict, RunAdmissionLimitExceededError
 from dlightrag.application.web_conversations import (
     ConversationSubmissionConflict,
     LinkedTurn,
@@ -183,11 +183,13 @@ async def start_answer_run(
             "submission_conflict",
             "This submission id was already used for a different request",
         ) from None
-    except (
-        AnswerRuntimeUnavailableError,
-        RunCapacityExceededError,
-        WebConversationUnavailableError,
-    ):
+    except RunAdmissionLimitExceededError:
+        raise _command_error(
+            503,
+            "service_unavailable",
+            "Deployment-wide nonterminal admission limit reached",
+        ) from None
+    except AnswerRuntimeUnavailableError, WebConversationUnavailableError:
         raise _command_error(
             503, "service_unavailable", "Answer submission is temporarily unavailable"
         ) from None
@@ -332,9 +334,11 @@ async def _continue_answer_run(
             "submission_conflict",
             "This submission id was already used for a different continuation",
         ) from None
-    except RunCapacityExceededError:
+    except RunAdmissionLimitExceededError:
         raise _command_error(
-            503, "service_unavailable", "Answer submission is temporarily unavailable"
+            503,
+            "service_unavailable",
+            "Deployment-wide nonterminal admission limit reached",
         ) from None
     if submission is None:
         raise _command_error(

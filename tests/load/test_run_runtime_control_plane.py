@@ -19,7 +19,7 @@ import pytest
 
 from dlightrag.engine.runtime import (
     MAX_RECLAIMS_WITHOUT_PROGRESS,
-    RunCapacityExceededError,
+    RunAdmissionLimitExceededError,
     RunCoordinator,
 )
 from tests.integration.run_runtime_pg_harness import (
@@ -35,10 +35,10 @@ _QUERY_SUBMISSIONS = 10_000
 _MUTATION_SUBMISSIONS = 1_000
 _SEED_QUERY = 200
 _SEED_MUTATION = _MUTATION_SUBMISSIONS
-_QUERY_ACTIVE = 16
-_MUTATION_ACTIVE = 2
-_QUERY_FUSE = 30_000
-_MUTATION_FUSE = 1_000
+_QUERY_WORKER_CONCURRENCY = 16
+_MUTATION_WORKER_CONCURRENCY = 2
+_QUERY_ADMISSION_LIMIT = 30_000
+_MUTATION_ADMISSION_LIMIT = 1_000
 _RESULTS = Path(".test-results/load-runtime")
 
 
@@ -69,7 +69,7 @@ async def _capture_backlog_plans(pool: Any) -> dict[str, str]:
             ["answer", "retrieval"],
             ["query"],
         )
-        fuse = await _explain(
+        admission_limit = await _explain(
             connection,
             "SELECT COUNT(*) FROM dlightrag_runs "
             "WHERE lane = $1 AND status IN ('queued', 'running')",
@@ -89,7 +89,7 @@ async def _capture_backlog_plans(pool: Any) -> dict[str, str]:
             "AND (earlier.created_at, earlier.run_id) < (r.created_at, r.run_id)) "
             "ORDER BY r.created_at, r.run_id LIMIT 1",
         )
-    return {"claim": claim, "fuse": fuse, "mutation-fifo": mutation_fifo}
+    return {"claim": claim, "admission-limit": admission_limit, "mutation-fifo": mutation_fifo}
 
 
 async def _monitor_loop(stop: asyncio.Event, metrics: dict[str, Any], pool: Any) -> None:
@@ -142,14 +142,12 @@ async def test_10k_addressable_clients_keep_the_control_plane_bounded() -> None:
 
     async with isolated_run_runtime(
         "load_runtime",
-        query_max_active_runs=_QUERY_ACTIVE,
-        query_max_nonterminal_runs=_QUERY_FUSE,
-        corpus_mutation_max_active_runs=_MUTATION_ACTIVE,
-        corpus_mutation_max_nonterminal_runs=_MUTATION_FUSE,
+        query_max_nonterminal_runs=_QUERY_ADMISSION_LIMIT,
+        corpus_mutation_max_nonterminal_runs=_MUTATION_ADMISSION_LIMIT,
         pool_max_size=32,
     ) as (store, pool):
-        # Hold fake expensive work long enough to exercise both accepted active
-        # ceilings while control-plane requests continue against the backlog.
+        # Hold fake expensive work long enough to fill both coordinators' local
+        # worker slots while control-plane requests continue against the backlog.
         query_executor = TrackingExecutor(delay_seconds=0.1)
         mutation_executor = TrackingExecutor(delay_seconds=0.02)
         stop_monitor = asyncio.Event()
@@ -187,7 +185,7 @@ async def test_10k_addressable_clients_keep_the_control_plane_bounded() -> None:
             return creation.run.run_id
 
         # Seed a reproducible backlog before workers start. This is large enough
-        # to exercise plans and queues without misrepresenting the 30k fuse as a target.
+        # to exercise plans and queues without misrepresenting the 30k admission limit as a target.
         for index in range(_SEED_QUERY):
             run_id = await submit_query(index)
             if index % 20 == 0:
@@ -205,11 +203,11 @@ async def test_10k_addressable_clients_keep_the_control_plane_bounded() -> None:
                 )
                 or 0
             )
-        with pytest.raises(RunCapacityExceededError):
+        with pytest.raises(RunAdmissionLimitExceededError):
             await store.accept_run(
                 envelope=run_envelope(
                     "corpus_mutation",
-                    key="mutation-over-fuse",
+                    key="mutation-over-admission-limit",
                     workspace="workspace-000",
                 ),
                 run_id=str(uuid.uuid7()),
@@ -221,8 +219,10 @@ async def test_10k_addressable_clients_keep_the_control_plane_bounded() -> None:
                 )
                 or 0
             )
-        mutation_fuse_rejected_before_insert = (
-            mutation_rows_before_rejection == mutation_rows_after_rejection == _MUTATION_FUSE
+        mutation_admission_limit_rejected_before_insert = (
+            mutation_rows_before_rejection
+            == mutation_rows_after_rejection
+            == _MUTATION_ADMISSION_LIMIT
         )
         plans = await _capture_backlog_plans(pool)
 
@@ -233,8 +233,8 @@ async def test_10k_addressable_clients_keep_the_control_plane_bounded() -> None:
                 "retrieval": query_executor,
                 "corpus_mutation": mutation_executor,
             },
-            query_worker_concurrency=_QUERY_ACTIVE,
-            corpus_mutation_worker_concurrency=_MUTATION_ACTIVE,
+            query_worker_concurrency=_QUERY_WORKER_CONCURRENCY,
+            corpus_mutation_worker_concurrency=_MUTATION_WORKER_CONCURRENCY,
             sweep_seconds=0.02,
         )
         await coordinator.start()
@@ -388,10 +388,12 @@ async def test_10k_addressable_clients_keep_the_control_plane_bounded() -> None:
             "eventual_drain": int(totals["nonterminal"]) == 0,
             "single_terminal_event_per_run": duplicate_terminal == 0
             and terminal_event_count == expected_total,
-            "query_active_ceiling_exercised": query_executor.max_active == _QUERY_ACTIVE,
-            "mutation_active_ceiling_exercised": mutation_executor.max_active == _MUTATION_ACTIVE,
+            "query_local_worker_occupancy_reached": query_executor.max_active
+            == _QUERY_WORKER_CONCURRENCY,
+            "mutation_local_worker_occupancy_reached": mutation_executor.max_active
+            == _MUTATION_WORKER_CONCURRENCY,
             "workspace_fifo": fifo_ok,
-            "mutation_fuse_rejected_before_insert": mutation_fuse_rejected_before_insert,
+            "mutation_admission_limit_rejected_before_insert": mutation_admission_limit_rejected_before_insert,
             "retrieval_workspace_shapes": query_executor.retrieval_workspace_counts
             >= {1, 10, 50, 100},
             "duration_broad_ceiling": total_duration < 900,
@@ -425,13 +427,11 @@ async def test_10k_addressable_clients_keep_the_control_plane_bounded() -> None:
                 "retrieval_workspace_counts": [1, 10, 50, 100],
                 "providers": "deterministic in-process fakes; no network or paid calls",
             },
-            "capacity": {
-                "query_worker_concurrency": _QUERY_ACTIVE,
-                "query_max_active_runs": _QUERY_ACTIVE,
-                "query_max_nonterminal_runs": _QUERY_FUSE,
-                "corpus_mutation_worker_concurrency": _MUTATION_ACTIVE,
-                "corpus_mutation_max_active_runs": _MUTATION_ACTIVE,
-                "corpus_mutation_max_nonterminal_runs": _MUTATION_FUSE,
+            "runtime_limits": {
+                "query_worker_concurrency": _QUERY_WORKER_CONCURRENCY,
+                "query_max_nonterminal_runs": _QUERY_ADMISSION_LIMIT,
+                "corpus_mutation_worker_concurrency": _MUTATION_WORKER_CONCURRENCY,
+                "corpus_mutation_max_nonterminal_runs": _MUTATION_ADMISSION_LIMIT,
             },
             "results": {
                 "passed": all(hard_gates.values()),
@@ -472,6 +472,8 @@ async def test_10k_addressable_clients_keep_the_control_plane_bounded() -> None:
             ],
         }
         _RESULTS.mkdir(parents=True, exist_ok=True)
+        for stale_plan in _RESULTS.glob("explain-*.txt"):
+            stale_plan.unlink()
         (_RESULTS / "summary.json").write_text(
             json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )

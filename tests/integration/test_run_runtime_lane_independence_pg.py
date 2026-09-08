@@ -13,12 +13,14 @@ import asyncpg
 import pytest
 
 from dlightrag.engine.runtime import (
+    Deferred,
     IdempotencyKeyConflict,
-    RunCapacityExceededError,
+    RunAdmissionLimitExceededError,
     RunCoordinator,
     RunSession,
     RunStore,
     Succeeded,
+    WaitingForRepair,
 )
 from tests.integration.pg_conn import PG_CONN_KWARGS
 from tests.integration.run_runtime_pg_harness import (
@@ -159,7 +161,7 @@ async def test_operational_state_outages_do_not_invent_acceptance_or_drop_queued
         assert mutation_executor.calls == 1
 
 
-async def test_atomic_replay_conflict_authorization_and_lane_local_fuses() -> None:
+async def test_atomic_replay_conflict_authorization_and_lane_local_admission_limits() -> None:
     async with isolated_run_runtime(
         "lane_accept",
         query_max_nonterminal_runs=2,
@@ -179,13 +181,13 @@ async def test_atomic_replay_conflict_authorization_and_lane_local_fuses() -> No
                 run_id=str(uuid.uuid7()),
             )
 
-        # A full mutation fuse neither blocks Query admission nor leaks Workspace state.
+        # A reached mutation admission limit neither blocks Query admission nor leaks state.
         query = await store.accept_run(
             envelope=run_envelope("retrieval", key="query-accepted"),
             run_id=str(uuid.uuid7()),
         )
         assert query.run.lane == "query"
-        with pytest.raises(RunCapacityExceededError):
+        with pytest.raises(RunAdmissionLimitExceededError):
             await store.accept_run(
                 envelope=run_envelope("corpus_mutation", key="mutation-rejected", workspace="beta"),
                 run_id=str(uuid.uuid7()),
@@ -204,12 +206,8 @@ async def test_atomic_replay_conflict_authorization_and_lane_local_fuses() -> No
             )
 
 
-async def test_duplicate_workers_respect_active_caps_workspace_fifo_and_lane_independence() -> None:
-    async with isolated_run_runtime(
-        "lane_claim",
-        query_max_active_runs=1,
-        corpus_mutation_max_active_runs=2,
-    ) as (store, _pool):
+async def test_concurrent_claimers_add_slots_without_double_claiming_or_breaking_fifo() -> None:
+    async with isolated_run_runtime("lane_claim") as (store, _pool):
         first_alpha = await store.accept_run(
             envelope=run_envelope("corpus_mutation", key="alpha-1", workspace="alpha"),
             run_id=str(uuid.uuid7()),
@@ -222,7 +220,7 @@ async def test_duplicate_workers_respect_active_caps_workspace_fifo_and_lane_ind
             envelope=run_envelope("corpus_mutation", key="beta-1", workspace="beta"),
             run_id=str(uuid.uuid7()),
         )
-        await store.accept_run(
+        gamma = await store.accept_run(
             envelope=run_envelope("corpus_mutation", key="gamma-1", workspace="gamma"),
             run_id=str(uuid.uuid7()),
         )
@@ -241,22 +239,25 @@ async def test_duplicate_workers_respect_active_caps_workspace_fifo_and_lane_ind
             )
         )
         winners = [claim for claim in claims if claim is not None]
-        assert len(winners) == 2
-        assert {claim.run.run_id for claim in winners} == {
+        winner_ids = [claim.run.run_id for claim in winners]
+        assert len(winners) == 3
+        assert len(set(winner_ids)) == len(winner_ids)
+        assert set(winner_ids) == {
             first_alpha.run.run_id,
             beta.run.run_id,
+            gamma.run.run_id,
         }
-        assert second_alpha.run.run_id not in {claim.run.run_id for claim in winners}
+        assert second_alpha.run.run_id not in winner_ids
         assert (
             await store.claim_next(
-                worker_id="mutation-over-cap",
+                worker_id="blocked-successor",
                 run_kinds=("corpus_mutation",),
                 lanes=("corpus_mutation",),
             )
             is None
         )
 
-        # Query has an independent deployment-wide permit while Mutation is full.
+        # Query claims independently while three Mutation writers own distinct Workspaces.
         query_claim = await store.claim_next(
             worker_id="query-worker", run_kinds=("retrieval",), lanes=("query",)
         )
@@ -279,11 +280,144 @@ async def test_duplicate_workers_respect_active_caps_workspace_fifo_and_lane_ind
         assert next_alpha is not None and next_alpha.run.run_id == second_alpha.run.run_id
 
 
-async def test_defer_releases_capacity_preserves_barrier_then_recovers_same_run() -> None:
-    async with isolated_run_runtime("lane_defer", corpus_mutation_max_active_runs=1) as (
-        store,
-        pool,
-    ):
+class _AdditiveSlotExecutor:
+    def __init__(self, target: int) -> None:
+        self._target = target
+        self.started_ids: list[str] = []
+        self.active = 0
+        self.max_active = 0
+        self.all_started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def execute(self, session: RunSession) -> Succeeded:
+        self.started_ids.append(session.run_id)
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        if self.active == self._target:
+            self.all_started.set()
+        try:
+            await self.release.wait()
+            return Succeeded({"ok": True})
+        finally:
+            self.active -= 1
+
+
+async def test_multiple_coordinators_contribute_additive_local_slots() -> None:
+    async with isolated_run_runtime("lane_coordinators") as (store, _pool):
+        accepted = [
+            await store.accept_run(
+                envelope=run_envelope("retrieval", key=f"query-{index}"),
+                run_id=str(uuid.uuid7()),
+            )
+            for index in range(4)
+        ]
+        executor = _AdditiveSlotExecutor(target=4)
+        coordinators = [
+            RunCoordinator(
+                store=store,
+                executors={"retrieval": executor},
+                query_worker_concurrency=2,
+                corpus_mutation_worker_concurrency=1,
+                sweep_seconds=0.02,
+            )
+            for _ in range(2)
+        ]
+        try:
+            await asyncio.gather(*(coordinator.start() for coordinator in coordinators))
+            for coordinator in coordinators:
+                coordinator.wake()
+            await asyncio.wait_for(executor.all_started.wait(), timeout=5)
+            assert executor.max_active == 4
+            assert len(executor.started_ids) == len(set(executor.started_ids)) == 4
+            assert set(executor.started_ids) == {creation.run.run_id for creation in accepted}
+            executor.release.set()
+            async with asyncio.timeout(5):
+                while True:
+                    rows = [
+                        await store.get_run(owner_id="load-owner", run_id=creation.run.run_id)
+                        for creation in accepted
+                    ]
+                    if all(row is not None and row.terminal for row in rows):
+                        break
+                    await asyncio.sleep(0.01)
+        finally:
+            executor.release.set()
+            await asyncio.gather(*(coordinator.aclose() for coordinator in coordinators))
+
+
+class _YieldingMutationExecutor:
+    def __init__(self, outcome: Deferred | WaitingForRepair) -> None:
+        self._outcome = outcome
+        self.starts: list[str] = []
+        self.active = 0
+        self.max_active = 0
+        self.beta_started = asyncio.Event()
+
+    async def execute(self, session: RunSession) -> Deferred | WaitingForRepair | Succeeded:
+        workspace = str((session.prepared_input or {}).get("workspace"))
+        self.starts.append(workspace)
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        try:
+            if workspace == "alpha":
+                return self._outcome
+            self.beta_started.set()
+            return Succeeded({"ok": True})
+        finally:
+            self.active -= 1
+
+
+@pytest.mark.parametrize("outcome_kind", ["deferred", "waiting_for_repair"])
+async def test_defer_and_repair_release_the_local_slot(outcome_kind: str) -> None:
+    async with isolated_run_runtime(f"lane_yield_{outcome_kind}") as (store, _pool):
+        if outcome_kind == "deferred":
+            outcome: Deferred | WaitingForRepair = Deferred(
+                checkpoint={"phase": "deferred_dependency"},
+                next_attempt_at=datetime.datetime.now(datetime.UTC) + datetime.timedelta(hours=1),
+            )
+        else:
+            outcome = WaitingForRepair(
+                checkpoint={
+                    "repair_reason": "Controlled uncertain outcome.",
+                    "repair_remedy": "Inspect and resume.",
+                }
+            )
+        executor = _YieldingMutationExecutor(outcome)
+        first = await store.accept_run(
+            envelope=run_envelope("corpus_mutation", key="alpha-yield", workspace="alpha"),
+            run_id=str(uuid.uuid7()),
+        )
+        second = await store.accept_run(
+            envelope=run_envelope("corpus_mutation", key="beta-after-yield", workspace="beta"),
+            run_id=str(uuid.uuid7()),
+        )
+        coordinator = RunCoordinator(
+            store=store,
+            executors={"corpus_mutation": executor},
+            query_worker_concurrency=1,
+            corpus_mutation_worker_concurrency=1,
+            sweep_seconds=0.02,
+        )
+        await coordinator.start()
+        try:
+            await asyncio.wait_for(executor.beta_started.wait(), timeout=5)
+            async with asyncio.timeout(5):
+                while True:
+                    second_row = await store.get_run(owner_id="beta", run_id=second.run.run_id)
+                    if second_row is not None and second_row.terminal:
+                        break
+                    await asyncio.sleep(0.01)
+            first_row = await store.get_run(owner_id="alpha", run_id=first.run.run_id)
+            assert first_row is not None and first_row.lease_owner is None
+            assert first_row.phase == outcome_kind
+            assert executor.starts == ["alpha", "beta"]
+            assert executor.max_active == 1
+        finally:
+            await coordinator.aclose()
+
+
+async def test_defer_releases_lease_preserves_barrier_then_recovers_same_run() -> None:
+    async with isolated_run_runtime("lane_defer") as (store, pool):
         first = await store.accept_run(
             envelope=run_envelope("corpus_mutation", key="alpha-defer", workspace="alpha"),
             run_id=str(uuid.uuid7()),
@@ -312,7 +446,7 @@ async def test_defer_releases_capacity_preserves_barrier_then_recovers_same_run(
         )
         deferred = await store.get_run(owner_id="alpha", run_id=first.run.run_id)
         assert deferred is not None
-        assert deferred.status == "queued" and not deferred.active_permit
+        assert deferred.status == "queued" and deferred.lease_owner is None
         other_claim = await store.claim_next(
             worker_id="writer-2",
             run_kinds=("corpus_mutation",),

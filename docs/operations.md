@@ -96,16 +96,17 @@ Workspaces in a running deployment. Neither delegates to the other.
 - Graceful shutdown fenced-requeues unfinished work; crash recovery waits for
   lease expiry. Four no-progress reclaims fail as `run_abandoned`.
 - Monitor `dlightrag_runs`, `dlightrag_run_events`, `dlightrag_blobs`, and
-  `dlightrag_blob_chunks`. By default, Query claims stop at 16
-  deployment-wide active Runs and new acceptance is rejected when the 30,000
-  nonterminal Query fuse is full. Corpus Mutation claims stop at the validated
-  bound of two deployment-wide active Runs and reject new mutation acceptance
-  when their separate 1,000-Run fuse is full. These values and their limitations
-  are recorded in the [Slice 6 validation report](validation/run-runtime-slice-6.md).
+  `dlightrag_blob_chunks`. Each process defaults to 16 Query workers, and each
+  writer process defaults to two Corpus Mutation workers. Deployment
+  configuration owns process count and total active capacity. New acceptance is
+  rejected when the lane's deployment-wide nonterminal admission limit is
+  reached: 30,000 Query Runs or 1,000 Corpus Mutation Runs by default. These
+  values and their limitations are recorded in the [Slice 6 validation
+  report](validation/run-runtime-slice-6.md).
 - Route traffic with `GET /ready`; it probes only writable Operational State.
   Use `GET /health` for I/O-free liveness and the bounded corpus/parser/provider
   degradation view. A corpus or provider outage does not remove readiness:
-  accepted eligible Runs defer durably while their lane fuse has room.
+  accepted eligible Runs defer durably while their lane's admission limit has room.
 
 Run the repository-owned failure matrix, fake-model PG18 convergence gate, and
 opt-in fake-only load campaign with `make validate-runtime`. `runtime-faults`

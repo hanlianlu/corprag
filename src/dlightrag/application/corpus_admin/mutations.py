@@ -16,7 +16,7 @@ from uuid import UUID, uuid7
 
 from dlightrag.application.runs import (
     IdempotencyKeyConflict,
-    RunCapacityExceededError,
+    RunAdmissionLimitExceededError,
     RunCreation,
     RunRuntimeUnavailableError,
 )
@@ -48,7 +48,7 @@ from dlightrag.engine.runtime.records import (
     IdempotencyKeyConflict as RuntimeIdempotencyKeyConflict,
 )
 from dlightrag.engine.runtime.records import (
-    RunCapacityExceededError as RuntimeRunCapacityExceededError,
+    RunAdmissionLimitExceededError as RuntimeRunAdmissionLimitExceededError,
 )
 
 from .errors import UnsafeUploadNameError, UploadTooLargeError
@@ -469,8 +469,8 @@ class CorpusMutationService:
                 coordinator.wake()
         except RuntimeIdempotencyKeyConflict as exc:
             raise IdempotencyKeyConflict(str(exc)) from exc
-        except RuntimeRunCapacityExceededError as exc:
-            raise RunCapacityExceededError(str(exc)) from exc
+        except RuntimeRunAdmissionLimitExceededError as exc:
+            raise RunAdmissionLimitExceededError(str(exc)) from exc
         return RunCreation.from_runtime(creation)
 
     async def stage_upload(

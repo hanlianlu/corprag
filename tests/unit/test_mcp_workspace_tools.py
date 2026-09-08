@@ -759,6 +759,20 @@ async def test_mcp_reset_corpus_accepts_a_durable_run(mock_mcp_application) -> N
     )
 
 
+async def test_mcp_corpus_mutation_projects_the_admission_limit(mock_mcp_application) -> None:
+    from dlightrag.application.runs import RunAdmissionLimitExceededError
+
+    mock_mcp_application.corpus_mutations.create_reset.side_effect = RunAdmissionLimitExceededError(
+        "limit reached"
+    )
+
+    result = await mcp_server.mcp_app.call_tool("reset_corpus", {"workspace": "default"})
+
+    assert isinstance(result, CallToolResult)
+    assert result.is_error is True
+    assert _tool_text(result) == "Error: Deployment-wide nonterminal admission limit reached"
+
+
 async def test_mcp_rejects_local_path_outside_input_dir(mock_mcp_application) -> None:
     result = await mcp_server.mcp_app.call_tool(
         "ingest",
@@ -910,6 +924,22 @@ async def test_mcp_answer_reports_a_reused_key_with_different_input(
     assert isinstance(result, CallToolResult)
     assert result.is_error is True
     assert "idempotency_key" in _tool_text(result)
+
+
+async def test_mcp_answer_projects_the_deployment_wide_admission_limit(
+    mock_mcp_application: AsyncMock,
+) -> None:
+    from dlightrag.application.runs import RunAdmissionLimitExceededError
+
+    mock_mcp_application.answers.create.side_effect = RunAdmissionLimitExceededError(
+        "limit reached"
+    )
+
+    result = await mcp_server.mcp_app.call_tool("answer", {"query": "x"})
+
+    assert isinstance(result, CallToolResult)
+    assert result.is_error is True
+    assert _tool_text(result) == "Error: Deployment-wide nonterminal admission limit reached"
 
 
 async def test_mcp_status_returns_the_canonical_result_and_sanitizes_contexts(

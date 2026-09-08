@@ -179,7 +179,7 @@ async def test_apply_migrations_runs_only_newly_appended_versions() -> None:
     assert conn.applied == {("example", "create_table"), ("example", "add_name")}
 
 
-async def test_run_event_guard_is_an_append_only_migration_applied_once_in_order() -> None:
+async def test_run_schema_changes_are_append_only_and_applied_once_in_order() -> None:
     from dlightrag.adapters.postgres.runtime.run_store import (
         RUN_MIGRATION_SCOPE,
         RUN_MIGRATIONS,
@@ -194,12 +194,13 @@ async def test_run_event_guard_is_an_append_only_migration_applied_once_in_order
         "write_model_web_resource_catalog",
         "corpus_mutation_runtime",
         "normalize_run_event_constraints",
+        "remove_run_active_permit",
     )
     assert tuple(migration.version for migration in RUN_MIGRATIONS) == expected_versions
     assert all(
         "dlightrag_enforce_run_event_constraints" not in statement
         and "trg_dlightrag_run_events_enforce" not in statement
-        for migration in RUN_MIGRATIONS[:-1]
+        for migration in RUN_MIGRATIONS[:-2]
         for statement in migration.statements
     )
 
@@ -207,7 +208,7 @@ async def test_run_event_guard_is_an_append_only_migration_applied_once_in_order
     await apply_migrations(
         conn,
         scope=RUN_MIGRATION_SCOPE,
-        migrations=RUN_MIGRATIONS[:-1],
+        migrations=RUN_MIGRATIONS[:-2],
     )
     executed_before_append = len(conn.executed)
     await apply_migrations(conn, scope=RUN_MIGRATION_SCOPE, migrations=RUN_MIGRATIONS)
@@ -220,13 +221,23 @@ async def test_run_event_guard_is_an_append_only_migration_applied_once_in_order
         and args[0] == RUN_MIGRATION_SCOPE
     ]
     assert recorded_versions == list(expected_versions)
-    guard_statements = RUN_MIGRATIONS[-1].statements
+    guard_statements = RUN_MIGRATIONS[-2].statements
+    drop_statements = RUN_MIGRATIONS[-1].statements
     assert len(guard_statements) == 2
+    assert len(drop_statements) == 1
+    active_permit_statements = [
+        (migration.version, statement)
+        for migration in RUN_MIGRATIONS
+        for statement in migration.statements
+        if "active_permit" in statement
+    ]
+    assert active_permit_statements == [("remove_run_active_permit", drop_statements[0])]
+    appended_statements = (*guard_statements, *drop_statements)
     executed_sql = [query for query, _ in conn.executed]
     assert all(
-        statement not in executed_sql[:executed_before_append] for statement in guard_statements
+        statement not in executed_sql[:executed_before_append] for statement in appended_statements
     )
-    assert all(executed_sql.count(statement) == 1 for statement in guard_statements)
+    assert all(executed_sql.count(statement) == 1 for statement in appended_statements)
 
 
 async def test_apply_migrations_does_not_record_failed_versions() -> None:

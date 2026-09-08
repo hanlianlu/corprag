@@ -514,11 +514,9 @@ the same absolute path. Production sizing, SSL, indexes, and role details are in
 |---|---|---|
 | `models.max_concurrency` | `16` | All provider requests in one process |
 | `runtime.query.worker_concurrency` | `16` | Query-lane runs per process |
-| `runtime.query.max_active_runs` | `16` | Query-lane claims across the deployment |
-| `runtime.query.max_nonterminal_runs` | `30000` | Query-lane durable admission fuse |
-| `runtime.corpus_mutation.worker_concurrency` | `2` | Validated Corpus Mutation Run workers per writer process |
-| `runtime.corpus_mutation.max_active_runs` | `2` | Validated Corpus Mutation claims across the deployment |
-| `runtime.corpus_mutation.max_nonterminal_runs` | `1000` | Validated Corpus Mutation durable admission fuse |
+| `runtime.query.max_nonterminal_runs` | `30000` | Query-lane deployment-wide nonterminal admission limit |
+| `runtime.corpus_mutation.worker_concurrency` | `2` | Corpus Mutation Run workers per writer process |
+| `runtime.corpus_mutation.max_nonterminal_runs` | `1000` | Corpus Mutation deployment-wide nonterminal admission limit |
 | `corpus.ingestion.pipeline.max_concurrency` | `16` | One workspace's LightRAG pipeline |
 | `models.embedding.max_concurrency` | `16` | Embedding calls |
 | `models.embedding.batch_size` | `64` | LightRAG embedding batch size |
@@ -597,22 +595,20 @@ are `lease_seconds: 1800`, `retry_backoff_seconds: 600`, and
 runtime:
   query:
     worker_concurrency: 16
-    max_active_runs: 16
     max_nonterminal_runs: 30000
   corpus_mutation:
     worker_concurrency: 2
-    max_active_runs: 2
     max_nonterminal_runs: 1000
   run_retention_days: 365
 ```
 
 One RunRuntime schedules top-level Retrieval and Answer Runs on the Query Lane
 and all ingest, replace, exact delete, retry, and reset Runs on the Corpus
-Mutation Lane. Each lane has a per-process worker bound, a deployment-wide
-active-claim bound, and a deployment-wide nonterminal admission fuse. The three
-Corpus Mutation defaults above are accepted bounded safety values. The
-[Slice 6 validation report](validation/run-runtime-slice-6.md) records the
-10k-client fake-executor campaign, full-fuse rejection, active ceilings,
+Mutation Lane. Each lane has a per-process worker bound and a deployment-wide
+nonterminal admission limit. Deployment configuration owns process count and
+therefore total active Run capacity. The [Slice 6 validation
+report](validation/run-runtime-slice-6.md) records the 10k-client fake-executor
+campaign, admission-limit rejection, single-process worker occupancy,
 measurements, and limitations.
 
 `run_retention_days` is the per-Run retention selection for terminal Answer

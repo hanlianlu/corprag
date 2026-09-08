@@ -38,8 +38,8 @@ from dlightrag.application.answer_runs.results import AnswerResult, restore_answ
 from dlightrag.application.answer_runs.routing import RoutingAcceptance
 from dlightrag.application.runs import (
     IdempotencyKeyConflict,
+    RunAdmissionLimitExceededError,
     RunCancelledError,
-    RunCapacityExceededError,
     RunCreation,
     RunEvent,
     RunFailedError,
@@ -95,7 +95,7 @@ from dlightrag.engine.runtime import (
     IdempotencyKeyConflict as RuntimeIdempotencyKeyConflict,
 )
 from dlightrag.engine.runtime import (
-    RunCapacityExceededError as RuntimeRunCapacityExceededError,
+    RunAdmissionLimitExceededError as RuntimeRunAdmissionLimitExceededError,
 )
 from dlightrag.engine.runtime import (
     RunCreation as RuntimeRunCreation,
@@ -544,8 +544,8 @@ class AnswerService:
             )
         except RuntimeIdempotencyKeyConflict as exc:
             raise IdempotencyKeyConflict(str(exc)) from exc
-        except RuntimeRunCapacityExceededError as exc:
-            raise RunCapacityExceededError(str(exc)) from exc
+        except RuntimeRunAdmissionLimitExceededError as exc:
+            raise RunAdmissionLimitExceededError(str(exc)) from exc
         if creation is None:
             raise RuntimeError("Answer run acceptance returned no descriptor")
         return RunCreation.from_runtime(creation)
@@ -574,8 +574,8 @@ class AnswerService:
             )
         except RuntimeIdempotencyKeyConflict as exc:
             raise IdempotencyKeyConflict(str(exc)) from exc
-        except RuntimeRunCapacityExceededError as exc:
-            raise RunCapacityExceededError(str(exc)) from exc
+        except RuntimeRunAdmissionLimitExceededError as exc:
+            raise RunAdmissionLimitExceededError(str(exc)) from exc
 
     async def _accept[T](
         self,

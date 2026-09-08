@@ -85,8 +85,8 @@ class IdempotencyKeyConflict(RuntimeError):
     """One submitter reused a submission key with different normalized input."""
 
 
-class RunCapacityExceededError(RuntimeError):
-    """A lane's deployment-wide nonterminal admission fuse is full."""
+class RunAdmissionLimitExceededError(RuntimeError):
+    """A deployment-wide nonterminal admission limit was reached."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,7 +160,6 @@ class RunRecord:
     finished_at: datetime.datetime | None
     purge_after: datetime.datetime | None = None
     next_attempt_at: datetime.datetime | None = None
-    active_permit: bool = False
     checkpoint: Mapping[str, Any] | None = None
     handoff_started_at: datetime.datetime | None = None
     superseded_by_run_id: str | None = None
@@ -356,7 +355,7 @@ class Failed:
 
 @dataclass(frozen=True, slots=True)
 class Deferred:
-    """Execution yielded its permit until a durable retry time."""
+    """Execution yielded its local slot until a durable retry time."""
 
     checkpoint: Mapping[str, Any]
     next_attempt_at: datetime.datetime
@@ -502,7 +501,7 @@ __all__ = [
     "ReclaimState",
     "RunAccessScope",
     "RunArtifactReference",
-    "RunCapacityExceededError",
+    "RunAdmissionLimitExceededError",
     "RunFetchedResource",
     "RunCreation",
     "RunDeletion",

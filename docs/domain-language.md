@@ -25,10 +25,10 @@ The execution and capacity lane for retrieval and answer kinds. It is not an agg
 _Avoid_: QueryRun, query service
 
 **Corpus Mutation Lane**:
-The bounded execution and capacity lane for Workspace-scoped ingest, replace,
+The bounded execution and admission lane for Workspace-scoped ingest, replace,
 exact delete, retry, and reset Runs. Runs are FIFO within one Corpus Workspace
-and may execute concurrently across Workspaces; the lane has a separate fuse
-from the Query Lane.
+and may execute concurrently across Workspaces; the lane has a separate
+deployment-wide nonterminal admission limit from the Query Lane.
 _Avoid_: Ingest Job queue, per-action coordinator, Workspace Delete
 
 **Corpus Mutation Run**:

@@ -52,7 +52,7 @@ from dlightrag.application.answer_runs.sources import SourceDownloadLinkBuilder
 from dlightrag.application.config import AnswerConfig
 from dlightrag.application.corpus_admin import safe_source_filename
 from dlightrag.application.retrieval import RetrievalOptions
-from dlightrag.application.runs import IdempotencyKeyConflict, RunCapacityExceededError
+from dlightrag.application.runs import IdempotencyKeyConflict, RunAdmissionLimitExceededError
 
 from .deps import (
     authorized_workspaces,
@@ -416,8 +416,11 @@ async def create_answer_run(
             status_code=409,
             detail="Idempotency-Key was reused with a different answer request",
         ) from None
-    except RunCapacityExceededError:
-        raise HTTPException(status_code=503, detail="Run admission capacity is full") from None
+    except RunAdmissionLimitExceededError:
+        raise HTTPException(
+            status_code=503,
+            detail="Deployment-wide nonterminal admission limit reached",
+        ) from None
     return run_descriptor(creation.run)
 
 
@@ -477,8 +480,11 @@ async def _continue_answer_run(
             status_code=409,
             detail="Idempotency-Key was reused with a different continuation",
         ) from None
-    except RunCapacityExceededError:
-        raise HTTPException(status_code=503, detail="Run admission capacity is full") from None
+    except RunAdmissionLimitExceededError:
+        raise HTTPException(
+            status_code=503,
+            detail="Deployment-wide nonterminal admission limit reached",
+        ) from None
     if creation is None:
         raise HTTPException(status_code=409, detail="Continuation requires a terminal owned run")
     return run_descriptor(creation.run)

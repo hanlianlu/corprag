@@ -5,7 +5,8 @@
 Accepted, implemented, and failure/load validated. Slice 1 established common
 Runtime and Answer, Slice 2 added top-level Retrieval, Slice 5 moved Corpus
 Mutation onto the same RunRuntime, and the [Slice 6 validation](../validation/run-runtime-slice-6.md)
-confirmed the lane bounds and failure behavior.
+confirms per-process worker bounds, deployment-wide nonterminal admission limits,
+and failure behavior.
 
 ## Context
 
@@ -20,9 +21,9 @@ One storage-neutral `RunRuntime` owns the lifecycle of the closed `run_kind` val
 
 The only public states are `queued`, `running`, `succeeded`, `failed`, and `cancelled`. A multi-document Corpus Mutation with any failed document is `failed` and retains every per-document result; there is no partial lifecycle state or successful partial outcome. An ambiguous destructive mutation stays `running` with `phase=waiting_for_repair` until it can safely resume or an administrator explicitly supersedes it with Corpus Reset.
 
-`RunRuntime` has a Query Lane for Retrieval and Answer and a Corpus Mutation Lane for all five mutation actions. Query is only an execution lane; there is no `QueryRun` aggregate or runtime. An Answer's internal retrieval is a Retrieval Stage, not a nested Run. Slice 1 configures the Query lane with per-process concurrency 16, an atomic deployment-wide active ceiling of 16, and a deployment-wide nonterminal acceptance fuse of 30,000.
+`RunRuntime` has a Query Lane for Retrieval and Answer and a Corpus Mutation Lane for all five mutation actions. Query is only an execution lane; there is no `QueryRun` aggregate or runtime. An Answer's internal retrieval is a Retrieval Stage, not a nested Run. The Query lane uses 16 workers per process and a deployment-wide nonterminal admission limit of 30,000. Corpus Mutation uses two workers per writer process and an independent 1,000-Run admission limit. Deployment configuration owns process count and total active capacity.
 
-Across the deployment, at most one Corpus Mutation Run owns a given Workspace at a time. While it executes LightRAG's in-process pipeline it holds its Run lease and active permit; LightRAG owns parallelism within that pipeline. Different Workspaces may execute concurrently. A deferred or `waiting_for_repair` Run releases compute capacity but preserves the Workspace mutation barrier, so later mutations cannot compound uncertain state.
+Across the deployment, at most one Corpus Mutation Run owns a given Workspace at a time. While it executes LightRAG's in-process pipeline it holds its fenced Run lease and one local execution slot; LightRAG owns parallelism within that pipeline. Different Workspaces may execute concurrently across writer processes. A deferred or `waiting_for_repair` Run releases its local slot but preserves the Workspace mutation barrier, so later mutations cannot compound uncertain state.
 
 ## Consequences
 
@@ -30,8 +31,8 @@ The migration was sliced. Slice 1 removed the Answer-only lifecycle and moved
 Answer through the common Runtime. Slice 2 made top-level Retrieval durable on
 the same Query Lane while keeping Answer's internal Retrieval Stage direct.
 Slice 5 moved Corpus Mutation execution onto its dedicated lane in the same
-Runtime; Slice 6 retained the Query `16 / 16 / 30,000` and Corpus Mutation
-`2 / 2 / 1,000` bounds from controlled evidence. No parallel Answer, inline
+Runtime; Slice 6 validated Query `16 / 30,000` and Corpus Mutation
+`2 / 1,000` per-process worker/admission settings with controlled evidence. No parallel Answer, inline
 top-level Retrieval, or Ingest Job lifecycle
 is retained as a compatibility path. The implementation keeps the combined Application
 process topology and existing writer/reader capabilities: only writer-capable

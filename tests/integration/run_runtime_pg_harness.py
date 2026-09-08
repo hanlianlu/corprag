@@ -32,9 +32,7 @@ async def require_postgres() -> None:
 async def isolated_run_runtime(
     prefix: str,
     *,
-    query_max_active_runs: int = 16,
     query_max_nonterminal_runs: int = 30_000,
-    corpus_mutation_max_active_runs: int = 2,
     corpus_mutation_max_nonterminal_runs: int = 1_000,
     pool_max_size: int = 20,
 ) -> AsyncIterator[tuple[PGRunStore, asyncpg.Pool]]:
@@ -53,9 +51,7 @@ async def isolated_run_runtime(
     try:
         store = PGRunStore(
             pool=pool,
-            query_max_active_runs=query_max_active_runs,
             query_max_nonterminal_runs=query_max_nonterminal_runs,
-            corpus_mutation_max_active_runs=corpus_mutation_max_active_runs,
             corpus_mutation_max_nonterminal_runs=corpus_mutation_max_nonterminal_runs,
         )
         await store.initialize()

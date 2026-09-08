@@ -173,7 +173,7 @@ async def test_ingest_owned_phase_faults_defer_without_leaking_capacity_or_diagn
             await coordinator.aclose()
 
         for row, (workspace, _run_id, track_id, _phase) in zip(rows, accepted, strict=True):
-            assert row.active_permit is False and row.lease_owner is None
+            assert row.lease_owner is None
             assert row.handoff_started_at is not None
             assert row.next_attempt_at is not None
             assert row.checkpoint is not None
@@ -303,7 +303,7 @@ async def test_ambiguous_destructive_phase_waits_for_repair_and_keeps_fifo(
             await coordinator.aclose()
 
         assert waiting.status == "running"
-        assert waiting.active_permit is False and waiting.lease_owner is None
+        assert waiting.lease_owner is None
         assert waiting.handoff_started_at is not None
         assert waiting.checkpoint is not None
         assert waiting.checkpoint["repair_reason"]

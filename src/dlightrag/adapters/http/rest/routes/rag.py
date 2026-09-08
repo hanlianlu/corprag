@@ -10,7 +10,7 @@ from dlightrag.adapters.http.rest.models import RetrieveRequest, RunDescriptor
 from dlightrag.adapters.http.rest.payloads import metadata_filter_from_payload
 from dlightrag.application.access import UserContext, owner_id_from_user
 from dlightrag.application.retrieval import RetrieveRequest as ServiceRequest
-from dlightrag.application.runs import IdempotencyKeyConflict, RunCapacityExceededError
+from dlightrag.application.runs import IdempotencyKeyConflict, RunAdmissionLimitExceededError
 
 from .deps import (
     get_application,
@@ -55,8 +55,10 @@ async def retrieve(
             status_code=409,
             detail="Idempotency-Key was reused with a different retrieval request",
         ) from None
-    except RunCapacityExceededError:
-        raise HTTPException(status_code=503, detail="Run admission capacity is full") from None
+    except RunAdmissionLimitExceededError:
+        raise HTTPException(
+            status_code=503, detail="Deployment-wide nonterminal admission limit reached"
+        ) from None
     from .runs import run_descriptor
 
     return run_descriptor(creation.run)

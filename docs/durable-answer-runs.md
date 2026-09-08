@@ -30,8 +30,8 @@ blob seam without creating an Engine dependency on PostgreSQL.
   same-origin browser, MCP, Python client, and Application observers use the
   same Run identity and durable sequence.
 - Corpus mutations are FIFO within one Workspace and may proceed concurrently
-  across Workspaces. Their worker, active-claim, and nonterminal bounds are
-  independent from Query-lane bounds.
+  across Workspaces. Their per-process worker bound and deployment-wide
+  nonterminal admission limit are independent from the Query Lane.
 
 DlightRAG does **not** promise exactly-once execution for an interrupted
 read-only tool batch or exactly-once token generation before final result
@@ -48,7 +48,7 @@ field, or separate ingest lifecycle.
 
 ```text
 accept  -> Run + bounded immutable prepared input
-claim   -> oldest lane-eligible row; active permit; fencing epoch++; lease
+claim   -> oldest lane-eligible row; fencing epoch++; lease
 execute -> operation-owned phases/checkpoints and durable events
 finish  -> canonical result + exactly one terminal event (one transaction)
 recover -> reclaim an expired lease and execute from durable authority
@@ -62,14 +62,15 @@ state, and attachment references through its purpose-built transaction seam.
 
 An execution slot is one of `runtime.query.worker_concurrency` local runs. The
 coordinator reserves a slot **before** claiming a row, so a worker never holds a
-lease while waiting for local capacity. PostgreSQL atomically caps live Query-lane
-claims deployment-wide at `runtime.query.max_active_runs`; the default is 16 for
-both limits. Model-provider and LightRAG pipeline concurrency are independent from both Run
-lanes. Validated Corpus Mutation defaults are two local workers, two
-deployment-wide active claims, and a 1,000-Run nonterminal fuse. The
-[Slice 6 validation report](validation/run-runtime-slice-6.md) records the
-failure matrix, full-fuse rejection, active-cap exercise, 10k-client
-measurements, broad survival thresholds, and limitations.
+lease while waiting for local capacity. The Query default is 16 workers per
+process; Corpus Mutation defaults to two workers per writer process. Multiple
+processes contribute additive local slots, while PostgreSQL row locks prevent a
+Run from being double-claimed. Deployment configuration owns process count and
+total active Run capacity. Model-provider and LightRAG pipeline concurrency are
+independent from both Run lanes. The [Slice 6 validation
+report](validation/run-runtime-slice-6.md) records the failure matrix,
+admission-limit rejection, single-process occupancy, 10k-client measurements,
+broad survival thresholds, and limitations.
 
 A free worker claims the oldest eligible queued or expired-running row with
 `FOR UPDATE SKIP LOCKED`. It sweeps bounded batches at startup, after local
@@ -77,9 +78,10 @@ completion, and once per second so work from another host does not depend on a
 process-local wakeup.
 
 Accepted Retrieval and Answer Runs queue while Query slots are busy, up to the
-deployment-wide `runtime.query.max_nonterminal_runs` admission fuse (default
-30,000). Corpus Mutation Runs queue independently up to
-`runtime.corpus_mutation.max_nonterminal_runs` (validated default 1,000). A full fuse rejects new acceptance before storing a Run; already
+deployment-wide `runtime.query.max_nonterminal_runs` nonterminal admission limit
+(default 30,000). Corpus Mutation Runs queue independently up to
+`runtime.corpus_mutation.max_nonterminal_runs` (default 1,000). Reaching a lane's
+admission limit rejects new acceptance before storing a Run; already
 accepted work remains durable. Answer has no wall-clock timeout. A top-level
 Retrieval's `corpus.retrieval.timeout` begins only after it is claimed and bounds
 its planning/search execution, not queue residence; expiry fails that Run with
@@ -119,7 +121,7 @@ state. It proceeds only when reconciliation proves the effect is complete or
 safe to continue.
 
 If reconciliation cannot prove a safe outcome, the same nonterminal Run enters
-`waiting_for_repair`, releases its lease and active permit, and exposes bounded
+`waiting_for_repair`, releases its lease and local execution slot, and exposes bounded
 `repair_reason` and `repair_remedy` fields. It is not failed and no replacement
 Run is created. An authorized operator repairs upstream state, then explicitly
 resumes this same Run through REST, same-origin browser, MCP, Python, or the
@@ -255,8 +257,7 @@ One operation-neutral row owns:
 - status, phase, stop reason, cancellation time;
 - lease owner/expiration and fencing epoch;
 - durable progress/reclaim counters and next event sequence;
-- retention policy, `purge_after`, retry eligibility, active permit, and opaque
-  executor checkpoint;
+- retention policy, `purge_after`, retry eligibility, and opaque executor checkpoint;
 - final result or terminal error; and
 - created/updated/started/finished/event-trim timestamps.
 

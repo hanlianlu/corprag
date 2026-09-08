@@ -1,5 +1,5 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
-"""Representative RunRuntime claim, fuse, FIFO, and cursor query plans."""
+"""Representative RunRuntime admission, claim, FIFO, and cursor query plans."""
 
 from __future__ import annotations
 
@@ -66,18 +66,11 @@ async def test_runtime_backlog_queries_use_bounded_indexes() -> None:
             await connection.execute("ANALYZE dlightrag_runs")
             await connection.execute("ANALYZE dlightrag_run_events")
             await connection.execute("SET LOCAL enable_seqscan = off")
-            fuse = await _plan(
+            admission_limit = await _plan(
                 connection,
                 "SELECT COUNT(*) FROM dlightrag_runs "
                 "WHERE lane = $1 AND status IN ('queued', 'running')",
                 "corpus_mutation",
-            )
-            active = await _plan(
-                connection,
-                "SELECT COUNT(*) FROM dlightrag_runs "
-                "WHERE lane = $1 AND active_permit = TRUE "
-                "AND status = 'running' AND lease_expires_at > NOW()",
-                "query",
             )
             mutation_fifo = await _plan(
                 connection,
@@ -110,10 +103,7 @@ async def test_runtime_backlog_queries_use_bounded_indexes() -> None:
                 0,
             )
 
-        assert "idx_dlightrag_runs_claim" in fuse
-        # Active count is bounded by the accepted ceiling; it may share the
-        # partial claim index rather than requiring a write-amplifying index.
-        assert "idx_dlightrag_runs_claim" in active
+        assert "idx_dlightrag_runs_claim" in admission_limit
         assert "idx_dlightrag_runs_claim" in mutation_fifo
         assert "idx_dlightrag_runs_mutation_fifo" in mutation_fifo
         assert "dlightrag_run_events_pkey" in events

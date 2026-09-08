@@ -29,6 +29,7 @@ from dlightrag.application.corpus_admin import (
     UploadTooLargeError,
     safe_log_text,
 )
+from dlightrag.application.runs import RunAdmissionLimitExceededError
 
 logger = logging.getLogger(__name__)
 
@@ -272,6 +273,11 @@ async def start_failed_file_retry(
             selector="all_retryable",
             submitted_by=owner_id_from_user(getattr(request.state, "user_context", None)),
         )
+    except RunAdmissionLimitExceededError:
+        raise HTTPException(
+            status_code=503,
+            detail="Deployment-wide nonterminal admission limit reached",
+        ) from None
     except Exception:
         logger.exception(
             "Could not accept failed-document retry for workspace %s",
@@ -348,6 +354,11 @@ async def upload_files(
                 staged=staged,
                 submitted_by=owner_id_from_user(getattr(request.state, "user_context", None)),
             )
+        except RunAdmissionLimitExceededError:
+            raise HTTPException(
+                status_code=503,
+                detail="Deployment-wide nonterminal admission limit reached",
+            ) from None
         except Exception:
             logger.exception(
                 "Failed to accept ingest Run for workspace %s",
@@ -419,6 +430,11 @@ async def delete_files(
             file_paths=file_paths,
             submitted_by=owner_id_from_user(getattr(request.state, "user_context", None)),
         )
+    except RunAdmissionLimitExceededError:
+        raise HTTPException(
+            status_code=503,
+            detail="Deployment-wide nonterminal admission limit reached",
+        ) from None
     except Exception:
         logger.exception("Delete Run acceptance failed")
         raise HTTPException(status_code=503, detail="Delete could not be accepted") from None

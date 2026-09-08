@@ -293,9 +293,7 @@ def _compose(config: DlightragConfig) -> _ApplicationComponents:
     run_blob_store = PGRunBlobStore()
     run_store = PGRunStore(
         retention_seconds=config.runtime.run_retention_days * 24 * 3600,
-        query_max_active_runs=config.runtime.query.max_active_runs,
         query_max_nonterminal_runs=config.runtime.query.max_nonterminal_runs,
-        corpus_mutation_max_active_runs=config.runtime.corpus_mutation.max_active_runs,
         corpus_mutation_max_nonterminal_runs=(config.runtime.corpus_mutation.max_nonterminal_runs),
         promotion_doc_threshold=config.corpus.promotion.doc_threshold,
         promotion_chunk_threshold=config.corpus.promotion.chunk_threshold,

@@ -217,24 +217,13 @@ class AnswerConfig(BaseModel):
     )
 
 
-class QueryLaneRuntimeConfig(BaseModel):
-    """Accepted Query-lane worker, active-claim, and admission limits."""
+class LaneRuntimeConfig(BaseModel):
+    """Per-lane local workers and deployment-wide nonterminal admission limit."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    worker_concurrency: int = Field(default=16, ge=1)
-    max_active_runs: int = Field(default=16, ge=1)
-    max_nonterminal_runs: int = Field(default=30_000, ge=1)
-
-
-class CorpusMutationLaneRuntimeConfig(BaseModel):
-    """Validated Corpus Mutation worker, active-claim, and admission limits."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    worker_concurrency: int = Field(default=2, ge=1)
-    max_active_runs: int = Field(default=2, ge=1)
-    max_nonterminal_runs: int = Field(default=1_000, ge=1)
+    worker_concurrency: int = Field(ge=1)
+    max_nonterminal_runs: int = Field(ge=1)
 
 
 class RuntimeConfig(BaseModel):
@@ -242,9 +231,13 @@ class RuntimeConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    query: QueryLaneRuntimeConfig = Field(default_factory=QueryLaneRuntimeConfig)
-    corpus_mutation: CorpusMutationLaneRuntimeConfig = Field(
-        default_factory=CorpusMutationLaneRuntimeConfig
+    query: LaneRuntimeConfig = LaneRuntimeConfig(
+        worker_concurrency=16,
+        max_nonterminal_runs=30_000,
+    )
+    corpus_mutation: LaneRuntimeConfig = LaneRuntimeConfig(
+        worker_concurrency=2,
+        max_nonterminal_runs=1_000,
     )
     run_retention_days: int = Field(
         default=365,
@@ -826,7 +819,7 @@ class DlightragConfig(BaseSettings):
     models: ModelsSettings = Field(default_factory=ModelsSettings)
     corpus: CorpusSettings = Field(default_factory=CorpusSettings)
     answer: AnswerSectionSettings = Field(default_factory=AnswerSectionSettings)
-    runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
+    runtime: RuntimeConfig = RuntimeConfig()
     access: AccessSectionSettings = Field(default_factory=AccessSectionSettings)
     interfaces: InterfacesSettings = Field(default_factory=InterfacesSettings)
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)

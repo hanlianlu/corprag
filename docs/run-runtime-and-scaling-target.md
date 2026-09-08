@@ -16,12 +16,12 @@ The target is a breaking upgrade. It does not retain parallel legacy lifecycle e
 
 - One trusted organization, 10–100 Corpus Workspaces, and normally 1–10 Workspaces per Query.
 - Expected Query mix is 10% Retrieval, 40% Fast Answer, and 50% Research Answer.
-- The accepted deployment-wide Query nonterminal fuse is 30,000 Runs.
+- The deployment-wide Query nonterminal admission limit is 30,000 Runs.
 - Retrieval `top_k` and `chunk_top_k` remain bounded; current target maxima are ten times configured values, presently 400 and 200.
 - The Research working-set guard and Answer attachment maximum are 128 MiB. In trust-mode execution, only filesystem/container infrastructure can enforce a hard storage quota.
 - Existing Child Session concurrency remains four per parent. Additional Bash, browser, Web-search, or tenant capacity classes require load-test evidence.
 
-At target load, Run submission while a fuse has room, status, cancellation, and event-cursor reconnect remain responsive. Accepted Runs are not lost or settled terminally twice, and workers resume draining after offered load falls. Exact latency, memory, event-loop, database, provider, and active-capacity thresholds are evidence-driven rather than invented here.
+At target load, Run submission while its lane's admission limit has room, status, cancellation, and event-cursor reconnect remain responsive. Accepted Runs are not lost or settled terminally twice, and workers resume draining after offered load falls. Exact latency, memory, event-loop, database, and provider thresholds are evidence-driven rather than invented here.
 
 ## Domain model
 
@@ -96,7 +96,7 @@ A Corpus Mutation with one or more failed documents is `failed` and preserves ev
 
 Infrastructure interruption reclaims the same Run through a fenced lease. Transient dependency unavailability records a durable checkpoint and `next_attempt_at`, releases execution capacity, and retries with bounded exponential backoff. Explicit invalid input, unsupported capability, or deterministic operation failure is terminal. The runtime executes declared deferred or terminal outcomes; it does not blindly reinterpret every exception as retryable.
 
-An ambiguous destructive mutation remains `running` with `phase=waiting_for_repair` and an explicit repair reason/remedy. It consumes the nonterminal fuse and preserves the Workspace mutation barrier but releases its compute permit. Repair completion lets the same Run reconcile and continue. An administrator-confirmed Corpus Reset is the only destructive supersession path; it records `superseded_by_run_id` on the waiting prior Run. There is no unsafe unlock that preserves unknown corpus state.
+An ambiguous destructive mutation remains `running` with `phase=waiting_for_repair` and an explicit repair reason/remedy. It counts toward the nonterminal admission limit and preserves the Workspace mutation barrier but releases its local execution slot. Repair completion lets the same Run reconcile and continue. An administrator-confirmed Corpus Reset is the only destructive supersession path; it records `superseded_by_run_id` on the waiting prior Run. There is no unsafe unlock that preserves unknown corpus state.
 
 SSE is a lossy notification channel, not an unbounded per-subscriber buffer. The durable ordered Run event log is authoritative. Clients reconnect with a sequence cursor; the `RunStore` provides semantic wait-for-change notification, with bounded polling only as a safety fallback.
 
@@ -112,15 +112,15 @@ Corpus Mutation Lane
   ingest + replace + delete + retry + reset
 ```
 
-Each lane has bounded per-process execution, a deployment-wide active ceiling, and an independent deployment-wide max-nonterminal acceptance fuse. FIFO orders eligible Runs; temporarily ineligible work is skipped rather than causing lane-wide head-of-line blocking. Active limits protect service resources while nonterminal limits prevent a dependency outage from growing a durable queue without bound.
+Each lane has bounded per-process execution and an independent deployment-wide nonterminal admission limit. FIFO orders eligible Runs; temporarily ineligible work is skipped rather than causing lane-wide head-of-line blocking. Local worker limits bound each process while nonterminal limits prevent a dependency outage from growing a durable queue without bound. Deployment configuration owns process count and therefore total active capacity.
 
-The accepted Query values are 16 active deployment-wide, 16 workers per process, and 30,000 nonterminal Runs. The validated Corpus Mutation values are two active deployment-wide, two workers per writer process, and 1,000 nonterminal Runs. The deterministic 10k control-plane campaign reached both active ceilings, filled and atomically rejected at the Mutation fuse, preserved lane independence and Workspace FIFO, and drained; its environment, exact measurements, broad survival thresholds, and limitations are recorded in the [validation report](validation/run-runtime-slice-6.md). `ModelScheduler` remains process-local Engine AI protection, LightRAG owns its stage queues and parser/embedding/LLM concurrency, and providers/operators own external quotas and service capacity.
+The Query values are 16 workers per process and 30,000 nonterminal Runs. Corpus Mutation uses two workers per writer process and a 1,000-Run nonterminal admission limit. The deterministic 10k single-process control-plane campaign held fake executor occupancy at 16 and two solely through coordinator worker concurrency, atomically rejected at the Mutation admission limit, preserved lane independence and Workspace FIFO, and drained; its environment, exact measurements, broad survival thresholds, and limitations are recorded in the [validation report](validation/run-runtime-slice-6.md). Separate multi-coordinator integration evidence proves that local slots add across processes without double-claiming Runs. `ModelScheduler` remains process-local Engine AI protection, LightRAG owns its stage queues and parser/embedding/LLM concurrency, and providers/operators own external quotas and service capacity.
 
-Across the deployment, at most one `corpus_mutation` run owns a Workspace at a time. While calling LightRAG's in-process pipeline, that Run retains its fenced lease and Corpus Mutation active permit; a handoff does not make active in-process work free. LightRAG owns concurrency within the pipeline. Different Workspaces can be processed by different writer replicas concurrently.
+Across the deployment, at most one `corpus_mutation` run owns a Workspace at a time. While calling LightRAG's in-process pipeline, that Run retains its fenced lease and a local Corpus Mutation execution slot. LightRAG owns concurrency within the pipeline. Different Workspaces can be processed by different writer replicas concurrently.
 
 A deferred or `waiting_for_repair` Run releases compute capacity but keeps the logical Workspace mutation barrier. Later mutations for that Workspace remain queued. This deployment-wide ownership is required because LightRAG's process-shared pipeline coordination covers a pre-fork process group, not independent replicas.
 
-The combined Application process topology remains. Writer-capable processes claim Corpus Mutations; reader-capable processes do not mutate corpus state. A service process that may write Operational State can durably accept an authorized mutation even when no writer or corpus dependency is currently healthy, provided the nonterminal fuse has room. No ingress-only, Query-worker, or mutation-worker process mode is added without evidence.
+The combined Application process topology remains. Writer-capable processes claim Corpus Mutations; reader-capable processes do not mutate corpus state. A service process that may write Operational State can durably accept an authorized mutation even when no writer or corpus dependency is currently healthy, provided the lane's nonterminal admission limit has room. No ingress-only, Query-worker, or mutation-worker process mode is added without evidence.
 
 ## Corpus Mutation contract
 
@@ -212,7 +212,7 @@ Changing storage composition remains external operator/infrastructure responsibi
 
 Operational State remains distinct from LightRAG corpus storage and from Run bytes. Each owner keeps a narrow semantic port such as `RunStore`, `AgentSessionRepository`, `ConversationStore`, `MemoryStore`, or `WorkspaceRegistry`. The private composition root selects a coherent Adapter family, currently PostgreSQL. Callers do not receive a universal CRUD store, and cross-owner atomicity is exposed only through a purpose-built narrow transaction seam.
 
-`RunStore` owns atomic acceptance and idempotency conflict detection, claims, fenced leases, events, cancellation settlement, lane limits, Workspace mutation ownership, wakeup, and logical pruning. SQL transactions, `SKIP LOCKED`, advisory mechanisms, indexes, and notifications remain private to the PostgreSQL Adapter.
+`RunStore` owns atomic acceptance and idempotency conflict detection, claims, fenced leases, events, cancellation settlement, deployment-wide nonterminal admission limits, Workspace mutation ownership, wakeup, and logical pruning. SQL transactions, `SKIP LOCKED`, advisory mechanisms, indexes, and notifications remain private to the PostgreSQL Adapter.
 
 `RunBlobStore` persists and streams only DlightRAG-owned Answer attachments, fetched Web resources, spills, and Published Artifact bytes. Operational State remains authoritative for their owner scope, digest, references, visibility, and retention. The first implementation keeps PostgreSQL chunked `BYTEA`; a future object-store Adapter requires complete-before-reference staging and orphan cleanup but adds no authorization authority.
 
@@ -220,7 +220,7 @@ The mutable Agent Workspace remains Answer execution state rather than Operation
 
 ## Health and responsibility split
 
-Operational State is required for admission, lifecycle, leases, and event authority. Its unavailability makes the service not ready. Corpus storage, parser, or provider degradation does not take down the control plane: the bounded component view reports `degraded`, eligible submissions are accepted while their lane's nonterminal fuse has room, and dependency interruptions durably defer when operation policy permits. Liveness reports process health independently and performs no dependency I/O.
+Operational State is required for admission, lifecycle, leases, and event authority. Its unavailability makes the service not ready. Corpus storage, parser, or provider degradation does not take down the control plane: the bounded component view reports `degraded`, eligible submissions are accepted while their lane's nonterminal admission limit has room, and dependency interruptions durably defer when operation policy permits. Liveness reports process health independently and performs no dependency I/O.
 
 The repository owns:
 
@@ -254,4 +254,4 @@ Document visibility barrier. The old Ingest Job lifecycle, unchecked deletion,
 document-status snapshot restoration, and best-effort required projections are
 not compatibility paths.
 
-The evidence decisions are closed in the [Slice 6 validation report](validation/run-runtime-slice-6.md): Corpus Mutation retains `2 / 2 / 1,000`; broad survival tripwires and measured latency/memory/drain results are environment-described rather than product SLOs. The deterministic fake-executor campaign covers Retrieval across 1, 10, 50, and 100 Workspaces and the repository-owned failure/recovery matrix. The default PostgreSQL 18 integration gate verifies observable delete convergence across `PGKVStorage`, `PGVectorStorage`, `PGTableGraphStorage`, and `PGDocStatusStorage` without claiming a storage-neutral proof of LightRAG internals. Queue latency remains measured rather than a pass/fail criterion; service survival, bounded pressure, durable control-plane responsiveness, and eventual drain are hard gates.
+The evidence decisions are closed in the [Slice 6 validation report](validation/run-runtime-slice-6.md): Corpus Mutation retains two workers per writer process and a 1,000-Run deployment-wide nonterminal admission limit; broad survival tripwires and measured latency/memory/drain results are environment-described rather than product SLOs. The deterministic fake-executor campaign covers Retrieval across 1, 10, 50, and 100 Workspaces and the repository-owned failure/recovery matrix. The default PostgreSQL 18 integration gate verifies observable delete convergence across `PGKVStorage`, `PGVectorStorage`, `PGTableGraphStorage`, and `PGDocStatusStorage` without claiming a storage-neutral proof of LightRAG internals. Queue latency remains measured rather than a pass/fail criterion; service survival, bounded pressure, durable control-plane responsiveness, and eventual drain are hard gates.

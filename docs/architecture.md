@@ -193,13 +193,14 @@ Outbound MCP tools come only from deployment allowlists.
 
 One operation-neutral `RunRuntime` owns durable lifecycle. Retrieval and Answer
 executors share its Query Lane. Ingest, replace, exact delete, retry, and reset
-executors share its Corpus Mutation Lane with independent worker, active-claim,
-and nonterminal bounds. Top-level work across REST, MCP, Web, Application, CLI,
+executors share its Corpus Mutation Lane with independent per-process worker
+bounds and a deployment-wide nonterminal admission limit. Top-level work across
+REST, MCP, Web, Application, CLI,
 and evaluation is a PostgreSQL-owned Run:
 
 ```text
 accept  -> Run + bounded immutable prepared input
-claim   -> oldest lane-eligible row; active permit + lease + fencing epoch
+claim   -> oldest lane-eligible row; lease + fencing epoch
 execute -> operation-owned phases/checkpoints and durable events
 finish  -> canonical result + exactly one terminal event (one transaction)
 recover -> reclaim expired lease and execute from durable authority

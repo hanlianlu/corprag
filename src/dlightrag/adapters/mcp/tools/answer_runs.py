@@ -37,7 +37,7 @@ from dlightrag.application.retrieval import (
 )
 from dlightrag.application.runs import (
     IdempotencyKeyConflict,
-    RunCapacityExceededError,
+    RunAdmissionLimitExceededError,
     RunView,
 )
 
@@ -126,8 +126,8 @@ async def answer_tool(
         raise ValueError(
             "idempotency_key was already used for a different answer request"
         ) from None
-    except RunCapacityExceededError:
-        raise ValueError("Run admission capacity is full") from None
+    except RunAdmissionLimitExceededError:
+        raise ValueError("Deployment-wide nonterminal admission limit reached") from None
     return mcp_server._run_descriptor(creation.run)
 
 
@@ -321,8 +321,8 @@ async def _mcp_continuation(
         )
     except IdempotencyKeyConflict:
         raise ValueError("idempotency_key was already used for a different continuation") from None
-    except RunCapacityExceededError:
-        raise ValueError("Run admission capacity is full") from None
+    except RunAdmissionLimitExceededError:
+        raise ValueError("Deployment-wide nonterminal admission limit reached") from None
     if creation is None:
         raise ValueError("Continuation requires a terminal owned run")
     return mcp_server._run_descriptor(creation.run)

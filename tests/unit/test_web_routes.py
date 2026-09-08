@@ -23,6 +23,7 @@ from dlightrag.application.corpus_admin import (
     WorkspaceCatalogCursorCodec,
     WorkspaceCatalogPage,
 )
+from dlightrag.application.runs import RunAdmissionLimitExceededError
 from dlightrag.engine.agent.skills import owner_skill_root
 from tests.config_helpers import mutate_config
 from tests.unit.conftest import answer_capability_view
@@ -1018,6 +1019,18 @@ class TestWebFiles:
             submitted_by=DEPLOYMENT_OWNER_ID,
         )
 
+    async def test_failed_file_retry_projects_the_admission_limit(
+        self, client: AsyncClient, mock_application
+    ) -> None:
+        mock_application.corpus_mutations.create_retry.side_effect = RunAdmissionLimitExceededError(
+            "limit reached"
+        )
+
+        response = await client.post("/web/api/files/retry")
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == "Deployment-wide nonterminal admission limit reached"
+
     async def test_corpus_receipt_uses_same_origin_browser_run_urls(
         self, client: AsyncClient
     ) -> None:
@@ -1183,6 +1196,27 @@ class TestWebFiles:
         mock_application.corpus_mutations.create_staged_batch.assert_not_awaited()
         mock_application.corpus_mutations.discard_staged_run.assert_awaited_once()
 
+    async def test_upload_projects_the_admission_limit_and_discards_the_stage(
+        self, client: AsyncClient, mock_application, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "report.pdf"
+        source.write_bytes(b"content")
+        mock_application.corpus_mutations.stage_upload.return_value = SimpleNamespace(
+            path=source, filename="report.pdf", size_bytes=7, content_sha256="a" * 64
+        )
+        mock_application.corpus_mutations.create_staged_batch.side_effect = (
+            RunAdmissionLimitExceededError("limit reached")
+        )
+
+        response = await client.post(
+            "/web/api/files/upload",
+            files=[("files", ("report.pdf", b"content", "application/pdf"))],
+        )
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == "Deployment-wide nonterminal admission limit reached"
+        mock_application.corpus_mutations.discard_staged_run.assert_awaited_once()
+
     async def test_upload_discards_the_stage_when_run_acceptance_fails(
         self, client: AsyncClient, mock_application, tmp_path: Path
     ) -> None:
@@ -1249,6 +1283,22 @@ class TestWebFiles:
             file_paths=["/tmp/test.pdf"],
             submitted_by=DEPLOYMENT_OWNER_ID,
         )
+
+    async def test_delete_files_projects_the_admission_limit(
+        self, client: AsyncClient, mock_application
+    ) -> None:
+        mock_application.corpus_mutations.create_delete.side_effect = (
+            RunAdmissionLimitExceededError("limit reached")
+        )
+
+        response = await client.request(
+            "DELETE",
+            "/web/api/files",
+            params={"file_path": "/tmp/test.pdf"},
+        )
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == "Deployment-wide nonterminal admission limit reached"
 
     async def test_delete_files_rejects_stale_workspace(
         self, client: AsyncClient, test_config: DlightragConfig, mock_application
@@ -1348,6 +1398,22 @@ async def test_reset_workspace_accepts_a_durable_corpus_run(
         submitted_by=DEPLOYMENT_OWNER_ID,
     )
     mock_application.corpora.reset.assert_not_awaited()
+
+
+async def test_reset_workspace_projects_the_admission_limit(
+    client: AsyncClient, mock_application
+) -> None:
+    mock_application.corpus_mutations.create_reset.side_effect = RunAdmissionLimitExceededError(
+        "limit reached"
+    )
+
+    response = await client.post(
+        "/web/api/workspaces/reset",
+        data={"workspace_name": "test-ws", "confirm_name": "test-ws"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"] == "Deployment-wide nonterminal admission limit reached"
 
 
 class TestSourcePresentation:
