@@ -4,7 +4,8 @@
 import hashlib
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping, MutableMapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -90,6 +91,56 @@ def make_workspace_name(prefix: str = "e2e_pg18") -> str:
     """Build a PostgreSQL-safe workspace identifier."""
     token = hashlib.sha1(os.urandom(16)).hexdigest()[:10]
     return f"{prefix}_{token}"
+
+
+@asynccontextmanager
+async def isolated_pg18_database(
+    env: MutableMapping[str, str] | None = None,
+) -> AsyncIterator[dict[str, Any]]:
+    """Provision one disposable database without touching the configured database."""
+    import asyncpg
+
+    target_env = os.environ if env is None else env
+    database_env = "DLIGHTRAG_E2E_POSTGRES_DATABASE"
+    configured_kwargs = pg_conn_kwargs_from_env(target_env)
+    admin_kwargs = {**configured_kwargs, "database": "postgres"}
+    database = make_workspace_name("dlightrag_e2e_pg18")
+    if database == str(configured_kwargs["database"]):
+        raise RuntimeError("isolated E2E database must differ from the configured database")
+    test_kwargs = {**configured_kwargs, "database": database}
+    previous_database = target_env.get(database_env)
+    created = False
+
+    try:
+        admin = await asyncpg.connect(**admin_kwargs)
+        try:
+            await admin.execute(f'CREATE DATABASE "{database}"')
+            created = True
+        finally:
+            await admin.close()
+
+        test_conn = await asyncpg.connect(**test_kwargs)
+        try:
+            for extension in REQUIRED_EXTENSIONS:
+                await test_conn.execute(f'CREATE EXTENSION IF NOT EXISTS "{extension}"')
+        finally:
+            await test_conn.close()
+
+        target_env[database_env] = database
+        try:
+            yield test_kwargs
+        finally:
+            if previous_database is None:
+                target_env.pop(database_env, None)
+            else:
+                target_env[database_env] = previous_database
+    finally:
+        if created:
+            admin = await asyncpg.connect(**admin_kwargs)
+            try:
+                await admin.execute(f'DROP DATABASE IF EXISTS "{database}" WITH (FORCE)')
+            finally:
+                await admin.close()
 
 
 def make_e2e_config(

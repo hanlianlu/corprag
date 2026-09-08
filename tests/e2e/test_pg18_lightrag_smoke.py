@@ -20,6 +20,7 @@ from tests.e2e.pg18_harness import (
     e2e_enabled,
     fetch_pg_prereq_report,
     install_fake_model_functions,
+    isolated_pg18_database,
     make_e2e_config,
     make_workspace_name,
     pg_conn_kwargs_from_env,
@@ -35,6 +36,12 @@ pytestmark = [
         reason=f"set {RUN_E2E_ENV}=1 to run PG18 E2E smoke tests",
     ),
 ]
+
+
+@pytest.fixture(scope="module", autouse=True)
+async def _isolated_pg18_database():
+    async with isolated_pg18_database():
+        yield
 
 
 @pytest.fixture
@@ -493,6 +500,9 @@ async def test_reader_role_attaches_read_only_and_rejects_writes(
         scheduler=model_scheduler,
         telemetry=LangfuseTelemetry(),
     )
+    store = PGRunStore()
+    run_owner = "reader-owner"
+    created_run_id: str | None = None
     try:
         assert reader.settings.read_only
 
@@ -506,7 +516,6 @@ async def test_reader_role_attaches_read_only_and_rejects_writes(
         assert metadata["title"] == "Reader Smoke"
 
         # Corpus reads run read-only; the domain pool still accepts run state.
-        store = PGRunStore()
         await store.initialize(validate_only=True)
         run_request = {
             "query": "reader operational write",
@@ -519,8 +528,8 @@ async def test_reader_role_attaches_read_only_and_rejects_writes(
             envelope=PreparedRunEnvelope(
                 run_kind="answer",
                 lane="query",
-                submitted_by="reader-owner",
-                access_scope=RunAccessScope(kind="owner", scope_id="reader-owner"),
+                submitted_by=run_owner,
+                access_scope=RunAccessScope(kind="owner", scope_id=run_owner),
                 submission_key=run_id,
                 request_fingerprint=run_request_fingerprint(run_request),
                 payload=run_request,
@@ -529,9 +538,8 @@ async def test_reader_role_attaches_read_only_and_rejects_writes(
             ),
             run_id=run_id,
         )
-        assert (
-            await store.get_run(owner_id="reader-owner", run_id=creation.run.run_id)
-        ) is not None
+        created_run_id = creation.run.run_id
+        assert await store.get_run(owner_id=run_owner, run_id=created_run_id) is not None
 
         with pytest.raises(PermissionError):
             await reader.areset()
@@ -540,9 +548,17 @@ async def test_reader_role_attaches_read_only_and_rejects_writes(
         with pytest.raises(PermissionError):
             await reader.aingest(source_type="local", path=str(doc_path))
     finally:
-        await reader.aclose()
-        await pg_pool.close()
-        reset_config()
+        try:
+            if created_run_id is not None:
+                deletion = await store.delete_runs(
+                    owner_id=run_owner,
+                    run_ids=[created_run_id],
+                )
+                assert deletion.runs == 1
+        finally:
+            await reader.aclose()
+            await pg_pool.close()
+            reset_config()
 
     # ── Cleanup: remove the workspace via a writer ─────────────────────
     set_config(writer_cfg)
