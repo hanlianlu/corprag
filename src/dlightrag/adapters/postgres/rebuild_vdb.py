@@ -20,6 +20,7 @@ from dlightrag.adapters.postgres.corpus.corpus import (
     apply_lightrag_environment,
     verify_lightrag_storage_configuration,
 )
+from dlightrag.adapters.postgres.rebuild_bm25 import run_rebuild_bm25
 from dlightrag.application.config import DlightragConfig, get_config, load_config, set_config
 from dlightrag.application.settings import rag_settings
 from dlightrag.engine.ai.embedding import create_embedding_model
@@ -30,7 +31,6 @@ from dlightrag.engine.rag.corpus.ingestion.document_embedding import (
     resolve_direct_image_embedding_enabled,
 )
 from dlightrag.engine.rag.corpus.ingestion.engine import UnifiedIngestionEngine
-from dlightrag.engine.rag.corpus.rebuild_bm25 import run_rebuild_bm25
 from dlightrag.engine.rag.lightrag.models import build_lightrag_embedding
 from dlightrag.engine.rag.lightrag.stores import LightRAGStores
 from dlightrag.engine.rag.workspace.settings import RagSettings

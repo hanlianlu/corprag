@@ -3,7 +3,7 @@
 
 from collections.abc import Sequence
 
-from dlightrag.application.answer_runs.client_contracts import AnswerAttachmentLink
+from dlightrag.engine.answer.client_contracts import AnswerAttachmentLink
 from dlightrag.engine.answer.resources.models import ResourceInput
 
 

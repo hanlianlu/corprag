@@ -11,15 +11,16 @@ from dlightrag_memory import (
     MemoryOperationReceipt,
     MemoryProvenance,
 )
+from dlightrag_memory.errors import MemoryUnavailableError
 from dlightrag_memory.store import default_purge_cutoff
 
-from dlightrag.application.answer_runs.errors import MemoryDisabledError, MemoryUnavailableError
 from dlightrag.engine.answer.memory import (
     MEMORY_SUPERSEDE_RETENTION_DAYS,
     MemoryCapability,
     memory_owner_allowed,
 )
 
+from .errors import MemoryDisabledError
 from .memory_list import (
     MemoryListCursor,
     MemoryListCursorCodec,

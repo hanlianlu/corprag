@@ -12,12 +12,14 @@ from dlightrag.adapters.postgres.runtime.run_store import (
     RUN_MIGRATIONS,
     PGRunStore,
 )
-from dlightrag.engine.runtime import (
+from dlightrag.engine.runtime.coordinator import RUN_HEARTBEAT_SECONDS
+from dlightrag.engine.runtime.policy import (
     DEFAULT_RUN_RETENTION_SECONDS,
     MAX_RECLAIMS_WITHOUT_PROGRESS,
     RUN_ABANDONED_ERROR_KIND,
-    RUN_HEARTBEAT_SECONDS,
     RUN_LEASE_SECONDS,
+)
+from dlightrag.engine.runtime.records import (
     PreparedRunEnvelope,
     RunAccessScope,
 )
@@ -106,7 +108,7 @@ class TestFixedRuntimeBounds:
         assert 0 < RUN_HEARTBEAT_SECONDS <= RUN_LEASE_SECONDS // 2
 
     def test_accepted_input_envelope_keeps_continuation_context_not_model_facts(self) -> None:
-        from dlightrag.application.answer_runs.envelope import accepted_input_envelope
+        from dlightrag.engine.answer.runs.envelope import accepted_input_envelope
 
         envelope = accepted_input_envelope(
             {
@@ -142,7 +144,10 @@ class TestFixedRuntimeBounds:
         assert "resource_manifest" not in envelope
 
     def test_request_input_prefers_the_accepted_envelope(self) -> None:
-        from dlightrag.engine.runtime import RunAccessScope, RunRecord
+        from dlightrag.engine.runtime.records import (
+            RunAccessScope,
+            RunRecord,
+        )
 
         record = RunRecord(
             run_id="00000000-0000-0000-0000-000000000001",
@@ -247,7 +252,7 @@ class TestCreationValidation:
             )
 
     async def test_rejects_a_fetched_resource_reference_at_creation(self) -> None:
-        from dlightrag.engine.runtime import PendingArtifactReference
+        from dlightrag.engine.runtime.records import PendingArtifactReference
 
         with pytest.raises(ValueError):
             await PGRunStore().create_run(

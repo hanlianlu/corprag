@@ -8,9 +8,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from dlightrag.application.answer_runs.mode import ModeResource, ResolvedMode
 from dlightrag.engine.ai.structured import StructuredOutput
 from dlightrag.engine.ai.tokens import estimate_messages_tokens
+from dlightrag.engine.answer.mode import ModeResource, ResolvedMode
 
 _ROUTER_SYSTEM = (
     "Pick one allowed mode. Default research. "

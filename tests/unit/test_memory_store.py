@@ -8,13 +8,12 @@ from datetime import UTC, datetime
 
 import pytest
 from dlightrag_memory import Memory, MemoryOperation, MemoryProvenance, MemoryRecord
+from dlightrag_memory.errors import MemoryWriteRejectedError
 from dlightrag_memory.store import (
     InMemoryMemoryStore,
     operation_change_id,
     operation_record_id,
 )
-
-from dlightrag.application.answer_runs.errors import MemoryWriteRejectedError
 
 
 def _provenance(run_id: str = "run-1") -> MemoryProvenance:

@@ -1,8 +1,8 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
 """Tests for the client attachment-link descriptor adapter."""
 
-from dlightrag.application.answer_runs.client_contracts import AnswerAttachmentLink
-from dlightrag.application.answer_runs.resource_links import answer_link_resources
+from dlightrag.engine.answer.client_contracts import AnswerAttachmentLink
+from dlightrag.engine.answer.resources.links import answer_link_resources
 
 
 def test_answer_link_resources_maps_descriptors() -> None:

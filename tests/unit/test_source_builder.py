@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from dlightrag.application.answer_runs.citations import SourceReference
+from dlightrag.engine.answer.citations.contracts import SourceReference
 from dlightrag.engine.answer.citations.source_builder import (
     SourceBuildInvariantError,
     build_sources,

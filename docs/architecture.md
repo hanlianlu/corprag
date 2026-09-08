@@ -224,8 +224,10 @@ recovery authority. Recovery resets any invalid optimistic draft before
 replacement output.
 
 Corpus Mutation acceptance persists bounded Prepared Input and a stable upstream
-`track_id`. Execution is FIFO within a Workspace and concurrent across
-Workspaces. Before a destructive or otherwise non-idempotent LightRAG effect,
+`track_id`. Durable execution is FIFO within a Workspace and concurrent across
+Workspaces. This database-enforced mutation ordering is distinct from the
+process-local `AccessScheduler`, which provides conflict-based mutual exclusion
+for Agent tools without a FIFO waiter guarantee. Before a destructive or otherwise non-idempotent LightRAG effect,
 the executor durably records handoff. Recovery then reconciles authoritative
 public LightRAG state; an ambiguous outcome enters `waiting_for_repair`, and an
 authorized operator resumes that same Run after repair. A reset may explicitly
@@ -327,20 +329,21 @@ The UV workspace contains the root DlightRAG wheel and the independently
 installable `dlightrag-memory` distribution.
 
 ```text
-inbound adapters -> Application -> Engine
-                           |          |
-                  composition root    +-> AI
-                                      +-> Agent -> AI
-                                      +-> RAG -> AI + LightRAG APIs
-                                      +-> Runtime
-                                      +-> Answer -> AI + Agent + RAG + Runtime
+inbound adapters -> Application use cases -> Engine execution
+        |                                        |
+        +-> transport-neutral Engine contracts   +-> AI
+private composition root wires concrete Adapters +-> Agent -> AI
+                                                 +-> RAG -> AI + LightRAG APIs
+                                                 +-> Runtime
+                                                 +-> Answer -> AI + Agent + RAG + Runtime
 
 concrete PostgreSQL/observability adapters implement owner ports
 ```
 
 Only public `create_application` delegates to private composition. Application
-does not import concrete adapters; Engine does not import Application or inbound
-transports. RAG owns the direct LightRAG dependency and never imports concrete
+does not import concrete adapters. Inbound transports call Application services
+and may consume transport-neutral Engine Answer contracts, but no Engine source
+module imports Application or inbound transports. RAG owns the direct LightRAG dependency and never imports concrete
 PostgreSQL code. Runtime imports neither Answer/RAG nor storage/transports.
 
 `dlightrag-memory` owns its PostgreSQL schema, migrations, retrieval, operation

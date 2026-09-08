@@ -30,14 +30,14 @@ from dlightrag.adapters.postgres.runtime.run_store import (
 from dlightrag.adapters.postgres.web.web_conversations import (
     PGWebConversationStore,
 )
-from dlightrag.application.answer_runs.envelope import accepted_input_envelope
 from dlightrag.application.web_conversations import (
     ConversationCursor,
     ConversationHistoryPageRequest,
     ConversationPageRequest,
     ConversationSubmissionConflict,
 )
-from dlightrag.engine.runtime import (
+from dlightrag.engine.answer.runs.envelope import accepted_input_envelope
+from dlightrag.engine.runtime.records import (
     IdempotencyKeyConflict,
     PendingArtifact,
     PendingArtifactReference,

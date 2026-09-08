@@ -1,10 +1,10 @@
 # Run Runtime and Scaling Target
 
-> Accepted, implemented, and failure/load validated design. The canonical Slice 6 evidence is [RunRuntime Slice 6 validation](validation/run-runtime-slice-6.md).
+> Accepted and implemented. The bounded local control-plane evidence and its limitations are recorded in [RunRuntime Slice 6 validation](validation/run-runtime-slice-6.md).
 
 ## Goals and boundaries
 
-- Keep the control plane healthy with 10,000 online users. Queue residence and completion latency are secondary to avoiding OOM, deadlock, restart loops, or uncontrolled downstream pressure.
+- Mechanically exercise 10,000 local Query control-plane submissions without OOM, deadlock, restart loops, or uncontrolled fake-executor pressure. This is not evidence for 10,000 concurrent online users.
 - Replace inline Retrieval, Answer-only durable execution, and Ingest Jobs with one durable Run lifecycle.
 - Bound active expensive work and durable backlog without tenant quotas, billing, or per-user fairness policy.
 - Keep LightRAG responsible for its own corpus storage composition and pipeline behavior.
@@ -16,12 +16,12 @@ The target is a breaking upgrade. It does not retain parallel legacy lifecycle e
 
 - One trusted organization, 10–100 Corpus Workspaces, and normally 1–10 Workspaces per Query.
 - Expected Query mix is 10% Retrieval, 40% Fast Answer, and 50% Research Answer.
-- The deployment-wide Query nonterminal admission limit is 30,000 Runs.
+- The deployment-wide Query nonterminal admission limit defaults to 30,000 Runs; the recorded campaign submitted 10,000 Query Runs and did not fill that limit.
 - Retrieval `top_k` and `chunk_top_k` remain bounded; current target maxima are ten times configured values, presently 400 and 200.
 - The Research working-set guard and Answer attachment maximum are 128 MiB. In trust-mode execution, only filesystem/container infrastructure can enforce a hard storage quota.
 - Existing Child Session concurrency remains four per parent. Additional Bash, browser, Web-search, or tenant capacity classes require load-test evidence.
 
-At target load, Run submission while its lane's admission limit has room, status, cancellation, and event-cursor reconnect remain responsive. Accepted Runs are not lost or settled terminally twice, and workers resume draining after offered load falls. Exact latency, memory, event-loop, database, and provider thresholds are evidence-driven rather than invented here.
+In the recorded one-process local campaign, Run submission while its lane's admission limit has room, status, cancellation, and event-cursor reconnect remained responsive. Accepted Runs are not lost or settled terminally twice, and workers resume draining after offered load falls. Exact latency, memory, event-loop, database, and provider thresholds are evidence-driven rather than invented here.
 
 ## Domain model
 
@@ -112,13 +112,13 @@ Corpus Mutation Lane
   ingest + replace + delete + retry + reset
 ```
 
-Each lane has bounded per-process execution and an independent deployment-wide nonterminal admission limit. FIFO orders eligible Runs; temporarily ineligible work is skipped rather than causing lane-wide head-of-line blocking. Local worker limits bound each process while nonterminal limits prevent a dependency outage from growing a durable queue without bound. Deployment configuration owns process count and therefore total active capacity.
+Each lane has bounded per-process execution and an independent deployment-wide nonterminal admission limit. Claim ordering favors eligible older Runs, but only Corpus Mutation guarantees durable FIFO within each Workspace; temporarily ineligible work is skipped rather than causing lane-wide head-of-line blocking. Local worker limits bound each process while nonterminal limits prevent a dependency outage from growing a durable queue without bound. Deployment configuration owns process count and therefore total active capacity.
 
-The Query values are 16 workers per process and 30,000 nonterminal Runs. Corpus Mutation uses two workers per writer process and a 1,000-Run nonterminal admission limit. The deterministic 10k single-process control-plane campaign held fake executor occupancy at 16 and two solely through coordinator worker concurrency, atomically rejected at the Mutation admission limit, preserved lane independence and Workspace FIFO, and drained; its environment, exact measurements, broad survival thresholds, and limitations are recorded in the [validation report](validation/run-runtime-slice-6.md). Separate multi-coordinator integration evidence proves that local slots add across processes without double-claiming Runs. `ModelScheduler` remains process-local Engine AI protection, LightRAG owns its stage queues and parser/embedding/LLM concurrency, and providers/operators own external quotas and service capacity.
+The defaults/targets are 16 Query workers per process and 30,000 Query nonterminal Runs, plus two Corpus Mutation workers per writer process and a 1,000-Run mutation limit. The deterministic one-process, one-database campaign submitted 10,000 Query Runs plus 1,000 recorded mutation Runs to fake executors, exercised occupancy of 16 and two, reached only the mutation admission limit, preserved lane independence and per-Workspace mutation FIFO, and drained. The [validation report](validation/run-runtime-slice-6.md) records exact measurements and limitations. A separate test with multiple coordinator objects sharing PostgreSQL in one test process shows additive object-local slots without double claims; it is not multi-process or multi-host evidence. `ModelScheduler` remains process-local Engine AI protection, LightRAG owns its stage queues and parser/embedding/LLM concurrency, and providers/operators own external quotas and service capacity.
 
 Across the deployment, at most one `corpus_mutation` run owns a Workspace at a time. While calling LightRAG's in-process pipeline, that Run retains its fenced lease and a local Corpus Mutation execution slot. LightRAG owns concurrency within the pipeline. Different Workspaces can be processed by different writer replicas concurrently.
 
-A deferred or `waiting_for_repair` Run releases compute capacity but keeps the logical Workspace mutation barrier. Later mutations for that Workspace remain queued. This deployment-wide ownership is required because LightRAG's process-shared pipeline coordination covers a pre-fork process group, not independent replicas.
+This durable per-Workspace Corpus Mutation FIFO/barrier is unrelated to Agent `AccessScheduler` mutual exclusion, which is process-local, conflict-based, and not FIFO. A deferred or `waiting_for_repair` Run releases compute capacity but keeps the logical Workspace mutation barrier. Later mutations for that Workspace remain queued. This deployment-wide ownership is required because LightRAG's process-shared pipeline coordination covers a pre-fork process group, not independent replicas.
 
 The combined Application process topology remains. Writer-capable processes claim Corpus Mutations; reader-capable processes do not mutate corpus state. A service process that may write Operational State can durably accept an authorized mutation even when no writer or corpus dependency is currently healthy, provided the lane's nonterminal admission limit has room. No ingress-only, Query-worker, or mutation-worker process mode is added without evidence.
 

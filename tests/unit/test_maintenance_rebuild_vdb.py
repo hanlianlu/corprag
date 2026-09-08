@@ -14,7 +14,7 @@ from tests.config_helpers import mutate_config
 
 
 def test_parser_defaults_to_check_only() -> None:
-    from dlightrag.engine.rag.corpus.rebuild_vdb import build_parser
+    from dlightrag.adapters.postgres.rebuild_vdb import build_parser
 
     args = build_parser().parse_args([])
 
@@ -24,7 +24,7 @@ def test_parser_defaults_to_check_only() -> None:
 
 
 def test_rebuild_targets_require_yes() -> None:
-    from dlightrag.engine.rag.corpus.rebuild_vdb import build_parser, validate_args
+    from dlightrag.adapters.postgres.rebuild_vdb import build_parser, validate_args
 
     args = build_parser().parse_args(["--target", "chunks"])
 
@@ -39,12 +39,12 @@ def test_pyproject_exposes_rebuild_console_script() -> None:
     pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
 
     assert pyproject["project"]["scripts"]["dlightrag-rebuild-vdb"] == (
-        "dlightrag.engine.rag.corpus.rebuild_vdb:main"
+        "dlightrag.adapters.postgres.rebuild_vdb:main"
     )
 
 
 async def test_runner_uses_dlightrag_embedding_and_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    from dlightrag.engine.rag.corpus import rebuild_vdb as module
+    from dlightrag.adapters.postgres import rebuild_vdb as module
 
     fake_embedding = object()
     fake_embedder = AsyncMock()
@@ -98,7 +98,7 @@ async def test_runner_uses_dlightrag_embedding_and_config(monkeypatch: pytest.Mo
 async def test_chunks_rebuild_restores_sidecar_image_vectors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from dlightrag.engine.rag.corpus import rebuild_vdb as module
+    from dlightrag.adapters.postgres import rebuild_vdb as module
 
     config = _fake_config()
     lightrag = SimpleNamespace(
@@ -174,7 +174,7 @@ async def test_chunks_rebuild_restores_sidecar_image_vectors(
 async def test_chunks_rebuild_relabels_bm25_languages_after_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from dlightrag.engine.rag.corpus import rebuild_vdb as module
+    from dlightrag.adapters.postgres import rebuild_vdb as module
 
     config = _fake_config()
     mutate_config(config, "corpus.retrieval.bm25_enabled", True)
@@ -228,7 +228,7 @@ async def test_chunks_rebuild_relabels_bm25_languages_after_success(
 async def test_graph_rebuild_does_not_restore_sidecar_alignment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from dlightrag.engine.rag.corpus import rebuild_vdb as module
+    from dlightrag.adapters.postgres import rebuild_vdb as module
 
     config = _fake_config()
     embedder = AsyncMock()
@@ -266,7 +266,7 @@ async def test_graph_rebuild_does_not_restore_sidecar_alignment(
 async def test_failed_chunks_rebuild_skips_sidecar_alignment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from dlightrag.engine.rag.corpus import rebuild_vdb as module
+    from dlightrag.adapters.postgres import rebuild_vdb as module
 
     config = _fake_config()
     embedder = AsyncMock()
@@ -308,7 +308,7 @@ async def test_failed_chunks_rebuild_skips_sidecar_alignment(
 async def test_chunks_rebuild_delegates_bm25_before_embedder_close_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from dlightrag.engine.rag.corpus import rebuild_vdb as module
+    from dlightrag.adapters.postgres import rebuild_vdb as module
 
     config = _fake_config()
     mutate_config(config, "corpus.retrieval.bm25_enabled", True)

@@ -2,8 +2,8 @@
 """Closed Profile Memory operation checklist and standing-block bounds."""
 
 import pytest
+from dlightrag_memory.errors import MemoryWriteRejectedError
 
-from dlightrag.application.answer_runs.errors import MemoryWriteRejectedError
 from dlightrag.engine.answer.memory import (
     MEMORY_BODY_LIMIT,
     RECALL_CHAR_BUDGET,

@@ -14,8 +14,12 @@ from typing import Any
 import asyncpg
 
 from dlightrag.adapters.postgres.runtime.run_store import PGRunStore
-from dlightrag.engine.runtime import PreparedRunEnvelope, RunAccessScope, Succeeded
 from dlightrag.engine.runtime.contracts import RunKind
+from dlightrag.engine.runtime.records import (
+    PreparedRunEnvelope,
+    RunAccessScope,
+    Succeeded,
+)
 from tests.integration.pg_conn import PG_CONN_KWARGS
 
 

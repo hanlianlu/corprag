@@ -20,7 +20,11 @@ from dlightrag.application.corpus_admin.mutations import (
     validate_corpus_mutation_prepared_input,
 )
 from dlightrag.engine.dependencies import TransientDependencyError
-from dlightrag.engine.runtime import Deferred, Succeeded, WaitingForRepair
+from dlightrag.engine.runtime.records import (
+    Deferred,
+    Succeeded,
+    WaitingForRepair,
+)
 
 _RUN_ID = "0199a0a0-0000-7000-8000-000000000001"
 _TRACK_ID = f"dlightrag-corpus-{_RUN_ID}"

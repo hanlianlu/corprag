@@ -52,7 +52,7 @@ from dlightrag.engine.answer.execution.executor import (
 )
 from dlightrag.engine.answer.fast import FastSessionHost, ensure_session_lane
 from dlightrag.engine.answer.history import HistoryProjectionTarget
-from dlightrag.engine.runtime import RunExecutionError
+from dlightrag.engine.runtime.errors import RunExecutionError
 
 
 async def _no_settled_result() -> None:

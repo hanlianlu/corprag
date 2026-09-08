@@ -11,8 +11,8 @@ from urllib.parse import quote
 
 from pydantic import BaseModel, Field, field_validator
 
-from dlightrag.application.answer_runs.citations import SourceReference, SourceReferencePayload
-from dlightrag.application.answer_runs.sources import (
+from dlightrag.engine.answer.citations.contracts import SourceReference, SourceReferencePayload
+from dlightrag.engine.answer.citations.sources import (
     SourceDownloadLinkBuilder,
     can_project_workspace_visual,
     project_contexts_for_client,

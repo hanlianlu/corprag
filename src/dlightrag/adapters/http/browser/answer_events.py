@@ -26,9 +26,9 @@ from dlightrag.adapters.http.browser.events import (
 )
 from dlightrag.adapters.http.browser.presentation import build_answer_presentation
 from dlightrag.adapters.http.streaming.answer_stream import sse_frame
-from dlightrag.application.answer_runs.results import project_answer_result
-from dlightrag.application.answer_runs.sources import SourceDownloadLinkBuilder
 from dlightrag.application.runs import RunEvent
+from dlightrag.engine.answer.citations.sources import SourceDownloadLinkBuilder
+from dlightrag.engine.answer.results import project_answer_result
 
 
 def render_done_event(

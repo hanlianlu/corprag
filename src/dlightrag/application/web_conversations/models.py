@@ -7,10 +7,14 @@ from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 from uuid import UUID
 
-from dlightrag.application.answer_runs.routing import RoutingAcceptance
 from dlightrag.application.opaque_cursor import OpaqueCursorEnvelope
 from dlightrag.application.runs import RunView
-from dlightrag.engine.runtime import PendingArtifact, PendingArtifactReference, PreparedRunEnvelope
+from dlightrag.engine.answer.runs.routing import RoutingAcceptance
+from dlightrag.engine.runtime.records import (
+    PendingArtifact,
+    PendingArtifactReference,
+    PreparedRunEnvelope,
+)
 
 
 @dataclass(frozen=True, slots=True)

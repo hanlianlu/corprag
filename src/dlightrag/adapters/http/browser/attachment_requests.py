@@ -18,7 +18,7 @@ from dlightrag.adapters.http.browser.attachment_models import (
     validate_web_attachments,
 )
 from dlightrag.adapters.http.browser.requests import WebAnswerRequest
-from dlightrag.application.answer_runs.capability import (
+from dlightrag.engine.answer.image_capability import (
     AnswerImageCapability,
     check_answer_image_count,
 )

@@ -8,7 +8,7 @@ import uuid
 import asyncpg
 import pytest
 
-from dlightrag.engine.runtime import MAX_RECLAIMS_WITHOUT_PROGRESS
+from dlightrag.engine.runtime.policy import MAX_RECLAIMS_WITHOUT_PROGRESS
 from tests.integration.pg_conn import PG_CONN_KWARGS
 from tests.integration.run_runtime_pg_harness import isolated_run_runtime, run_envelope
 

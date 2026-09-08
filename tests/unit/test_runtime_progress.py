@@ -172,7 +172,10 @@ class TestBoundStores:
         assert progress.stage_calls == 0
 
     def test_already_committed_execution_requires_a_known_terminal(self) -> None:
-        from dlightrag.engine.runtime import AlreadyCommittedTerminal, TerminalOutcome
+        from dlightrag.engine.runtime.records import (
+            AlreadyCommittedTerminal,
+            TerminalOutcome,
+        )
 
         for terminal in (
             TerminalOutcome(committed=False, status=None, event_sequence=None),

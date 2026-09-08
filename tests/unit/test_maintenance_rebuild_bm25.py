@@ -28,7 +28,7 @@ def _config(*, enabled: bool = True, reader: bool = False) -> SimpleNamespace:
 
 
 def test_bm25_rebuild_parser_defaults() -> None:
-    from dlightrag.engine.rag.corpus.rebuild_bm25 import build_parser
+    from dlightrag.adapters.postgres.rebuild_bm25 import build_parser
 
     args = build_parser().parse_args([])
 
@@ -37,7 +37,7 @@ def test_bm25_rebuild_parser_defaults() -> None:
 
 
 def test_bm25_rebuild_requires_yes() -> None:
-    from dlightrag.engine.rag.corpus.rebuild_bm25 import build_parser, validate_args
+    from dlightrag.adapters.postgres.rebuild_bm25 import build_parser, validate_args
 
     args = build_parser().parse_args([])
 
@@ -51,7 +51,7 @@ def test_pyproject_exposes_bm25_rebuild_console_script() -> None:
     pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
 
     assert pyproject["project"]["scripts"]["dlightrag-rebuild-bm25"] == (
-        "dlightrag.engine.rag.corpus.rebuild_bm25:main"
+        "dlightrag.adapters.postgres.rebuild_bm25:main"
     )
 
 
@@ -66,7 +66,7 @@ async def test_bm25_rebuild_rejects_incompatible_config(
     config: SimpleNamespace,
     message: str,
 ) -> None:
-    from dlightrag.engine.rag.corpus.rebuild_bm25 import run_rebuild_bm25
+    from dlightrag.adapters.postgres.rebuild_bm25 import run_rebuild_bm25
 
     with pytest.raises(SystemExit, match=message):
         await run_rebuild_bm25(config=cast(Any, config), assume_yes=True)
@@ -75,7 +75,7 @@ async def test_bm25_rebuild_rejects_incompatible_config(
 async def test_bm25_rebuild_provisions_indexes_then_relabels(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from dlightrag.engine.rag.corpus import rebuild_bm25 as module
+    from dlightrag.adapters.postgres import rebuild_bm25 as module
 
     config = _config()
     events: list[object] = []

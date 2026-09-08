@@ -12,6 +12,7 @@ import asyncpg
 import pytest
 from dlightrag_memory import Memory, MemoryOperation, MemoryProvenance, MemoryRecord
 from dlightrag_memory._storage.pg_bm25 import index_name
+from dlightrag_memory.errors import MemoryWriteRejectedError
 from dlightrag_memory.normalize import normalized_body
 from dlightrag_memory.postgres import PostgresMemoryStore
 from dlightrag_memory.store import operation_change_id, operation_record_id
@@ -20,8 +21,7 @@ from dlightrag.adapters.postgres.answer.memory_settings import (
     MEMORY_SETTINGS_DDL,
     PGMemorySettingsStore,
 )
-from dlightrag.application.answer_runs.errors import MemoryDisabledError, MemoryWriteRejectedError
-from dlightrag.application.memory import MemoryService
+from dlightrag.application.memory import MemoryDisabledError, MemoryService
 from tests.integration.pg_conn import PG_CONN_KWARGS
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]

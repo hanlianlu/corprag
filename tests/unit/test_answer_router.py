@@ -3,8 +3,8 @@
 
 import pytest
 
-from dlightrag.application.answer_runs.routing import decide_resolved_mode
 from dlightrag.engine.answer.router import AnswerModeRouter, RoutingFailedError
+from dlightrag.engine.answer.runs.routing import decide_resolved_mode
 
 
 def test_explicit_mode_resolves_without_a_router() -> None:

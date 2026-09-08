@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1200" viewBox="0 0 1600 1200" role="img" aria-labelledby="title description">
   <title id="title">DlightRAG runtime ownership</title>
-  <desc id="description">Inside one DlightRAG process, inbound HTTP and MCP adapters call the transport-neutral Application Access policy before protected calls and invoke Application services separately; public status calls reach the Application facade directly. The trusted embedded Python Application interface also calls the facade directly. Application owns lifecycle and service accessors. Web Conversations accepts runs through Answer Service. Answer and top-level Retrieval pin prepared input and schedule durable Query-lane work through Engine Runtime. Corpus Administration schedules ingest, replace, delete, retry, and reset through the same Runtime's Corpus Mutation lane. Runtime dispatches Query and Corpus Mutation executors; Answer-internal retrieval uses the raw Retrieval Stage directly without a nested Run. Engine Answer projects optimistic provider streams, while Agent owns durable Assistant Turns and atomic ToolResult plus Host-update settlements. Parent Research Artifact attachments become fenced terminal publications. Retrieval and Corpus Administration use Engine RAG. Memory is an Application capability over the independent Memory package. Model Catalogue publication invalidates Answer capability profiles. Engine Answer, Agent, and RAG call provider-neutral AI, and RAG reaches LightRAG.</desc>
+  <desc id="description">Inside one DlightRAG process, inbound HTTP and MCP adapters call the transport-neutral Application Access policy before protected calls and invoke Application services separately; public status calls reach the Application facade directly. The trusted embedded Python Application interface also calls the facade directly. Application owns lifecycle and service accessors. Web Conversations accepts runs through Answer Service. Answer and top-level Retrieval pin prepared input and schedule durable Query-lane work through Engine Runtime. Corpus Administration schedules ingest, replace, delete, retry, and reset through the same Runtime's Corpus Mutation lane. Runtime dispatches injected Retrieval and Corpus Mutation executors before those executors call Engine RAG; Answer-internal retrieval uses the raw Retrieval Stage directly without a nested Run. Engine Answer projects optimistic provider streams, while Agent owns durable Assistant Turns and atomic ToolResult plus Host-update settlements. Parent Research Artifact attachments become fenced terminal publications. Retrieval and Corpus Administration use Engine RAG. Memory is an Application capability over the independent Memory package. Model Catalogue publication invalidates Answer capability profiles. Engine Answer, Agent, and RAG call provider-neutral AI, and RAG reaches LightRAG.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 1.2 L 8 5 L 0 8.8 z" class="arrow-head"/>
@@ -38,7 +38,7 @@
 
   <rect class="canvas" width="1600" height="1200"/>
   <text class="heading" x="800" y="42" text-anchor="middle">DlightRAG — Runtime Ownership</text>
-  <text class="subtitle" x="800" y="70" text-anchor="middle">In-process owners and primary runtime dependencies; import contracts are machine-enforced separately</text>
+  <text class="subtitle" x="800" y="70" text-anchor="middle">Union of distinct runtime paths, not one end-to-end call; import contracts are machine-enforced separately</text>
 
   <rect class="boundary" x="40" y="100" width="1520" height="1060" rx="18"/>
   <text class="boundary-title" x="75" y="134">DLIGHTRAG APPLICATION PROCESS</text>
@@ -62,7 +62,7 @@
   <text class="node-copy" x="1080" y="416" text-anchor="middle">public create_application · private composition</text>
 
   <rect class="service-group" x="80" y="485" width="1440" height="270" rx="16"/>
-  <text class="boundary-title" x="110" y="517">APPLICATION SERVICE OWNERS</text>
+  <text class="boundary-title" x="110" y="517">COMPOSED APPLICATION SERVICES AND POLICY COLLABORATORS</text>
 
   <rect class="service" x="100" y="540" width="220" height="130" rx="10"/>
   <text class="small-title" x="210" y="577" text-anchor="middle">Answer Service</text>
@@ -90,10 +90,14 @@
   <text class="node-copy" x="1185" y="630" text-anchor="middle">reload overlay</text>
 
   <rect class="policy" x="1300" y="540" width="200" height="130" rx="10"/>
-  <text class="small-title" x="1400" y="570" text-anchor="middle">Answer Capability</text>
-  <text class="small-title" x="1400" y="590" text-anchor="middle">Coordinator</text>
+  <text class="small-title" x="1400" y="570" text-anchor="middle">engine.answer</text>
+  <text class="small-title" x="1400" y="590" text-anchor="middle">Capability policy</text>
   <text class="node-copy" x="1400" y="618" text-anchor="middle">profiles · image probes</text>
   <text class="node-copy" x="1400" y="641" text-anchor="middle">mode admission</text>
+
+  <rect class="service" x="610" y="760" width="360" height="50" rx="10"/>
+  <text class="small-title" x="790" y="781" text-anchor="middle">Injected operation executors</text>
+  <text class="node-copy" x="790" y="801" text-anchor="middle">RetrievalExecutor · CorpusMutationExecutor</text>
 
   <rect class="module" x="110" y="820" width="260" height="115" rx="12"/>
   <text class="node-title" x="240" y="860" text-anchor="middle">engine.runtime</text>
@@ -154,8 +158,10 @@
 
   <path class="edge" d="M 370 877.5 H 430"/>
   <text class="edge-label" x="400" y="863" text-anchor="middle">dispatch Answer</text>
-  <path class="edge" d="M 370 905 H 400 V 965 H 910 V 935"/>
-  <text class="edge-label" x="650" y="957" text-anchor="middle">dispatch Retrieval / Mutation</text>
+  <path class="edge" d="M 300 820 V 777 H 610"/>
+  <text class="edge-label" x="455" y="767" text-anchor="middle">dispatch injected executor</text>
+  <path class="edge" d="M 900 805 V 820"/>
+  <text class="edge-label" x="915" y="814">calls RAG</text>
   <path class="edge" d="M 710 877.5 H 770"/>
   <text class="edge-label" x="740" y="863" text-anchor="middle">retrieve</text>
 
@@ -170,5 +176,5 @@
   <path class="edge" d="M 580 1065 H 675"/>
   <text class="edge-label" x="627.5" y="1051" text-anchor="middle">turn contract</text>
 
-  <text class="note" x="800" y="1140" text-anchor="middle">Access precedes protected remote calls; public status calls reach the facade directly; the embedded interface has no transport ACL.</text>
+  <text class="note" x="800" y="1140" text-anchor="middle">This diagram is a union of distinct paths. Access precedes protected remote calls; public status reaches the facade directly; the embedded interface has no transport ACL.</text>
 </svg>

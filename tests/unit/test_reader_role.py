@@ -261,7 +261,7 @@ def _required_domain_scopes() -> list[
     from dlightrag.adapters.postgres.web import web_conversations
     from dlightrag.application.web_conversations import WebConversationSchemaError
     from dlightrag.engine.rag.workspace.ports import CorpusSchemaError
-    from dlightrag.engine.runtime import RunSchemaError
+    from dlightrag.engine.runtime.errors import RunSchemaError
 
     return [
         (
@@ -343,7 +343,7 @@ async def test_reader_startup_validates_domain_schema_without_ddl(scope_index: i
 
 @pytest.mark.parametrize("scope_index", range(4))
 async def test_reader_startup_fails_on_incompatible_domain_schema(scope_index: int) -> None:
-    from dlightrag.engine.runtime import RunSchemaError
+    from dlightrag.engine.runtime.errors import RunSchemaError
 
     scope, _migrations, tables, store_cls, schema_error = _required_domain_scopes()[scope_index]
     conn = _SchemaConn(set(), tables + _prerequisite_tables(scope))
@@ -376,7 +376,7 @@ async def test_reader_startup_fails_when_a_required_table_is_absent(scope_index:
 
 @pytest.mark.parametrize("scope_index", range(4))
 async def test_reader_startup_fails_when_the_migration_ledger_is_absent(scope_index: int) -> None:
-    from dlightrag.engine.runtime import RunSchemaError
+    from dlightrag.engine.runtime.errors import RunSchemaError
 
     _scope, _migrations, tables, store_cls, schema_error = _required_domain_scopes()[scope_index]
     conn = _SchemaConn(set(), tables + _prerequisite_tables(_scope), ledger_exists=False)

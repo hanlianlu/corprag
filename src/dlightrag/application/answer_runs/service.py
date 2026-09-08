@@ -7,35 +7,6 @@ from dataclasses import asdict, dataclass
 from typing import Any, Protocol, cast
 from uuid import UUID, uuid7
 
-from dlightrag.application.answer_runs.capabilities import AnswerCapabilities, RequestModelContext
-from dlightrag.application.answer_runs.capability import AnswerImageCapability
-from dlightrag.application.answer_runs.envelope import accepted_input_envelope
-from dlightrag.application.answer_runs.errors import (
-    AnswerInputOverflowError,
-    InvalidToolConfigurationError,
-    UnsupportedAnswerModeError,
-)
-from dlightrag.application.answer_runs.execution import (
-    AnswerRunInput,
-    AnswerRunRequest,
-    AttachmentReference,
-    LinkReference,
-    PinnedModelProfile,
-    build_current_answer_resources,
-    in_memory_attachment_loader,
-)
-from dlightrag.application.answer_runs.mode import (
-    AnswerMode,
-    ModeCapability,
-    ModeResource,
-    ResolvedMode,
-    canonical_answer_mode,
-    require_supported_mode,
-    resource_role,
-    valid_modes,
-)
-from dlightrag.application.answer_runs.results import AnswerResult, restore_answer_result
-from dlightrag.application.answer_runs.routing import RoutingAcceptance
 from dlightrag.application.runs import (
     IdempotencyKeyConflict,
     RunAdmissionLimitExceededError,
@@ -58,51 +29,76 @@ from dlightrag.engine.ai.capacity import (
 from dlightrag.engine.ai.catalog import current_model_catalog_revision
 from dlightrag.engine.ai.fingerprints import ModelFingerprint
 from dlightrag.engine.ai.settings import MODEL_ROLE_NAMES, ModelRole
+from dlightrag.engine.answer.capabilities import AnswerCapabilities, RequestModelContext
+from dlightrag.engine.answer.errors import (
+    AnswerInputOverflowError,
+    InvalidToolConfigurationError,
+    UnsupportedAnswerModeError,
+)
 from dlightrag.engine.answer.evidence import EvidenceLedger
 from dlightrag.engine.answer.execution import (
     ResolvedAnswerResources,
     research_history_input_measure,
+)
+from dlightrag.engine.answer.execution.input import (
+    AnswerRunInput,
+    AnswerRunRequest,
+    AttachmentReference,
+    LinkReference,
+    PinnedModelProfile,
+    build_current_answer_resources,
+    in_memory_attachment_loader,
 )
 from dlightrag.engine.answer.history import (
     HistoryProjectionOverflowError,
     HistoryProjectionTarget,
     project_history,
 )
+from dlightrag.engine.answer.image_capability import AnswerImageCapability
 from dlightrag.engine.answer.images import AnswerImagePolicy
 from dlightrag.engine.answer.memory import memory_owner_allowed, standing_memory_for_acceptance
+from dlightrag.engine.answer.mode import (
+    AnswerMode,
+    ModeCapability,
+    ModeResource,
+    ResolvedMode,
+    canonical_answer_mode,
+    require_supported_mode,
+    resource_role,
+    valid_modes,
+)
 from dlightrag.engine.answer.resources.images import QueryImageDescriber, prepare_query_images
 from dlightrag.engine.answer.resources.models import ResourceInput, TextWindowBudget
+from dlightrag.engine.answer.results import AnswerResult, restore_answer_result
+from dlightrag.engine.answer.runs.envelope import accepted_input_envelope
+from dlightrag.engine.answer.runs.routing import RoutingAcceptance
 from dlightrag.engine.answer.synthesizer import AnswerSynthesizer
 from dlightrag.engine.answer.tools import compose_research_tools
 from dlightrag.engine.rag.corpus.sources.source_contract import safe_source_filename
 from dlightrag.engine.rag.retrieval import MetadataFilter, RetrievalOptions, RetrievalResult
 from dlightrag.engine.rag.retrieval.planner import RetrievalPlanner
 from dlightrag.engine.rag.workspace.workspaces import require_canonical_workspace_id
-from dlightrag.engine.runtime import (
+from dlightrag.engine.runtime.contracts import RunKind
+from dlightrag.engine.runtime.records import (
     ArtifactReferenceKind,
     PendingArtifact,
     PendingArtifactReference,
     PreparedRunEnvelope,
     RunAccessScope,
     RunArtifactReference,
-    RunKind,
     RunRecord,
     artifact_digest,
     require_prepared_input_bounds,
     run_request_fingerprint,
 )
-from dlightrag.engine.runtime import (
+from dlightrag.engine.runtime.records import (
     IdempotencyKeyConflict as RuntimeIdempotencyKeyConflict,
 )
-from dlightrag.engine.runtime import (
+from dlightrag.engine.runtime.records import (
     RunAdmissionLimitExceededError as RuntimeRunAdmissionLimitExceededError,
 )
-from dlightrag.engine.runtime import (
-    RunCreation as RuntimeRunCreation,
-)
-from dlightrag.engine.runtime import (
-    RunEvent as RuntimeRunEvent,
-)
+from dlightrag.engine.runtime.records import RunCreation as RuntimeRunCreation
+from dlightrag.engine.runtime.records import RunEvent as RuntimeRunEvent
 
 from .child_roster import (
     ChildRosterCursor,

@@ -3,7 +3,7 @@
 
 from dataclasses import dataclass, field
 
-from dlightrag.application.answer_runs.citations import SourceReference
+from dlightrag.engine.answer.citations.contracts import SourceReference
 from dlightrag.engine.rag.retrieval import ContextRow, RetrievalContexts
 
 from .indexer import CitationIndexer, build_citation_index

@@ -9,17 +9,18 @@ from unittest.mock import AsyncMock
 
 import pytest
 from dlightrag_memory import MemoryProvenance, MemoryRecord
+from dlightrag_memory.errors import MemoryUnavailableError
 from dlightrag_memory.store import InMemoryMemoryStore
 from fastapi import HTTPException
 
 from dlightrag.adapters.http.rest.routes.memory import list_memories as rest_list_memories
 from dlightrag.adapters.mcp.tools.memory import list_memories_tool
 from dlightrag.application.access import RequestScope, UserContext, request_scope_context
-from dlightrag.application.answer_runs.errors import MemoryDisabledError, MemoryUnavailableError
 from dlightrag.application.memory import (
     MEMORY_LIST_PAGE_DEFAULT_LIMIT,
     MEMORY_LIST_PAGE_MAX_LIMIT,
     InMemoryMemorySettingsStore,
+    MemoryDisabledError,
     MemoryListCursor,
     MemoryListCursorCodec,
     MemoryListCursorError,

@@ -14,18 +14,18 @@ from unittest.mock import AsyncMock
 import pytest
 
 from dlightrag.application import config as config_module
-from dlightrag.application.answer_runs.capabilities import AnswerCapabilities
-from dlightrag.application.answer_runs.capability import AnswerImageCapability
-from dlightrag.application.answer_runs.execution import (
-    AnswerRunInput,
-    AnswerRunRequest,
-    PinnedModelProfile,
-)
 from dlightrag.application.config import DlightragConfig
 from dlightrag.engine.ai.capacity import CONTEXT_POLICY_REVISION, ModelProfile
 from dlightrag.engine.ai.catalog import current_model_catalog_revision
 from dlightrag.engine.ai.fingerprints import ModelFingerprint
 from dlightrag.engine.ai.media import MODEL_IMAGE_MAX_PIXELS
+from dlightrag.engine.answer.capabilities import AnswerCapabilities
+from dlightrag.engine.answer.execution.input import (
+    AnswerRunInput,
+    AnswerRunRequest,
+    PinnedModelProfile,
+)
+from dlightrag.engine.answer.image_capability import AnswerImageCapability
 from dlightrag.engine.answer.images import AnswerImagePolicy
 from dlightrag.engine.answer.resources.models import ResourceInput
 

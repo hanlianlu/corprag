@@ -2,7 +2,7 @@
 """Startup and shutdown contract of the local composition root."""
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Any, cast
 
 import pytest
@@ -13,13 +13,13 @@ from dlightrag.adapters.postgres.runtime.run_store import PGRunStore
 from dlightrag.adapters.postgres.web.web_conversations import PGWebConversationStore
 from dlightrag.application import Application, ApplicationClosedError
 from dlightrag.application.answer_runs import AnswerService
-from dlightrag.application.answer_runs.capabilities import AnswerCapabilityCoordinator
 from dlightrag.application.application import _ApplicationComponents
 from dlightrag.application.config import DlightragConfig
 from dlightrag.application.corpus_admin import CorpusAdmin
 from dlightrag.application.errors import StorageSchemaError
 from dlightrag.application.health import ApplicationHealth
 from dlightrag.application.retrieval import PinnedRetrievalModel, RetrievalService
+from dlightrag.application.retrieval.execution import validate_active_retrieval_input
 from dlightrag.application.settings import model_settings_for_role
 from dlightrag.application.web_conversations import (
     WebConversationSchemaError,
@@ -29,17 +29,23 @@ from dlightrag.engine.ai.capacity import CONTEXT_POLICY_REVISION, ModelProfile
 from dlightrag.engine.ai.catalog import current_model_catalog_revision
 from dlightrag.engine.ai.fingerprints import ModelFingerprint, model_fingerprint
 from dlightrag.engine.ai.settings import MODEL_ROLE_NAMES
+from dlightrag.engine.answer.capabilities import AnswerCapabilityCoordinator
+from dlightrag.engine.answer.execution.input import validate_active_answer_input
 from dlightrag.engine.answer.model_runtime import AnswerModelRuntime
 from dlightrag.engine.rag.workspace.pool import WorkspaceUnavailableError
 from dlightrag.engine.rag.workspace.ports import CorpusSchemaError
 from dlightrag.engine.rag.workspace.workspaces import normalize_workspace
-from dlightrag.engine.runtime import IncompatibleActiveRunError, RunCoordinator, RunSchemaError
+from dlightrag.engine.runtime.coordinator import RunCoordinator
+from dlightrag.engine.runtime.errors import (
+    IncompatibleActiveRunError,
+    RunSchemaError,
+)
 from tests.config_helpers import mutate_config
 
 _CLOSE_ORDER = [
     "close:corpora",
-    "close:agent_execution",
     "close:coordinator",
+    "close:agent_execution",
     "close:listener",
     "close:web_conversations",
     "close:retrieval",
@@ -193,6 +199,42 @@ class _Coordinator(_Collaborator):
         await super().aclose()
 
 
+class _RaceExecution(_Collaborator):
+    def __init__(self, recorder: _Recorder) -> None:
+        super().__init__(recorder, "agent_execution")
+        self.closed = asyncio.Event()
+        self.starts_after_close = 0
+
+    async def start_process(self) -> None:
+        if self.closed.is_set():
+            self.starts_after_close += 1
+
+    async def aclose(self) -> None:
+        self._recorder.add("close:agent_execution")
+        self.closed.set()
+        await asyncio.sleep(0)
+
+
+class _LiveProducerCoordinator(_Coordinator):
+    def __init__(self, recorder: _Recorder, execution: _RaceExecution) -> None:
+        super().__init__(recorder)
+        self._execution = execution
+        self._producer: asyncio.Task[None] | None = None
+
+    async def start(self) -> None:
+        await super().start()
+        self._producer = asyncio.create_task(self._produce_after_adapter_close())
+
+    async def _produce_after_adapter_close(self) -> None:
+        await self._execution.closed.wait()
+        if self.is_started:
+            await self._execution.start_process()
+
+    async def wait_for_producer(self) -> None:
+        assert self._producer is not None
+        await self._producer
+
+
 class _Corpora(_Collaborator):
     def __init__(self, recorder: _Recorder) -> None:
         super().__init__(recorder, "corpora")
@@ -257,6 +299,28 @@ class _Parts:
         *,
         web_enabled: bool = True,
     ) -> Application:
+        def current_fingerprint(role: str) -> ModelFingerprint:
+            return model_fingerprint(model_settings_for_role(config, cast(Any, role)))
+
+        async def validate_active_runs() -> None:
+            async for requirement in self.run_store.iter_active_run_requirements():
+                kind = requirement.get("run_kind")
+                prepared = requirement.get("prepared_input")
+                if not isinstance(prepared, Mapping):
+                    raise IncompatibleActiveRunError("incompatible durable input schema")
+                if kind == "answer":
+                    validate_active_answer_input(
+                        prepared,
+                        model_fingerprint_for_role=cast(Any, current_fingerprint),
+                    )
+                elif kind == "retrieval":
+                    validate_active_retrieval_input(
+                        prepared,
+                        model_fingerprint_for_role=current_fingerprint,
+                    )
+                else:
+                    raise IncompatibleActiveRunError("incompatible durable input schema")
+
         return Application(
             config,
             _ApplicationComponents(
@@ -268,6 +332,7 @@ class _Parts:
                 web_store=cast(PGWebConversationStore, self.web_store),
                 coordinator=cast(RunCoordinator, self.coordinator),
                 cancellation_listener=cast(Any, self.cancellation_listener),
+                validate_active_runs=validate_active_runs,
                 corpora=cast(CorpusAdmin, self.corpora),
                 retrieval=cast(RetrievalService, self.retrieval),
                 runs=cast(Any, self.runs),
@@ -412,6 +477,26 @@ async def test_application_exposes_only_typed_services_and_closes_in_dependency_
 
     assert parts.recorder.closed() == _CLOSE_ORDER
     assert application.health.is_closed is True
+
+
+async def test_close_stops_live_run_producer_before_execution_adapter(
+    test_config: DlightragConfig,
+) -> None:
+    parts = _Parts()
+    execution = _RaceExecution(parts.recorder)
+    coordinator = _LiveProducerCoordinator(parts.recorder, execution)
+    parts.agent_execution = execution
+    parts.coordinator = coordinator
+    application = parts.application(test_config)
+    await application.astart()
+
+    await application.aclose()
+    await coordinator.wait_for_producer()
+
+    assert execution.starts_after_close == 0
+    assert parts.recorder.closed().index("close:coordinator") < parts.recorder.closed().index(
+        "close:agent_execution"
+    )
 
 
 async def test_search_toolchain_is_preflighted_before_readiness(

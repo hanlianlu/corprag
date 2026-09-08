@@ -31,9 +31,6 @@ from dlightrag.application.answer_runs import (
     ChildRosterCursorCodec,
     ChildRosterPage,
 )
-from dlightrag.application.answer_runs.citations import SourceReference
-from dlightrag.application.answer_runs.errors import AnswerInputOverflowError
-from dlightrag.application.answer_runs.results import AnswerResult
 from dlightrag.application.config import (
     AccessControlConfig,
     AccessControlRuleConfig,
@@ -65,8 +62,11 @@ from dlightrag.application.runs import (
     RunView,
 )
 from dlightrag.application.settings import authentication_settings
+from dlightrag.engine.answer.citations.contracts import SourceReference
+from dlightrag.engine.answer.errors import AnswerInputOverflowError
+from dlightrag.engine.answer.results import AnswerResult
 from dlightrag.engine.rag.retrieval import RetrievalResult
-from dlightrag.engine.runtime import (
+from dlightrag.engine.runtime.records import (
     RunAccessScope,
     RunCreation,
     RunRecord,
@@ -330,7 +330,7 @@ def mock_application(_api_app: FastAPI, mock_service, test_config):
         "timestamp": None,
         "retry_after": 30.0,
     }
-    from dlightrag.application.answer_runs.capability import AnswerImageCapability
+    from dlightrag.engine.answer.image_capability import AnswerImageCapability
 
     answer_image_capability = AnswerImageCapability(
         status="supported",
@@ -342,7 +342,7 @@ def mock_application(_api_app: FastAPI, mock_service, test_config):
         failure_kind=None,
     )
     from dlightrag.adapters.postgres.corpus.corpus import PGReadinessProbe
-    from dlightrag.application.answer_runs.capability import answer_image_capability_summary
+    from dlightrag.engine.answer.image_capability import answer_image_capability_summary
 
     application.health = ApplicationHealth(
         readiness_probe=PGReadinessProbe(test_config),
@@ -1918,7 +1918,7 @@ class TestAnswerMultipart:
     ) -> None:
         import json as json_mod
 
-        from dlightrag.application.answer_runs.client_contracts import (
+        from dlightrag.engine.answer.client_contracts import (
             MAX_HISTORY_CONTENT_CHARS,
             MAX_HISTORY_MESSAGES,
         )
@@ -2729,7 +2729,7 @@ async def test_the_app_admits_answer_history_with_the_shared_body_cap(
 async def test_the_app_still_refuses_a_body_over_the_shared_json_budget(
     mock_config: DlightragConfig,
 ) -> None:
-    from dlightrag.application.answer_runs.client_contracts import (
+    from dlightrag.engine.answer.client_contracts import (
         MAX_HISTORY_CONTENT_CHARS,
         MAX_HISTORY_MESSAGES,
         MAX_QUERY_IMAGES,
@@ -2755,7 +2755,7 @@ async def test_the_app_still_refuses_a_body_over_the_shared_json_budget(
 async def test_the_app_admits_the_fixed_retrieve_image_contract(
     mock_config: DlightragConfig,
 ) -> None:
-    from dlightrag.application.answer_runs.client_contracts import MAX_QUERY_IMAGES
+    from dlightrag.engine.answer.client_contracts import MAX_QUERY_IMAGES
 
     set_config(mock_config)
     image_sized_body = (

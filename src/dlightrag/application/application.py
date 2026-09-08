@@ -5,9 +5,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol
 
 from dlightrag.application.config import DlightragConfig
 from dlightrag.application.errors import ApplicationClosedError
@@ -21,8 +21,6 @@ if TYPE_CHECKING:
     from dlightrag.application.retrieval import RetrievalService
     from dlightrag.application.runs import RunService
     from dlightrag.application.web_conversations import WebConversationService
-    from dlightrag.engine.ai.fingerprints import ModelFingerprint
-    from dlightrag.engine.ai.settings import ModelRole
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +33,12 @@ async def _noop_close_process() -> None:
     return None
 
 
+class RunStoreLifecycle(Protocol):
+    """The startup-only operational-store capability owned by Application."""
+
+    async def initialize(self, *, validate_only: bool = False) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class _ApplicationComponents:
     """Every injected collaborator one Application owns before startup."""
@@ -43,10 +47,11 @@ class _ApplicationComponents:
     capabilities: Any
     pool: Any
     models: Any
-    run_store: Any
+    run_store: RunStoreLifecycle
     web_store: Any
     coordinator: Any
     cancellation_listener: Any
+    validate_active_runs: Callable[[], Awaitable[None]]
     corpora: CorpusAdmin
     retrieval: RetrievalService
     runs: RunService
@@ -248,7 +253,7 @@ class Application:
         same schema because run retention cascades turns through it, so every
         process that owns runs also establishes that table.
         """
-        from dlightrag.engine.runtime import RunSchemaError
+        from dlightrag.engine.runtime.errors import RunSchemaError
 
         from .web_conversations import WebConversationSchemaError
 
@@ -274,19 +279,9 @@ class Application:
             components.health.mark_component_healthy("operational_state")
 
     async def _validate_active_runs(self) -> None:
-        """Reject a rolling deployment that cannot execute already accepted inputs."""
-        from dlightrag.application.settings import model_settings_for_role
-        from dlightrag.engine.ai.fingerprints import model_fingerprint
-        from dlightrag.engine.ai.settings import MODEL_ROLE_NAMES
-
-        if not self._runs_ready:
-            return
-        current_fingerprints: dict[ModelRole, ModelFingerprint] = {
-            role: model_fingerprint(model_settings_for_role(self._config, role))
-            for role in MODEL_ROLE_NAMES
-        }
-        async for requirement in self._components.run_store.iter_active_run_requirements():
-            _require_compatible_run(requirement, current_fingerprints)
+        """Run the composed operation-owner compatibility checks in startup order."""
+        if self._runs_ready:
+            await self._components.validate_active_runs()
 
     async def _initialize_corpora(self) -> bool:
         from .errors import StorageSchemaError
@@ -452,8 +447,8 @@ class Application:
         for label, close in (
             ("memory janitor", self._stop_memory_janitor),
             ("corpus admin promotion worker", components.corpora.aclose),
+            ("the durable run coordinator", components.coordinator.aclose),
             ("Agent execution", components.close_agent_execution),
-            ("the durable answer coordinator", components.coordinator.aclose),
             ("the cancellation listener", components.cancellation_listener.aclose),
             ("Web conversation retention", components.web_conversations.aclose),
             ("the Retrieval service", components.retrieval.aclose),
@@ -476,72 +471,6 @@ class Application:
                 logger.warning("Failed to close %s", label, exc_info=True)
         if cancellation is not None:
             raise cancellation
-
-
-def _require_compatible_run(
-    requirement: Mapping[str, Any],
-    current_fingerprints: Mapping[ModelRole, ModelFingerprint],
-) -> None:
-    """Fail startup when one accepted Answer or Retrieval cannot recover."""
-    from dlightrag.application.answer_runs.execution import AnswerRunInput
-    from dlightrag.application.retrieval.execution import RetrievalRunInput
-    from dlightrag.engine.ai.capacity import CONTEXT_POLICY_REVISION
-    from dlightrag.engine.ai.catalog import current_model_catalog_revision
-    from dlightrag.engine.ai.settings import MODEL_ROLE_NAMES, ModelRole
-    from dlightrag.engine.runtime import IncompatibleActiveRunError, RunExecutionError
-
-    kind = requirement.get("run_kind")
-    prepared = requirement.get("prepared_input")
-    try:
-        if not isinstance(prepared, Mapping):
-            raise ValueError("prepared_input must be an object")
-        if kind == "answer":
-            run_input = AnswerRunInput.from_prepared_input(prepared)
-            expected_roles = set(MODEL_ROLE_NAMES)
-        elif kind == "retrieval":
-            run_input = RetrievalRunInput.from_prepared_input(prepared)
-            expected_roles = {"extract"}
-            if run_input.query_images:
-                expected_roles.add("vlm")
-        elif kind == "corpus_mutation":
-            from dlightrag.application.corpus_admin.mutations import (
-                validate_corpus_mutation_prepared_input,
-            )
-
-            validate_corpus_mutation_prepared_input(prepared)
-            return
-        else:
-            raise ValueError("unsupported active run kind")
-    except (AttributeError, KeyError, TypeError, ValueError, RunExecutionError) as exc:
-        raise IncompatibleActiveRunError(
-            f"active {kind or 'unknown'} runs use an incompatible durable input schema; "
-            "drain or owner-cancel them before deployment"
-        ) from exc
-
-    if run_input.context_policy_revision != CONTEXT_POLICY_REVISION:
-        raise IncompatibleActiveRunError(
-            f"active {kind} runs use another context policy revision; "
-            "drain or owner-cancel them before deployment"
-        )
-    if run_input.model_catalog_revision != current_model_catalog_revision():
-        raise IncompatibleActiveRunError(
-            f"active {kind} runs use another model catalog revision; "
-            "drain or owner-cancel them before deployment"
-        )
-    pinned = {item.role: item for item in run_input.pinned_models}
-    if len(run_input.pinned_models) != len(expected_roles) or set(pinned) != expected_roles:
-        raise IncompatibleActiveRunError(
-            f"active {kind} runs do not contain the required model role set; "
-            "drain or owner-cancel them before deployment"
-        )
-    if any(
-        pinned[role].fingerprint != current_fingerprints[cast(ModelRole, role)]
-        for role in expected_roles
-    ):
-        raise IncompatibleActiveRunError(
-            f"active {kind} runs target another model endpoint configuration; "
-            "drain or owner-cancel them before deployment"
-        )
 
 
 __all__ = [

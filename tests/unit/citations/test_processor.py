@@ -1,5 +1,5 @@
 # tests/unit/citations/test_processor.py
-from dlightrag.application.answer_runs.citations import SourceReference
+from dlightrag.engine.answer.citations.contracts import SourceReference
 from dlightrag.engine.answer.citations.processor import CitationProcessor, CitationResult
 
 

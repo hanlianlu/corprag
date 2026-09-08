@@ -17,11 +17,9 @@ from typing import Any
 
 import pytest
 
-from dlightrag.engine.runtime import (
-    MAX_RECLAIMS_WITHOUT_PROGRESS,
-    RunAdmissionLimitExceededError,
-    RunCoordinator,
-)
+from dlightrag.engine.runtime.coordinator import RunCoordinator
+from dlightrag.engine.runtime.policy import MAX_RECLAIMS_WITHOUT_PROGRESS
+from dlightrag.engine.runtime.records import RunAdmissionLimitExceededError
 from tests.integration.run_runtime_pg_harness import (
     TrackingExecutor,
     isolated_run_runtime,

@@ -16,13 +16,13 @@ from dlightrag.adapters.http.browser.workspace_models import (
     project_workspace_record,
 )
 from dlightrag.application.access import AccessAction, WorkspaceRecord
-from dlightrag.application.answer_runs.capability import ImageCapabilityStatus
-from dlightrag.application.answer_runs.client_contracts import ClientContractModel
 from dlightrag.application.corpus_admin import (
     WORKSPACE_CATALOG_PAGE_MAX_LIMIT,
     WorkspaceCatalogPageRequest,
     normalize_workspace,
 )
+from dlightrag.engine.answer.client_contracts import ClientContractModel
+from dlightrag.engine.answer.image_capability import ImageCapabilityStatus
 
 router = APIRouter()
 

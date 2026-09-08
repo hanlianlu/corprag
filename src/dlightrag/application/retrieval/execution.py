@@ -20,13 +20,15 @@ from dlightrag.engine.dependencies import (
     next_dependency_retry,
 )
 from dlightrag.engine.rag.retrieval import MetadataFilter, RetrievalOptions, RetrievalResult
-from dlightrag.engine.runtime import (
-    Deferred,
-    Failed,
+from dlightrag.engine.runtime.coordinator import (
     LeaseLostError,
     RunCancellationObserved,
-    RunExecutionError,
     RunSession,
+)
+from dlightrag.engine.runtime.errors import IncompatibleActiveRunError, RunExecutionError
+from dlightrag.engine.runtime.records import (
+    Deferred,
+    Failed,
     Succeeded,
 )
 
@@ -204,6 +206,45 @@ class RetrievalRunInput:
         return next((model.profile for model in self.pinned_models if model.role == role), None)
 
 
+def validate_active_retrieval_input(
+    prepared: Mapping[str, Any],
+    *,
+    model_fingerprint_for_role: Callable[[str], ModelFingerprint],
+) -> None:
+    """Require one active Retrieval input to remain executable by this deployment."""
+    try:
+        run_input = RetrievalRunInput.from_prepared_input(prepared)
+    except (AttributeError, KeyError, TypeError, ValueError, RunExecutionError) as exc:
+        raise IncompatibleActiveRunError(
+            "active retrieval runs use an incompatible durable input schema; "
+            "drain or owner-cancel them before deployment"
+        ) from exc
+    expected_roles = {"extract"}
+    if run_input.query_images:
+        expected_roles.add("vlm")
+    pinned = {item.role: item for item in run_input.pinned_models}
+    if len(run_input.pinned_models) != len(expected_roles) or set(pinned) != expected_roles:
+        raise IncompatibleActiveRunError(
+            "active retrieval runs do not contain the required model role set; "
+            "drain or owner-cancel them before deployment"
+        )
+    if run_input.context_policy_revision != CONTEXT_POLICY_REVISION:
+        raise IncompatibleActiveRunError(
+            "active retrieval runs use another context policy revision; "
+            "drain or owner-cancel them before deployment"
+        )
+    if run_input.model_catalog_revision != current_model_catalog_revision():
+        raise IncompatibleActiveRunError(
+            "active retrieval runs use another model catalog revision; "
+            "drain or owner-cancel them before deployment"
+        )
+    if any(pinned[role].fingerprint != model_fingerprint_for_role(role) for role in expected_roles):
+        raise IncompatibleActiveRunError(
+            "active retrieval runs target another model endpoint configuration; "
+            "drain or owner-cancel them before deployment"
+        )
+
+
 class RetrievalOperation(Protocol):
     """The one deep Retrieval service instance used by top-level and Answer work."""
 
@@ -244,6 +285,13 @@ class RetrievalExecutor:
         self._now = now or (lambda: datetime.datetime.now(datetime.UTC))
         self._on_dependency_unavailable = on_dependency_unavailable
         self._on_dependency_recovered = on_dependency_recovered
+
+    def validate_active_prepared_input(self, prepared: Mapping[str, Any]) -> None:
+        """Validate active durable Retrieval input using this executor's model bindings."""
+        validate_active_retrieval_input(
+            prepared,
+            model_fingerprint_for_role=self._model_fingerprint_for_role,
+        )
 
     async def execute(self, session: RunSession) -> Succeeded | Failed | Deferred:
         run_input = RetrievalRunInput.from_prepared_input(session.prepared_input)
@@ -428,4 +476,5 @@ __all__ = [
     "RetrievalRunInput",
     "canonical_retrieval_result",
     "restore_retrieval_result",
+    "validate_active_retrieval_input",
 ]

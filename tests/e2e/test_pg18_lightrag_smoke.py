@@ -518,7 +518,7 @@ async def test_reader_role_attaches_read_only_and_rejects_writes(
     from dlightrag.application.config import reset_config, set_config
     from dlightrag.application.settings import rag_settings
     from dlightrag.engine.rag.workspace.workspace_rag import WorkspaceRag
-    from dlightrag.engine.runtime import (
+    from dlightrag.engine.runtime.records import (
         PreparedRunEnvelope,
         RunAccessScope,
         run_request_fingerprint,

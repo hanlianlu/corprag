@@ -42,13 +42,6 @@ from playwright.sync_api import (
 from dlightrag.adapters.http.server import create_app
 from dlightrag.application.access import WorkspaceRecord
 from dlightrag.application.answer_runs import AnswerInputArtifact
-from dlightrag.application.answer_runs.capabilities import AnswerCapabilities
-from dlightrag.application.answer_runs.capability import AnswerImageCapability
-from dlightrag.application.answer_runs.execution import (
-    AnswerRunInput,
-    AttachmentReference,
-    PinnedModelProfile,
-)
 from dlightrag.application.config import DlightragConfig, set_config
 from dlightrag.application.corpus_admin import (
     FilePanelCursorCodec,
@@ -84,6 +77,13 @@ from dlightrag.engine.ai.settings import (
     ModelRoleSettings,
     ModelSettings,
 )
+from dlightrag.engine.answer.capabilities import AnswerCapabilities
+from dlightrag.engine.answer.execution.input import (
+    AnswerRunInput,
+    AttachmentReference,
+    PinnedModelProfile,
+)
+from dlightrag.engine.answer.image_capability import AnswerImageCapability
 from tests.config_helpers import mutate_config
 
 MOCK_WORKSPACES = [

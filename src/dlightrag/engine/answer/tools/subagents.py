@@ -20,7 +20,8 @@ from dlightrag.engine.agent.session.effects import canonical_json
 from dlightrag.engine.agent.session.ids import EntryId, IntentId, SessionId
 from dlightrag.engine.agent.tools import AgentTool, ToolResult, ToolRuntime
 from dlightrag.engine.answer.evidence import EvidenceDelta
-from dlightrag.engine.runtime import RunCancellationObserved, RunCancelledError
+from dlightrag.engine.runtime.coordinator import RunCancellationObserved
+from dlightrag.engine.runtime.errors import RunCancelledError
 
 type ChildStatus = Literal["running", "succeeded", "failed", "cancelled"]
 type ChildContextMode = Literal["isolated", "parent"]

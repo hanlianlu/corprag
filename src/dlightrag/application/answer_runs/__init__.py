@@ -1,9 +1,8 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
-"""Caller-facing durable Answer Run use case and contracts.
+"""Caller-facing durable Answer Run service and roster projections.
 
-Contract submodules are importable without loading AnswerService. The service
-module pulls Research acceptance measurement, which must not run during
-contract imports.
+Answer domain contracts live under :mod:`dlightrag.engine.answer`; importing
+this package does not eagerly load the AnswerService implementation.
 """
 
 from __future__ import annotations

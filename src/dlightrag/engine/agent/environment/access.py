@@ -1,5 +1,5 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
-"""FIFO access scheduler for one host's concurrent tool batch."""
+"""Conflict-aware access scheduler for one host's concurrent tool batch."""
 
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ type ToolAccess = PathAccess | ExternalAccess | WorkspaceAccess
 
 
 class AccessScheduler:
-    """Grant non-overlapping accesses; waiters proceed in request order."""
+    """Grant non-overlapping accesses without a waiter-order guarantee."""
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()

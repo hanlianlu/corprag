@@ -1,4 +1,4 @@
-from dlightrag.application.answer_runs.sources import SourceDownloadLinkBuilder
+from dlightrag.engine.answer.citations.sources import SourceDownloadLinkBuilder
 
 
 def test_rest_source_link_uses_document_id_and_workspace() -> None:

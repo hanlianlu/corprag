@@ -26,7 +26,7 @@ from dlightrag.engine.rag.workspace.settings import (
     RagSettings,
 )
 from dlightrag.engine.rag.workspace.workspace_rag import WorkspaceRag
-from dlightrag.engine.runtime import RunCoordinator
+from dlightrag.engine.runtime.coordinator import RunCoordinator
 from tests.config_helpers import mutate_config
 
 

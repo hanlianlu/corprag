@@ -903,7 +903,7 @@ def _smoke_root_interfaces() -> None:
         IngestionSettings,
         PipelineSettings,
     )
-    from dlightrag.engine.runtime import run_request_fingerprint
+    from dlightrag.engine.runtime.records import run_request_fingerprint
 
     class Planner:
         async def plan(self, query, **_kwargs):

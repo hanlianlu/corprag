@@ -19,15 +19,6 @@ from dlightrag.application.answer_runs import (
     ChildRosterPageRequest,
     ChildRosterRowPage,
 )
-from dlightrag.application.answer_runs.capabilities import AnswerCapabilities, RequestModelContext
-from dlightrag.application.answer_runs.capability import AnswerImageCapability
-from dlightrag.application.answer_runs.errors import (
-    AnswerInputOverflowError,
-    CurrentImagePayloadError,
-    UnsupportedAnswerModeError,
-)
-from dlightrag.application.answer_runs.execution import AnswerRunInput, AnswerRunRequest
-from dlightrag.application.answer_runs.routing import decide_resolved_mode
 from dlightrag.application.runs import (
     RunCancelledError,
     RunFailedError,
@@ -39,9 +30,18 @@ from dlightrag.engine.ai.capacity import CONTEXT_POLICY_REVISION, ModelProfile
 from dlightrag.engine.ai.catalog import MODEL_CATALOG_REVISION
 from dlightrag.engine.ai.fingerprints import ModelFingerprint
 from dlightrag.engine.ai.settings import MODEL_ROLE_NAMES, ModelRole
+from dlightrag.engine.answer.capabilities import AnswerCapabilities, RequestModelContext
+from dlightrag.engine.answer.errors import (
+    AnswerInputOverflowError,
+    CurrentImagePayloadError,
+    UnsupportedAnswerModeError,
+)
 from dlightrag.engine.answer.execution import AnswerResourceResolver, AnswerResourceSettings
+from dlightrag.engine.answer.execution.input import AnswerRunInput, AnswerRunRequest
+from dlightrag.engine.answer.image_capability import AnswerImageCapability
 from dlightrag.engine.answer.resources.models import ResourceInput
-from dlightrag.engine.runtime import (
+from dlightrag.engine.answer.runs.routing import decide_resolved_mode
+from dlightrag.engine.runtime.records import (
     CancellationOutcome,
     PendingArtifact,
     PendingArtifactReference,

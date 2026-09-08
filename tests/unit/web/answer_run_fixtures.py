@@ -12,7 +12,6 @@ from dlightrag.application.answer_runs import (
     AnswerRunAcceptor,
     AnswerService,
 )
-from dlightrag.application.answer_runs.envelope import accepted_input_envelope
 from dlightrag.application.runs import RunStatus, RunView
 from dlightrag.application.web_conversations import (
     AnswerTurnCreation,
@@ -23,7 +22,8 @@ from dlightrag.application.web_conversations import (
 from dlightrag.engine.ai.capacity import ModelProfile
 from dlightrag.engine.ai.tokens import estimate_messages_tokens, estimate_tokens
 from dlightrag.engine.answer.history import HistoryProjectionTarget
-from dlightrag.engine.runtime import (
+from dlightrag.engine.answer.runs.envelope import accepted_input_envelope
+from dlightrag.engine.runtime.records import (
     PendingArtifact,
     PreparedRunEnvelope,
     RunAccessScope,

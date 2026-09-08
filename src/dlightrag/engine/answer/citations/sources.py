@@ -7,8 +7,8 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 from urllib.parse import quote, unquote, urlsplit
 
-from dlightrag.application.answer_runs.citations import SourceReference, SourceReferencePayload
 from dlightrag.engine.ai.telemetry import safe_log_text
+from dlightrag.engine.answer.citations.contracts import SourceReference, SourceReferencePayload
 from dlightrag.engine.rag.retrieval import RetrievalContexts
 
 logger = logging.getLogger(__name__)

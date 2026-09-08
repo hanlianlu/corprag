@@ -12,23 +12,6 @@ from unittest.mock import AsyncMock, MagicMock, Mock
 import pytest
 from PIL import Image
 
-from dlightrag.application.answer_runs.capabilities import (
-    AnswerCapabilities,
-    RequestModelContext,
-)
-from dlightrag.application.answer_runs.capability import AnswerImageCapability
-from dlightrag.application.answer_runs.errors import (
-    CurrentDocumentParseError,
-    CurrentImagePayloadError,
-)
-from dlightrag.application.answer_runs.execution import (
-    AnswerRunRequest,
-    AttachmentReference,
-    LinkReference,
-    PinnedModelProfile,
-    build_current_answer_resources,
-    in_memory_attachment_loader,
-)
 from dlightrag.application.errors import CorpusUnavailableError
 from dlightrag.engine.agent.session.ids import LaneId, SessionId
 from dlightrag.engine.agent.session.memory import MemoryAgentSessionRepository
@@ -39,6 +22,14 @@ from dlightrag.engine.ai.fingerprints import ModelFingerprint
 from dlightrag.engine.ai.reasoning import best_effort_reasoning_profile
 from dlightrag.engine.ai.scheduler import ModelScheduler
 from dlightrag.engine.ai.telemetry import NOOP_TELEMETRY
+from dlightrag.engine.answer.capabilities import (
+    AnswerCapabilities,
+    RequestModelContext,
+)
+from dlightrag.engine.answer.errors import (
+    CurrentDocumentParseError,
+    CurrentImagePayloadError,
+)
 from dlightrag.engine.answer.execution import (
     AnswerExecutor,
     AnswerExecutorSettings,
@@ -50,17 +41,26 @@ from dlightrag.engine.answer.execution.executor import (
     _memory_recall_allowed,
     _stage_publications,
 )
+from dlightrag.engine.answer.execution.input import (
+    AnswerRunRequest,
+    AttachmentReference,
+    LinkReference,
+    PinnedModelProfile,
+    build_current_answer_resources,
+    in_memory_attachment_loader,
+)
 from dlightrag.engine.answer.fast import ensure_session_lane
 from dlightrag.engine.answer.highlights import SemanticHighlightSettings
+from dlightrag.engine.answer.image_capability import AnswerImageCapability
 from dlightrag.engine.answer.publication import prepare_artifact_attachment, validate_publication
 from dlightrag.engine.answer.resources import ResourceInput
 from dlightrag.engine.answer.resources.models import TextWindowBudget
 from dlightrag.engine.dependencies import ProviderUnavailableError
-from dlightrag.engine.runtime import (
+from dlightrag.engine.runtime.coordinator import RunSession
+from dlightrag.engine.runtime.errors import RunExecutionError
+from dlightrag.engine.runtime.records import (
     Deferred,
-    RunExecutionError,
     RunExecutionOutcome,
-    RunSession,
     Succeeded,
     artifact_digest,
 )
@@ -298,7 +298,7 @@ def test_execution_rejects_tools_that_differ_from_the_accepted_agent_plan() -> N
     from pydantic import BaseModel
 
     from dlightrag.engine.agent.tools import AgentTool, ToolResult
-    from dlightrag.engine.runtime import IncompatibleActiveRunError
+    from dlightrag.engine.runtime.errors import IncompatibleActiveRunError
 
     class Args(BaseModel):
         value: str
@@ -345,7 +345,7 @@ def test_pinned_model_profile_preserves_unverified_reasoning_semantics() -> None
 
 
 def test_execution_rejects_changed_context_or_model_pins() -> None:
-    from dlightrag.engine.runtime import IncompatibleActiveRunError
+    from dlightrag.engine.runtime.errors import IncompatibleActiveRunError
 
     pins = tuple(
         PinnedModelProfile(

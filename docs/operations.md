@@ -101,8 +101,10 @@ Workspaces in a running deployment. Neither delegates to the other.
   configuration owns process count and total active capacity. New acceptance is
   rejected when the lane's deployment-wide nonterminal admission limit is
   reached: 30,000 Query Runs or 1,000 Corpus Mutation Runs by default. These
-  values and their limitations are recorded in the [Slice 6 validation
-  report](validation/run-runtime-slice-6.md).
+  values are defaults/targets. The local fake-executor campaign exercised 16
+  Query worker slots and 10,000 Query submissions, but not the 30,000 Query
+  limit or a multi-process/multi-host topology; exact evidence is in the
+  [Slice 6 validation report](validation/run-runtime-slice-6.md).
 - Route traffic with `GET /ready`; it probes only writable Operational State.
   Use `GET /health` for I/O-free liveness and the bounded corpus/parser/provider
   degradation view. A corpus or provider outage does not remove readiness:

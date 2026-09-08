@@ -5,8 +5,8 @@ from collections import Counter
 from typing import Any
 from urllib.parse import urlparse
 
-from dlightrag.application.answer_runs.citations import SourceReference
-from dlightrag.application.answer_runs.sources import can_project_workspace_visual
+from dlightrag.engine.answer.citations.contracts import SourceReference
+from dlightrag.engine.answer.citations.sources import can_project_workspace_visual
 from dlightrag.engine.answer.citations.utils import context_chunk_key
 from dlightrag.engine.rag.retrieval import RetrievalContexts
 

@@ -1,6 +1,7 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
 """Profile Memory product gate."""
 
+from .errors import MemoryDisabledError
 from .memory_list import (
     MEMORY_LIST_PAGE_DEFAULT_LIMIT,
     MEMORY_LIST_PAGE_MAX_LIMIT,
@@ -24,6 +25,7 @@ __all__ = [
     "MEMORY_LIST_PAGE_DEFAULT_LIMIT",
     "MEMORY_LIST_PAGE_MAX_LIMIT",
     "MemoryCapability",
+    "MemoryDisabledError",
     "MemoryListCursor",
     "MemoryListCursorCodec",
     "MemoryListCursorError",

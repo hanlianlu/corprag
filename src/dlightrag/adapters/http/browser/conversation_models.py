@@ -7,8 +7,8 @@ from typing import Any, Literal
 from pydantic import Field, field_validator
 
 from dlightrag.adapters.http.browser.presentation import AnswerPresentation
-from dlightrag.application.answer_runs.client_contracts import ClientContractModel
 from dlightrag.application.runs import RunStatus
+from dlightrag.engine.answer.client_contracts import ClientContractModel
 
 
 class ConversationSummary(ClientContractModel):

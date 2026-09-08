@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from dlightrag.application.answer_runs.citations import SourceReference
+from dlightrag.engine.answer.citations.contracts import SourceReference
 
 from .indexer import CitationIndexer
 from .parser import (

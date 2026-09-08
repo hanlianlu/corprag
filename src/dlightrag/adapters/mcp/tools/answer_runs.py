@@ -26,9 +26,6 @@ from dlightrag.application.access import (
     current_request_scope,
 )
 from dlightrag.application.answer_runs import AnswerRequest as ServiceAnswerRequest
-from dlightrag.application.answer_runs.client_contracts import conversation_history_as_dicts
-from dlightrag.application.answer_runs.resource_links import answer_link_resources
-from dlightrag.application.answer_runs.results import project_answer_result
 from dlightrag.application.retrieval import (
     MetadataFilter,
     RetrievalOptions,
@@ -40,6 +37,9 @@ from dlightrag.application.runs import (
     RunAdmissionLimitExceededError,
     RunView,
 )
+from dlightrag.engine.answer.client_contracts import conversation_history_as_dicts
+from dlightrag.engine.answer.resources.links import answer_link_resources
+from dlightrag.engine.answer.results import project_answer_result
 
 
 @mcp_app.tool(

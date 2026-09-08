@@ -10,7 +10,10 @@ import asyncpg
 import pytest
 
 from dlightrag.adapters.postgres.runtime.run_store import PGRunStore
-from dlightrag.engine.runtime import PreparedRunEnvelope, RunAccessScope
+from dlightrag.engine.runtime.records import (
+    PreparedRunEnvelope,
+    RunAccessScope,
+)
 from tests.integration.pg_conn import PG_CONN_KWARGS
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]

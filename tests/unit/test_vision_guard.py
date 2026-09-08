@@ -3,18 +3,18 @@
 
 import pytest
 
-from dlightrag.application.answer_runs.capability import (
-    AnswerImageCapability,
-    check_answer_image_capability,
-    check_answer_image_count,
-)
-from dlightrag.application.answer_runs.errors import (
+from dlightrag.engine.ai.vision import ImageCapabilityStatus
+from dlightrag.engine.answer.errors import (
     ANSWER_IMAGE_CAPABILITY_UNKNOWN,
     CURRENT_IMAGES_UNSUPPORTED,
     AnswerImageError,
     CurrentImagePayloadError,
 )
-from dlightrag.engine.ai.vision import ImageCapabilityStatus
+from dlightrag.engine.answer.image_capability import (
+    AnswerImageCapability,
+    check_answer_image_capability,
+    check_answer_image_count,
+)
 
 
 def _capability(status: ImageCapabilityStatus) -> AnswerImageCapability:

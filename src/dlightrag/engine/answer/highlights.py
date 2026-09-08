@@ -6,9 +6,9 @@ import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from dlightrag.application.answer_runs.citations import HighlightSource
 from dlightrag.engine.ai.completion import CompletionModel
 from dlightrag.engine.ai.telemetry import Telemetry
+from dlightrag.engine.answer.citations.contracts import HighlightSource
 from dlightrag.engine.answer.citations.highlight import extract_highlights_for_sources
 
 logger = logging.getLogger(__name__)

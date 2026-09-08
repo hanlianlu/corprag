@@ -14,7 +14,7 @@ import pytest
 
 from dlightrag.adapters.postgres.web import web_conversations as pg_web
 from dlightrag.adapters.postgres.web.web_conversations import PGWebConversationStore
-from dlightrag.engine.runtime import RunDeletion
+from dlightrag.engine.runtime.records import RunDeletion
 
 
 @dataclass

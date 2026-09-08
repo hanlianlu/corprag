@@ -5,7 +5,10 @@ import datetime
 from unittest.mock import AsyncMock, Mock
 
 from dlightrag.application.runs import RunService, RunView
-from dlightrag.engine.runtime import CancellationOutcome, RunEvent
+from dlightrag.engine.runtime.records import (
+    CancellationOutcome,
+    RunEvent,
+)
 
 _NOW = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
 

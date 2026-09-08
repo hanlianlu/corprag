@@ -59,7 +59,7 @@ from dlightrag.engine.answer.resources.registry import (
 )
 from dlightrag.engine.answer.tools.artifacts import attach_artifact_tool
 from dlightrag.engine.rag.retrieval import RetrievalResult
-from dlightrag.engine.runtime import RunCancellationObserved
+from dlightrag.engine.runtime.coordinator import RunCancellationObserved
 from dlightrag.engine.runtime.settlements import EffectHostUpdate
 from tests.unit.conftest import answer_model_profile
 

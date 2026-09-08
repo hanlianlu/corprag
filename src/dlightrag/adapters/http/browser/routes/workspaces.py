@@ -19,7 +19,6 @@ from dlightrag.adapters.http.browser.workspace_models import (
     project_workspace_record,
 )
 from dlightrag.application.access import AccessAction, WorkspaceRecord, owner_id_from_user
-from dlightrag.application.answer_runs.client_contracts import ClientContractModel
 from dlightrag.application.corpus_admin import (
     WORKSPACE_CATALOG_PAGE_DEFAULT_LIMIT,
     WORKSPACE_CATALOG_PAGE_MAX_LIMIT,
@@ -28,6 +27,7 @@ from dlightrag.application.corpus_admin import (
     normalize_workspace,
 )
 from dlightrag.application.runs import RunAdmissionLimitExceededError
+from dlightrag.engine.answer.client_contracts import ClientContractModel
 
 if TYPE_CHECKING:
     from dlightrag.application import Application

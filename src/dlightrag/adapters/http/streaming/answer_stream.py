@@ -18,8 +18,8 @@ from typing import Any
 
 from fastapi import HTTPException, Request
 
-from dlightrag.application.answer_runs.client_contracts import model_dump_json_safe
 from dlightrag.application.runs import RunEvent
+from dlightrag.engine.answer.client_contracts import model_dump_json_safe
 
 #: A queued or quiet run keeps its connection alive with comments, not events.
 SSE_KEEPALIVE_SECONDS = 10.0

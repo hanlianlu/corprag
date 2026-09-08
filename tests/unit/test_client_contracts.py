@@ -6,18 +6,18 @@ from pydantic import ValidationError
 
 from dlightrag.adapters.http.rest.models import AnswerRequest, RetrievalResponse, RetrieveRequest
 from dlightrag.adapters.mcp.contracts import AnswerInput, RetrieveInput
-from dlightrag.application.answer_runs.citations import SourceReference, SourceReferencePayload
-from dlightrag.application.answer_runs.client_contracts import (
+from dlightrag.application.corpus_admin import (
+    IngestSpec,
+    ingest_kwargs_from_spec,
+    ingest_spec_from_payload,
+)
+from dlightrag.engine.answer.citations.contracts import SourceReference, SourceReferencePayload
+from dlightrag.engine.answer.client_contracts import (
     MAX_HISTORY_CONTENT_CHARS,
     MAX_HISTORY_MESSAGES,
     AnswerAttachmentLink,
     ConversationMessage,
     conversation_history_as_dicts,
-)
-from dlightrag.application.corpus_admin import (
-    IngestSpec,
-    ingest_kwargs_from_spec,
-    ingest_spec_from_payload,
 )
 from dlightrag.engine.rag.corpus.contracts import IngestDocument
 

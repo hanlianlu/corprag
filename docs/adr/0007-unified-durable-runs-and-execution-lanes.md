@@ -2,18 +2,19 @@
 
 ## Status
 
-Accepted, implemented, and failure/load validated. Slice 1 established common
+Accepted, implemented, and validated for the documented local control-plane evidence. Slice 1 established common
 Runtime and Answer, Slice 2 added top-level Retrieval, Slice 5 moved Corpus
 Mutation onto the same RunRuntime, and the [Slice 6 validation](../validation/run-runtime-slice-6.md)
-confirms per-process worker bounds, deployment-wide nonterminal admission limits,
-and failure behavior.
+confirms the local worker bounds, the Corpus Mutation admission limit, and
+failure behavior. The 30,000 Query limit remains a configured default/target,
+not a reached load-test boundary.
 
 ## Context
 
 At decision time, DlightRAG split caller-awaited Retrieval, durable Answer Runs,
 and durable Ingest Jobs across different lifecycle and concurrency machinery.
 That split could not give a deployment one coherent overload, recovery,
-cancellation, or observation model for 10,000 online users.
+cancellation, or observation model for the recorded 10,000 local Query submissions.
 
 ## Decision
 
@@ -32,7 +33,7 @@ Answer through the common Runtime. Slice 2 made top-level Retrieval durable on
 the same Query Lane while keeping Answer's internal Retrieval Stage direct.
 Slice 5 moved Corpus Mutation execution onto its dedicated lane in the same
 Runtime; Slice 6 validated Query `16 / 30,000` and Corpus Mutation
-`2 / 1,000` per-process worker/admission settings with controlled evidence. No parallel Answer, inline
+`2 / 1,000` with controlled one-process fake-executor evidence: all local worker slots and the mutation limit were exercised, while the 30,000 Query limit and multi-host behavior were not. No parallel Answer, inline
 top-level Retrieval, or Ingest Job lifecycle
 is retained as a compatibility path. The implementation keeps the combined Application
 process topology and existing writer/reader capabilities: only writer-capable

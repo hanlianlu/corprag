@@ -41,7 +41,8 @@ from dlightrag.engine.agent.session.transactions import (
     TransactionCommit,
     TransactionLeaseLost,
 )
-from dlightrag.engine.runtime import LeaseLostError, RunExecutionError
+from dlightrag.engine.runtime.coordinator import LeaseLostError
+from dlightrag.engine.runtime.errors import RunExecutionError
 
 
 @dataclass(frozen=True, slots=True)

@@ -122,7 +122,7 @@ def test_web_static_js_build_has_no_orphan_chunks() -> None:
 
 def _presentation_source(*, source_uri: str, download_url: str | None = None):
     from dlightrag.adapters.http.browser.presentation import build_answer_presentation
-    from dlightrag.application.answer_runs.citations import SourceReferencePayload
+    from dlightrag.engine.answer.citations.contracts import SourceReferencePayload
 
     source = SourceReferencePayload(
         id="1",

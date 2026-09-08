@@ -6,7 +6,8 @@ from typing import Any, Literal, Self
 from pydantic import Field, model_validator
 
 from dlightrag.application.access import validate_query_workspace_selection
-from dlightrag.application.answer_runs.client_contracts import (
+from dlightrag.application.corpus_admin import FILE_PANEL_PAGE_DEFAULT_LIMIT, IngestSpec
+from dlightrag.engine.answer.client_contracts import (
     MAX_QUERY_IMAGES,
     AnswerAttachmentLink,
     AnswerRequestContract,
@@ -15,7 +16,6 @@ from dlightrag.application.answer_runs.client_contracts import (
     QueryImage,
     RetrieveRequestContract,
 )
-from dlightrag.application.corpus_admin import FILE_PANEL_PAGE_DEFAULT_LIMIT, IngestSpec
 
 
 class MCPInput(ClientContractModel):

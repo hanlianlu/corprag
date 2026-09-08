@@ -11,9 +11,6 @@ from dlightrag.adapters.http.browser.conversation_models import (
     ConversationTurn,
 )
 from dlightrag.adapters.http.browser.presentation import build_answer_presentation
-from dlightrag.application.answer_runs.execution import AnswerRunRequest, AttachmentReference
-from dlightrag.application.answer_runs.results import project_answer_result
-from dlightrag.application.answer_runs.sources import SourceDownloadLinkBuilder
 from dlightrag.application.web_conversations import (
     ConversationHead,
     ConversationHistoryPage,
@@ -22,6 +19,9 @@ from dlightrag.application.web_conversations import (
 from dlightrag.application.web_conversations import (
     ConversationSummary as ApplicationConversationSummary,
 )
+from dlightrag.engine.answer.citations.sources import SourceDownloadLinkBuilder
+from dlightrag.engine.answer.execution.input import AnswerRunRequest, AttachmentReference
+from dlightrag.engine.answer.results import project_answer_result
 
 WEB_SOURCE_DOWNLOAD_BASE = "/web/api/files/raw"
 WEB_IMAGE_URL_BASE = "/web/api/images"

@@ -6,12 +6,11 @@ from typing import Any
 
 from dlightrag.engine.agent.session.effects import canonical_json
 from dlightrag.engine.agent.session.ids import StageIntentId
-from dlightrag.engine.runtime import (
+from dlightrag.engine.runtime.coordinator import (
     LeaseLostError,
-    RunExecutionError,
     RunSession,
-    TerminalOutcome,
 )
+from dlightrag.engine.runtime.errors import RunExecutionError
 from dlightrag.engine.runtime.progress import (
     RunProgressStore,
     StageCommit,
@@ -19,6 +18,7 @@ from dlightrag.engine.runtime.progress import (
     StageTerminalCommit,
     StageTerminalCommitResult,
 )
+from dlightrag.engine.runtime.records import TerminalOutcome
 
 
 class FastRunBoundaries:

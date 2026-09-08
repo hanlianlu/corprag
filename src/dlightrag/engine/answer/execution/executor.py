@@ -14,33 +14,6 @@ from typing import Any, Protocol
 
 from dlightrag_memory import Memory, MemoryStore
 
-from dlightrag.application.answer_runs.capabilities import (
-    AnswerCapabilityCoordinator,
-    RequestModelContext,
-)
-from dlightrag.application.answer_runs.capability import (
-    AnswerImageCapability,
-    check_answer_image_capability,
-    check_answer_image_count,
-)
-from dlightrag.application.answer_runs.errors import (
-    AnswerInputError,
-    AnswerResourceAdmissionError,
-    CurrentImagePayloadError,
-    InvalidToolConfigurationError,
-    classify_answer_error,
-)
-from dlightrag.application.answer_runs.execution import (
-    AnswerRunInput,
-    AnswerRunRequest,
-    AttachmentReference,
-    LinkReference,
-    build_current_answer_resources,
-)
-from dlightrag.application.answer_runs.mode import ModeResource, ResolvedMode, resource_role
-from dlightrag.application.answer_runs.results import store_answer_result
-from dlightrag.application.answer_runs.routing import AnswerRoutingStore, decide_resolved_mode
-from dlightrag.application.answer_runs.sources import project_contexts_for_client
 from dlightrag.engine.agent.environment import (
     ExecutionEnvironment,
     SearchToolchain,
@@ -97,15 +70,41 @@ from dlightrag.engine.ai.fingerprints import ModelFingerprint
 from dlightrag.engine.ai.scheduler import model_call_scope
 from dlightrag.engine.ai.settings import MODEL_ROLE_NAMES, ModelRole
 from dlightrag.engine.ai.telemetry import Telemetry, safe_log_text
+from dlightrag.engine.answer.capabilities import (
+    AnswerCapabilityCoordinator,
+    RequestModelContext,
+)
 from dlightrag.engine.answer.citations.finalization import finalize_answer
+from dlightrag.engine.answer.citations.sources import project_contexts_for_client
 from dlightrag.engine.answer.citations.streaming import aclose_answer_stream
 from dlightrag.engine.answer.compaction import CompactionCoordinator
+from dlightrag.engine.answer.errors import (
+    AnswerInputError,
+    AnswerResourceAdmissionError,
+    CurrentImagePayloadError,
+    InvalidToolConfigurationError,
+    classify_answer_error,
+)
+from dlightrag.engine.answer.execution.input import (
+    AnswerRunInput,
+    AnswerRunRequest,
+    AttachmentReference,
+    LinkReference,
+    build_current_answer_resources,
+    validate_active_answer_input,
+)
 from dlightrag.engine.answer.fast import FastRunBoundaries, FastSessionHost, ensure_session_lane
 from dlightrag.engine.answer.highlights import SemanticHighlightSettings, enrich_semantic_highlights
 from dlightrag.engine.answer.history import HistoryInputMeasure, HistoryProjectionTarget
+from dlightrag.engine.answer.image_capability import (
+    AnswerImageCapability,
+    check_answer_image_capability,
+    check_answer_image_count,
+)
 from dlightrag.engine.answer.images import AnswerImageBudget
 from dlightrag.engine.answer.media import evidence_images_from_sources
 from dlightrag.engine.answer.memory import memory_owner_allowed, render_auto_recall
+from dlightrag.engine.answer.mode import ModeResource, ResolvedMode, resource_role
 from dlightrag.engine.answer.model_runtime import AnswerModelRuntime
 from dlightrag.engine.answer.orchestration import AnswerOrchestrator
 from dlightrag.engine.answer.publication import (
@@ -142,7 +141,9 @@ from dlightrag.engine.answer.resources.registry import (
     FetchedBytesSink,
 )
 from dlightrag.engine.answer.resources.visual import ResourceInspector
+from dlightrag.engine.answer.results import store_answer_result
 from dlightrag.engine.answer.router import AnswerModeRouter
+from dlightrag.engine.answer.runs.routing import AnswerRoutingStore, decide_resolved_mode
 from dlightrag.engine.answer.tools.memory import MemoryHost
 from dlightrag.engine.answer.tools.resources import build_resource_tools, make_resource_reader
 from dlightrag.engine.answer.tools.subagents import (
@@ -170,20 +171,22 @@ from dlightrag.engine.rag.retrieval import (
 )
 from dlightrag.engine.rag.workspace.lifecycle import defer_cancellation
 from dlightrag.engine.rag.workspace.pool import WorkspacePool
-from dlightrag.engine.runtime import (
-    AlreadyCommittedTerminal,
-    Deferred,
-    IncompatibleActiveRunError,
+from dlightrag.engine.runtime.coordinator import (
     LeaseLostError,
     RunCancellationObserved,
-    RunExecutionError,
-    RunExecutionOutcome,
     RunSession,
-    Succeeded,
+)
+from dlightrag.engine.runtime.errors import (
+    IncompatibleActiveRunError,
+    RunExecutionError,
 )
 from dlightrag.engine.runtime.records import (
+    AlreadyCommittedTerminal,
+    Deferred,
     PendingPublication,
+    RunExecutionOutcome,
     RunFetchedResource,
+    Succeeded,
     artifact_digest,
 )
 from dlightrag.engine.runtime.settlements import (
@@ -750,9 +753,16 @@ class AnswerExecutor:
         )
 
     async def aclose(self) -> None:
-        """Close process execution before the durable coordinator drains runs."""
+        """Finish adapter-owned process cleanup after the coordinator stops claims."""
         if self._execution_adapter is not None:
             await self._execution_adapter.aclose()
+
+    def validate_active_prepared_input(self, prepared: Mapping[str, Any]) -> None:
+        """Validate active durable Answer input using the executor's model bindings."""
+        validate_active_answer_input(
+            prepared,
+            model_fingerprint_for_role=self._model_fingerprint_for_role,
+        )
 
     def acceptance_research_tools(self) -> tuple[AgentTool, ...]:
         """Return non-resource definitions execution may expose to Research.

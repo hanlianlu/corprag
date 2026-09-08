@@ -40,19 +40,19 @@ from dlightrag.application.answer_runs import (
     ChildRosterPageRequest,
 )
 from dlightrag.application.answer_runs import AnswerRequest as ServiceAnswerRequest
-from dlightrag.application.answer_runs.client_contracts import conversation_history_as_dicts
-from dlightrag.application.answer_runs.execution import ResourceInput
-from dlightrag.application.answer_runs.resource_links import answer_link_resources
-from dlightrag.application.answer_runs.results import (
-    answer_parts_from_markdown,
-    project_answer_result,
-    project_artifact_sources,
-)
-from dlightrag.application.answer_runs.sources import SourceDownloadLinkBuilder
 from dlightrag.application.config import AnswerConfig
 from dlightrag.application.corpus_admin import safe_source_filename
 from dlightrag.application.retrieval import RetrievalOptions
 from dlightrag.application.runs import IdempotencyKeyConflict, RunAdmissionLimitExceededError
+from dlightrag.engine.answer.citations.sources import SourceDownloadLinkBuilder
+from dlightrag.engine.answer.client_contracts import conversation_history_as_dicts
+from dlightrag.engine.answer.execution.input import ResourceInput
+from dlightrag.engine.answer.resources.links import answer_link_resources
+from dlightrag.engine.answer.results import (
+    answer_parts_from_markdown,
+    project_answer_result,
+    project_artifact_sources,
+)
 
 from .deps import (
     authorized_workspaces,

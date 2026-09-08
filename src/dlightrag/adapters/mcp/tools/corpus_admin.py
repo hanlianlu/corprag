@@ -21,7 +21,6 @@ from dlightrag.adapters.mcp.server import (
     mcp_app,
 )
 from dlightrag.application.access import AccessAction
-from dlightrag.application.answer_runs.capability import answer_image_capability_summary
 from dlightrag.application.corpus_admin import (
     FILE_PANEL_PAGE_DEFAULT_LIMIT,
     FILE_PANEL_PAGE_MAX_LIMIT,
@@ -36,6 +35,7 @@ from dlightrag.application.corpus_admin import (
     validate_workspace_name,
 )
 from dlightrag.application.runs import RunAdmissionLimitExceededError, RunCreation
+from dlightrag.engine.answer.image_capability import answer_image_capability_summary
 
 
 async def _accepted_corpus_mutation(operation: Awaitable[RunCreation]) -> dict[str, Any]:

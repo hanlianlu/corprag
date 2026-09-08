@@ -4,7 +4,7 @@ import logging
 
 import pytest
 
-from dlightrag.application.answer_runs.citations import ChunkSnippet, SourceReference
+from dlightrag.engine.answer.citations.contracts import ChunkSnippet, SourceReference
 from dlightrag.engine.answer.citations.highlight import (
     HighlightExtractor,
     HighlightPhrases,
@@ -131,7 +131,7 @@ class TestHighlightExtractor:
     @pytest.mark.asyncio
     async def test_doc_level_citation_triggers_highlights(self, mock_llm):
         """Doc-level [n] citations should trigger highlights for all chunks of that source."""
-        from dlightrag.application.answer_runs.citations import ChunkSnippet
+        from dlightrag.engine.answer.citations.contracts import ChunkSnippet
         from dlightrag.engine.answer.citations.highlight import extract_highlights_for_sources
 
         sources = [
@@ -158,7 +158,7 @@ class TestHighlightExtractor:
         mock_llm,
         caplog: pytest.LogCaptureFixture,
     ):
-        from dlightrag.application.answer_runs.citations import ChunkSnippet
+        from dlightrag.engine.answer.citations.contracts import ChunkSnippet
         from dlightrag.engine.answer.citations.highlight import extract_highlights_for_sources
 
         sources = [

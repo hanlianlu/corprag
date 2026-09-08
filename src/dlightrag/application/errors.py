@@ -4,7 +4,7 @@
 import math
 
 from dlightrag.engine.dependencies import TransientDependencyError
-from dlightrag.engine.runtime import RunSchemaError
+from dlightrag.engine.runtime.errors import RunSchemaError
 
 
 class ApplicationClosedError(RuntimeError):

@@ -34,7 +34,7 @@ from dlightrag.engine.answer.tools.subagents import (
     child_session_id,
     subagent_tools,
 )
-from dlightrag.engine.runtime import RunCancellationObserved
+from dlightrag.engine.runtime.coordinator import RunCancellationObserved
 from tests.in_memory_session_repository import InMemoryAgentSessionRepository
 from tests.tool_helpers import tool_runtime
 from tests.unit.conftest import answer_image_policy, answer_model_profile

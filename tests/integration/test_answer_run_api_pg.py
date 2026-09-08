@@ -32,7 +32,6 @@ from dlightrag.adapters.postgres.runtime import PGRunBlobStore
 from dlightrag.adapters.postgres.runtime.run_store import PGRunStore
 from dlightrag.application.access import UserContext, owner_id_from_user
 from dlightrag.application.answer_runs import AnswerService
-from dlightrag.application.answer_runs.capabilities import AnswerCapabilities, RequestModelContext
 from dlightrag.application.config import DlightragConfig, set_config
 from dlightrag.application.runs import RunService
 from dlightrag.engine.ai.capacity import ModelProfile
@@ -44,6 +43,7 @@ from dlightrag.engine.ai.settings import (
     ModelRoleSettings,
     ModelSettings,
 )
+from dlightrag.engine.answer.capabilities import AnswerCapabilities, RequestModelContext
 from tests.integration.pg_conn import PG_CONN_KWARGS
 
 pytestmark = [

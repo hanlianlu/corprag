@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -81,14 +81,13 @@ def _compose(config: DlightragConfig) -> _ApplicationComponents:
     from dlightrag.adapters.postgres.runtime import PGRunBlobStore, PGRunStore
     from dlightrag.adapters.postgres.web.web_conversations import PGWebConversationStore
     from dlightrag.application.answer_runs import AnswerService
-    from dlightrag.application.answer_runs.capabilities import (
-        AnswerCapabilityCoordinator,
-        AnswerCapabilityView,
-    )
     from dlightrag.application.corpus_admin import (
         CorpusAdmin,
         CorpusMutationExecutor,
         CorpusMutationService,
+    )
+    from dlightrag.application.corpus_admin.mutations import (
+        validate_corpus_mutation_prepared_input,
     )
     from dlightrag.application.health import ApplicationHealth
     from dlightrag.application.memory import MemoryService
@@ -123,6 +122,10 @@ def _compose(config: DlightragConfig) -> _ApplicationComponents:
     from dlightrag.engine.ai.settings import MODEL_ROLE_NAMES, ModelRole
     from dlightrag.engine.ai.telemetry import safe_log_text
     from dlightrag.engine.ai.vision import ModelImageCapabilities
+    from dlightrag.engine.answer.capabilities import (
+        AnswerCapabilityCoordinator,
+        AnswerCapabilityView,
+    )
     from dlightrag.engine.answer.execution import AnswerExecutor, AnswerResourceResolver
     from dlightrag.engine.answer.model_runtime import AnswerModelRuntime
     from dlightrag.engine.rag.corpus.downloads import SourceDownloadService
@@ -133,7 +136,9 @@ def _compose(config: DlightragConfig) -> _ApplicationComponents:
     from dlightrag.engine.rag.workspace.ports import CorpusSchemaError
     from dlightrag.engine.rag.workspace.workspace_rag import WorkspaceRag
     from dlightrag.engine.rag.workspace.workspaces import normalize_workspace
-    from dlightrag.engine.runtime import RunCoordinator, RunExecutor, RunKind
+    from dlightrag.engine.runtime.contracts import RunKind
+    from dlightrag.engine.runtime.coordinator import RunCoordinator, RunExecutor
+    from dlightrag.engine.runtime.errors import IncompatibleActiveRunError, RunExecutionError
 
     # Large document scans are DlightRAG product policy, not an AI package import side effect.
     Image.MAX_IMAGE_PIXELS = MAX_DECODE_IMAGE_PIXELS
@@ -393,6 +398,31 @@ def _compose(config: DlightragConfig) -> _ApplicationComponents:
             maintenance=corpus_backend.maintenance,
             store=run_store,
         )
+
+    async def validate_active_runs() -> None:
+        """Compose operation-owned durable-input checks at the process boundary."""
+        async for requirement in run_store.iter_active_run_requirements():
+            kind = requirement.get("run_kind")
+            prepared = requirement.get("prepared_input")
+            try:
+                if not isinstance(prepared, Mapping):
+                    raise ValueError("prepared_input must be an object")
+                if kind == "answer":
+                    answer_executor.validate_active_prepared_input(prepared)
+                elif kind == "retrieval":
+                    retrieval_executor.validate_active_prepared_input(prepared)
+                elif kind == "corpus_mutation":
+                    validate_corpus_mutation_prepared_input(prepared)
+                else:
+                    raise ValueError("unsupported active run kind")
+            except IncompatibleActiveRunError:
+                raise
+            except (AttributeError, KeyError, TypeError, ValueError, RunExecutionError) as exc:
+                raise IncompatibleActiveRunError(
+                    f"active {kind or 'unknown'} runs use an incompatible durable input schema; "
+                    "drain or owner-cancel them before deployment"
+                ) from exc
+
     coordinator = RunCoordinator(
         store=run_store,
         executors=executors,
@@ -455,6 +485,7 @@ def _compose(config: DlightragConfig) -> _ApplicationComponents:
         web_store=web_store,
         coordinator=coordinator,
         cancellation_listener=cancellation_listener,
+        validate_active_runs=validate_active_runs,
         corpora=corpora,
         corpus_mutations=corpus_mutations,
         retrieval=retrieval,

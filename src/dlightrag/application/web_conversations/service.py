@@ -18,21 +18,21 @@ from dlightrag.application.answer_runs import (
     AnswerRunAcceptor,
     AnswerService,
 )
-from dlightrag.application.answer_runs.execution import AnswerRunRequest
-from dlightrag.application.answer_runs.routing import RoutingAcceptance
 from dlightrag.application.runs import RunView
 from dlightrag.engine.agent.session.fold import PriorTurns
 from dlightrag.engine.ai.media import thumbnail_bytes
+from dlightrag.engine.answer.execution.input import AnswerRunRequest
 from dlightrag.engine.answer.history import (
     HistoryProjectionTarget,
     IncrementalHistoryProjector,
 )
 from dlightrag.engine.answer.resources.models import ResourceInput
-from dlightrag.engine.runtime import (
+from dlightrag.engine.answer.runs.routing import RoutingAcceptance
+from dlightrag.engine.runtime.contracts import RunKind
+from dlightrag.engine.runtime.records import (
     PendingArtifact,
     PendingArtifactReference,
     PreparedRunEnvelope,
-    RunKind,
     parse_run_id,
     run_request_fingerprint,
 )

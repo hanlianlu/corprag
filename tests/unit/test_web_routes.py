@@ -14,7 +14,6 @@ from httpx import ASGITransport, AsyncClient
 from dlightrag.adapters.http.browser.attachment_models import SUPPORTED_DOCUMENT_EXTENSIONS
 from dlightrag.adapters.http.server import create_app
 from dlightrag.application.access import DEPLOYMENT_OWNER_ID
-from dlightrag.application.answer_runs.capability import AnswerImageCapability
 from dlightrag.application.config import DlightragConfig
 from dlightrag.application.corpus_admin import (
     FilePanelCursor,
@@ -25,6 +24,7 @@ from dlightrag.application.corpus_admin import (
 )
 from dlightrag.application.runs import RunAdmissionLimitExceededError
 from dlightrag.engine.agent.skills import owner_skill_root
+from dlightrag.engine.answer.image_capability import AnswerImageCapability
 from tests.config_helpers import mutate_config
 from tests.unit.conftest import answer_capability_view
 
@@ -1420,7 +1420,7 @@ class TestSourcePresentation:
 
     def test_page_number_and_download_are_projected(self) -> None:
         from dlightrag.adapters.http.browser.presentation import build_answer_presentation
-        from dlightrag.application.answer_runs.citations import ChunkSnippet, SourceReferencePayload
+        from dlightrag.engine.answer.citations.contracts import ChunkSnippet, SourceReferencePayload
 
         presentation = build_answer_presentation(
             answer="Answer [1].",

@@ -17,7 +17,7 @@ import pytest
 
 from dlightrag.application.corpus_admin.mutations import CorpusMutationExecutor
 from dlightrag.engine.dependencies import ParserUnavailableError, TransientDependencyError
-from dlightrag.engine.runtime import RunCoordinator
+from dlightrag.engine.runtime.coordinator import RunCoordinator
 from tests.integration.pg_conn import PG_CONN_KWARGS
 from tests.integration.run_runtime_pg_harness import isolated_run_runtime, run_envelope
 

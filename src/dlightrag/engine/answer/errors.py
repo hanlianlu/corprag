@@ -117,25 +117,6 @@ class AnswerResourceAdmissionError(AnswerInputError):
         )
 
 
-# Memory exceptions are canonical in dlightrag_memory so the package can
-# raise them without depending on the root product; root re-exports them for
-# every existing surface that branches on their identity.
-from dlightrag_memory.errors import (  # noqa: E402
-    MemoryUnavailableError,
-    MemoryWriteRejectedError,
-)
-
-
-class MemoryDisabledError(Exception):
-    """The owner explicitly deactivated Profile Memory."""
-
-    error_kind = "memory_disabled"
-    public_message = "Profile Memory is not active for this owner."
-
-    def __init__(self) -> None:
-        super().__init__(self.public_message)
-
-
 class InvalidToolConfigurationError(RuntimeError):
     """A run composed two peer tools that share one model-visible name.
 
@@ -176,9 +157,6 @@ __all__ = [
     "AnswerInputError",
     "AnswerImageError",
     "AnswerInputOverflowError",
-    "MemoryDisabledError",
-    "MemoryUnavailableError",
-    "MemoryWriteRejectedError",
     "AnswerModelCapabilityError",
     "AnswerResourceAdmissionError",
     "CurrentDocumentParseError",

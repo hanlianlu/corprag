@@ -6,27 +6,12 @@ from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, TypeAlias
 
-from dlightrag.engine.runtime import (
-    CancellationOutcome as RuntimeCancellationOutcome,
-)
-from dlightrag.engine.runtime import (
-    RunCreation as RuntimeRunCreation,
-)
-from dlightrag.engine.runtime import (
-    RunEvent as RuntimeRunEvent,
-)
-from dlightrag.engine.runtime import (
-    RunRecord as RuntimeRunRecord,
-)
+from dlightrag.engine.runtime.contracts import RunKind, RunLane, RunPhase, RunStatus
+from dlightrag.engine.runtime.records import CancellationOutcome as RuntimeCancellationOutcome
+from dlightrag.engine.runtime.records import RunCreation as RuntimeRunCreation
+from dlightrag.engine.runtime.records import RunEvent as RuntimeRunEvent
+from dlightrag.engine.runtime.records import RunRecord as RuntimeRunRecord
 
-RunStatus: TypeAlias = Literal[  # noqa: UP040 - preserve the inline OpenAPI enum
-    "queued", "running", "succeeded", "failed", "cancelled"
-]
-RunKind: TypeAlias = Literal[  # noqa: UP040 - preserve caller contract introspection
-    "retrieval", "answer", "corpus_mutation"
-]
-RunLane: TypeAlias = Literal["query", "corpus_mutation"]  # noqa: UP040
-RunPhase: TypeAlias = str  # noqa: UP040 - executor-owned labels remain open
 RunCancellationResult: TypeAlias = Literal[  # noqa: UP040
     "unknown", "cancelled", "pending", "already_terminal", "rejected"
 ]

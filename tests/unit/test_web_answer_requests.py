@@ -12,7 +12,7 @@ from httpx import ASGITransport, AsyncClient
 from PIL import Image
 
 from dlightrag.adapters.http.browser.attachment_requests import parse_web_answer_request
-from dlightrag.application.answer_runs.capability import AnswerImageCapability
+from dlightrag.engine.answer.image_capability import AnswerImageCapability
 
 _IMAGE_MAX_BYTES = 15 * 1024 * 1024
 

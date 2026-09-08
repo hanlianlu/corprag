@@ -607,9 +607,10 @@ and all ingest, replace, exact delete, retry, and reset Runs on the Corpus
 Mutation Lane. Each lane has a per-process worker bound and a deployment-wide
 nonterminal admission limit. Deployment configuration owns process count and
 therefore total active Run capacity. The [Slice 6 validation
-report](validation/run-runtime-slice-6.md) records the 10k-client fake-executor
-campaign, admission-limit rejection, single-process worker occupancy,
-measurements, and limitations.
+report](validation/run-runtime-slice-6.md) records 10,000 local Query
+control-plane submissions plus the mutation submissions, one-process/one-database
+fake-executor occupancy, the mutation admission-limit rejection, measurements,
+and limitations. It does not exercise the 30,000 Query limit or a multi-host topology.
 
 `run_retention_days` is the per-Run retention selection for terminal Answer
 Runs, their event logs, linked Web turns, and unreferenced Run blobs; the default

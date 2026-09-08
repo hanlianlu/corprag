@@ -10,10 +10,6 @@ _SOURCE_ROOTS = (_ROOT / "src", _ROOT / "packages")
 _POSTGRES_ADAPTER = _ROOT / "src/dlightrag/adapters/postgres"
 _MEMORY_PG_ADAPTER = _ROOT / "packages/memory/src/dlightrag_memory/_storage"
 _RAG_CORE = _ROOT / "src/dlightrag/engine/rag"
-_RAG_OFFLINE_REBUILD = {
-    _RAG_CORE / "corpus" / "rebuild_bm25.py",
-    _RAG_CORE / "corpus" / "rebuild_vdb.py",
-}
 _RAW_SQL_RE = re.compile(
     r"\b(?:SELECT\b.{0,500}\bFROM|INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|"
     r"CREATE\s+(?:TABLE|INDEX)|ALTER\s+TABLE|DROP\s+INDEX)\b",
@@ -172,12 +168,7 @@ def test_owner_modules_do_not_import_the_postgres_adapter() -> None:
         _ROOT / "src/dlightrag/engine/runtime",
         _RAG_CORE,
     )
-    owner_files = [
-        path
-        for root in owner_roots
-        for path in root.rglob("*.py")
-        if path not in _RAG_OFFLINE_REBUILD
-    ]
+    owner_files = [path for root in owner_roots for path in root.rglob("*.py")]
     owner_files.append(_ROOT / "src/dlightrag/adapters/http/rest/routes/status.py")
 
     offenders: list[Path] = []
@@ -206,8 +197,6 @@ def test_rag_core_contains_no_postgres_schema_or_raw_sql() -> None:
     offenders: list[Path] = []
     assert _RAG_CORE.is_dir()
     for path in _RAG_CORE.rglob("*.py"):
-        if path in _RAG_OFFLINE_REBUILD:
-            continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         docstrings: set[int] = set()
         for node in ast.walk(tree):

@@ -11,8 +11,8 @@ from typing import Any, Literal
 from pydantic import Field
 
 from dlightrag.adapters.http.browser.presentation import AnswerPresentation
-from dlightrag.application.answer_runs.client_contracts import ClientContractModel
 from dlightrag.application.runs import RunPhase
+from dlightrag.engine.answer.client_contracts import ClientContractModel
 
 
 class AnswerProgressEvent(ClientContractModel):

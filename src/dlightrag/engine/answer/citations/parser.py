@@ -11,7 +11,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any
 
-from dlightrag.application.answer_runs.citations import CITATION_PATTERN, DOC_CITATION_PATTERN
+from dlightrag.engine.answer.citations.contracts import CITATION_PATTERN, DOC_CITATION_PATTERN
 
 from .indexer import CitationIndexer
 

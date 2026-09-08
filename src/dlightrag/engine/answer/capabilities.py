@@ -4,17 +4,17 @@
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 
-from dlightrag.application.answer_runs.capability import (
-    AnswerImageCapability,
-    answer_image_capability_summary,
-    derive_effective_max_images,
-)
 from dlightrag.engine.ai.capacity import ModelProfile
 from dlightrag.engine.ai.settings import MODEL_ROLE_NAMES, ModelRole, ModelSettings
 from dlightrag.engine.ai.vision import (
     ImageCapabilityStatus,
     ImageProbeOutcome,
     ModelImageCapabilities,
+)
+from dlightrag.engine.answer.image_capability import (
+    AnswerImageCapability,
+    answer_image_capability_summary,
+    derive_effective_max_images,
 )
 from dlightrag.engine.answer.images import AnswerImagePolicy
 

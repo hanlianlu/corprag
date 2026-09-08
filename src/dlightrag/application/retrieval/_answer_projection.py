@@ -4,17 +4,17 @@
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from dlightrag.application.answer_runs.capabilities import AnswerCapabilityCoordinator
-from dlightrag.application.answer_runs.sources import (
-    SourceDownloadLinkBuilder,
-    project_contexts_for_client,
-    project_source_payloads,
-)
 from dlightrag.application.retrieval import (
     ProjectedRetrieval,
     RetrieveProjection,
 )
+from dlightrag.engine.answer.capabilities import AnswerCapabilityCoordinator
 from dlightrag.engine.answer.citations.source_builder import build_sources
+from dlightrag.engine.answer.citations.sources import (
+    SourceDownloadLinkBuilder,
+    project_contexts_for_client,
+    project_source_payloads,
+)
 from dlightrag.engine.answer.model_runtime import AnswerModelRuntime
 from dlightrag.engine.answer.resources.images import prepare_query_images
 from dlightrag.engine.rag.retrieval import RetrievalResult

@@ -35,7 +35,10 @@ from dlightrag.application.retrieval import (
 )
 from dlightrag.application.retrieval._answer_projection import project_answer_retrieval
 from dlightrag.application.runs import RunView
-from dlightrag.engine.runtime import RunAccessScope, RunRecord
+from dlightrag.engine.runtime.records import (
+    RunAccessScope,
+    RunRecord,
+)
 from tests.config_helpers import mutate_config, replace_config
 from tests.unit.conftest import answer_capability_view
 
@@ -247,7 +250,7 @@ def _stored_result() -> dict[str, Any]:
 async def test_get_capabilities_reports_answer_image_capability(
     mock_mcp_application: AsyncMock,
 ) -> None:
-    from dlightrag.application.answer_runs.capability import AnswerImageCapability
+    from dlightrag.engine.answer.image_capability import AnswerImageCapability
 
     mock_mcp_application.answers.capabilities = answer_capability_view(
         AnswerImageCapability(
@@ -1088,7 +1091,7 @@ async def test_mcp_resume_requeues_the_same_authorized_repair_run(
 async def test_mcp_answer_preserves_answer_input_error_kind(
     mock_mcp_application: AsyncMock,
 ) -> None:
-    from dlightrag.application.answer_runs.errors import (
+    from dlightrag.engine.answer.errors import (
         ANSWER_INPUT_OVERFLOW,
         AnswerInputOverflowError,
     )
@@ -1108,7 +1111,7 @@ async def test_mcp_answer_reports_tool_misconfiguration_as_a_server_failure(
     mock_mcp_application: AsyncMock,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    from dlightrag.application.answer_runs.errors import (
+    from dlightrag.engine.answer.errors import (
         INVALID_TOOL_CONFIGURATION,
         InvalidToolConfigurationError,
     )

@@ -12,15 +12,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from PIL import Image
 
-from dlightrag.application.answer_runs.capabilities import (
-    AnswerCapabilities,
-    AnswerCapabilityCoordinator,
-    AnswerCapabilityView,
-)
-from dlightrag.application.answer_runs.capability import (
-    AnswerImageCapability,
-    derive_effective_max_images,
-)
 from dlightrag.application.config import DlightragConfig
 from dlightrag.application.settings import (
     answer_capability_settings,
@@ -42,7 +33,16 @@ from dlightrag.engine.ai.vision import (
     ImageProbeOutcome,
     ModelImageCapabilities,
 )
+from dlightrag.engine.answer.capabilities import (
+    AnswerCapabilities,
+    AnswerCapabilityCoordinator,
+    AnswerCapabilityView,
+)
 from dlightrag.engine.answer.execution import AnswerResourceResolver
+from dlightrag.engine.answer.image_capability import (
+    AnswerImageCapability,
+    derive_effective_max_images,
+)
 from tests.config_helpers import mutate_config, replace_config
 
 

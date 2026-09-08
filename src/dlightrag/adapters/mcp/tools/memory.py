@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Annotated, Any, Literal
 
 from dlightrag_memory import MemoryProvenance
+from dlightrag_memory.errors import MemoryUnavailableError, MemoryWriteRejectedError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
@@ -14,11 +15,7 @@ from dlightrag.adapters.mcp.server import (
     mcp_app,
 )
 from dlightrag.application.access import current_request_scope
-from dlightrag.application.answer_runs.errors import (
-    MemoryDisabledError,
-    MemoryUnavailableError,
-    MemoryWriteRejectedError,
-)
+from dlightrag.application.memory import MemoryDisabledError
 from dlightrag.application.memory.projections import memory_receipt_payload
 
 

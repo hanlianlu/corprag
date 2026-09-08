@@ -3,13 +3,13 @@
 
 import pytest
 
-from dlightrag.application.answer_runs.client_contracts import AnswerRequestContract
-from dlightrag.application.answer_runs.errors import (
+from dlightrag.engine.answer.client_contracts import AnswerRequestContract
+from dlightrag.engine.answer.errors import (
     UnsupportedAnswerModeError,
     UnsupportedResourceCapabilityError,
 )
-from dlightrag.application.answer_runs.execution import AnswerRunRequest
-from dlightrag.application.answer_runs.mode import (
+from dlightrag.engine.answer.execution.input import AnswerRunRequest
+from dlightrag.engine.answer.mode import (
     ModeCapability,
     ModeResource,
     canonical_answer_mode,
@@ -17,7 +17,7 @@ from dlightrag.application.answer_runs.mode import (
     resource_role,
     valid_modes,
 )
-from dlightrag.engine.runtime import run_request_fingerprint
+from dlightrag.engine.runtime.records import run_request_fingerprint
 
 
 def test_omitted_mode_canonicalizes_to_auto_and_matches_explicit_auto_fingerprint() -> None:

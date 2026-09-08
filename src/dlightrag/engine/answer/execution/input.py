@@ -12,14 +12,16 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from dlightrag.application.answer_runs.mode import canonical_answer_mode
 from dlightrag.engine.agent.session.plan import AgentRunPlan
-from dlightrag.engine.ai.capacity import ModelProfile
+from dlightrag.engine.ai.capacity import CONTEXT_POLICY_REVISION, ModelProfile
+from dlightrag.engine.ai.catalog import current_model_catalog_revision
 from dlightrag.engine.ai.fingerprints import ModelFingerprint
 from dlightrag.engine.ai.reasoning import REASONING_LEVELS, ReasoningLevels, ReasoningProfile
+from dlightrag.engine.ai.settings import MODEL_ROLE_NAMES, ModelRole
+from dlightrag.engine.answer.mode import canonical_answer_mode
 from dlightrag.engine.answer.resources.models import ResourceInput
 from dlightrag.engine.rag.retrieval import RetrievalOptions
-from dlightrag.engine.runtime.errors import RunExecutionError
+from dlightrag.engine.runtime.errors import IncompatibleActiveRunError, RunExecutionError
 
 
 @dataclass(frozen=True, slots=True)
@@ -397,6 +399,46 @@ class AnswerRunInput:
         return cls.from_request(prepared)
 
 
+def validate_active_answer_input(
+    prepared: Mapping[str, Any],
+    *,
+    model_fingerprint_for_role: Callable[[ModelRole], ModelFingerprint],
+) -> None:
+    """Require one active Answer input to remain executable by this deployment."""
+    try:
+        run_input = AnswerRunInput.from_prepared_input(prepared)
+    except (AttributeError, KeyError, TypeError, ValueError, RunExecutionError) as exc:
+        raise IncompatibleActiveRunError(
+            "active answer runs use an incompatible durable input schema; "
+            "drain or owner-cancel them before deployment"
+        ) from exc
+    pinned = {item.role: item for item in run_input.pinned_models}
+    if len(run_input.pinned_models) != len(MODEL_ROLE_NAMES) or set(pinned) != set(
+        MODEL_ROLE_NAMES
+    ):
+        raise IncompatibleActiveRunError(
+            "active answer runs do not contain the required model role set; "
+            "drain or owner-cancel them before deployment"
+        )
+    if run_input.context_policy_revision != CONTEXT_POLICY_REVISION:
+        raise IncompatibleActiveRunError(
+            "active answer runs use another context policy revision; "
+            "drain or owner-cancel them before deployment"
+        )
+    if run_input.model_catalog_revision != current_model_catalog_revision():
+        raise IncompatibleActiveRunError(
+            "active answer runs use another model catalog revision; "
+            "drain or owner-cancel them before deployment"
+        )
+    if any(
+        pinned[role].fingerprint != model_fingerprint_for_role(role) for role in MODEL_ROLE_NAMES
+    ):
+        raise IncompatibleActiveRunError(
+            "active answer runs target another model endpoint configuration; "
+            "drain or owner-cancel them before deployment"
+        )
+
+
 def _attachment_references(value: Any) -> tuple[AttachmentReference, ...]:
     return tuple(
         AttachmentReference(
@@ -465,4 +507,5 @@ __all__ = [
     "LinkReference",
     "PinnedModelProfile",
     "ResourceInput",
+    "validate_active_answer_input",
 ]

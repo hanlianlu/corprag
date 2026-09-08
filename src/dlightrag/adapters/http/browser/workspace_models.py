@@ -2,7 +2,7 @@
 """Shared browser workspace contracts for bootstrap and catalog pages."""
 
 from dlightrag.application.access import WorkspaceRecord
-from dlightrag.application.answer_runs.client_contracts import ClientContractModel
+from dlightrag.engine.answer.client_contracts import ClientContractModel
 
 
 class WebBootstrapWorkspace(ClientContractModel):

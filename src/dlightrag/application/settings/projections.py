@@ -8,10 +8,6 @@ from dlightrag.application.access import (
     AccessSettings,
     AuthenticationSettings,
 )
-from dlightrag.application.answer_runs.capabilities import (
-    AnswerCapabilitySettings,
-    AnswerImagePolicySettings,
-)
 from dlightrag.application.config import DlightragConfig
 from dlightrag.application.corpus_admin import CorpusAdminSettings
 from dlightrag.application.retrieval import RetrievalSettings
@@ -20,6 +16,10 @@ from dlightrag.engine.ai.catalog import resolve_model_profile
 from dlightrag.engine.ai.fingerprints import model_fingerprint
 from dlightrag.engine.ai.reasoning import resolve_reasoning
 from dlightrag.engine.ai.settings import ModelRole, ModelSettings
+from dlightrag.engine.answer.capabilities import (
+    AnswerCapabilitySettings,
+    AnswerImagePolicySettings,
+)
 from dlightrag.engine.answer.execution import (
     AnswerExecutorSettings,
     AnswerResourceSettings,
