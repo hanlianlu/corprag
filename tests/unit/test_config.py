@@ -53,7 +53,7 @@ def test_defaults_preserve_runtime_contract(tmp_path: Path) -> None:
     assert config.deployment.service_role == "writer"
     assert config.deployment.workspace == "default"
     assert config.storage.postgres.port == 5432
-    assert config.models.chat.default.model == "google/gemini-3.7-flash"
+    assert config.models.chat.default.model == "google/gemini-3.8-flash"
     assert config.models.chat.default.structured_output == "auto"
     assert config.models.embedding.dim == 1024
     assert config.models.embedding.batch_size == 64

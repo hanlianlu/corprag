@@ -112,12 +112,12 @@ def test_root_resolves_model_profiles_independently_per_role() -> None:
         models={
             "chat": ModelRoleSettings(
                 default=ModelSettings(
-                    model="google/gemini-3.7-flash",
+                    model="google/gemini-3.8-flash",
                     base_url="https://openrouter.ai/api/v1",
                 ),
                 roles=ModelRoleOverrides(
                     extract=ModelSettings(
-                        model="deepseek-v4-flash",
+                        model="deepseek-v4.1-flash",
                         base_url="https://api.deepseek.com",
                         api_key=None,
                     ),
@@ -360,7 +360,7 @@ async def test_structured_output_auto_prefers_json_schema_for_compatible_endpoin
     model = CompletionModel(
         ModelSettings(
             provider="openai",
-            model="deepseek-v4-flash",
+            model="deepseek-v4.1-flash",
             api_key="sk-test",
             base_url="https://api.deepseek.com",
         ),

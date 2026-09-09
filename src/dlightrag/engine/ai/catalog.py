@@ -6,7 +6,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from importlib.resources import files
@@ -24,7 +23,7 @@ from dlightrag.engine.ai.reasoning import (
 
 _logger = logging.getLogger(__name__)
 
-_ROOT_KEYS = frozenset({"revision", "models"})
+_ROOT_KEYS = frozenset({"models"})
 _MODEL_KEYS = frozenset({"provider", "model", "base_url", "profile"})
 _PROFILE_KEYS = frozenset(
     {
@@ -37,7 +36,6 @@ _PROFILE_KEYS = frozenset(
 )
 _REASONING_KEYS = frozenset({"format", "levels"})
 _REASONING_LEVEL_KEYS = frozenset(REASONING_LEVELS)
-_REVISION_PATTERN = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 
 class _JSONObject:
@@ -491,7 +489,7 @@ def _model_catalog_revision(models: list[object]) -> str:
 
 
 def _parse_catalog(text: str) -> tuple[str, tuple[CatalogueEntry, ...]]:
-    """Parse and validate built-in catalogue JSON without fallback behavior."""
+    """Parse the built-in catalogue and derive its canonical content revision."""
     root = _require_object(_decode_catalog_json(text), path="root", keys=_ROOT_KEYS)
     models_value = root["models"]
     if type(models_value) is not list:
@@ -510,14 +508,7 @@ def _parse_catalog(text: str) -> tuple[str, tuple[CatalogueEntry, ...]]:
         entries.append(entry)
         fingerprint_indices[entry.fingerprint] = index
 
-    revision_value = root["revision"]
-    if type(revision_value) is not str or _REVISION_PATTERN.fullmatch(revision_value) is None:
-        raise RuntimeError("root.revision has invalid form; expected sha256:<64 lowercase hex>")
-    revision = cast(str, revision_value)
-    expected_revision = _model_catalog_revision(models)
-    if revision != expected_revision:
-        raise RuntimeError("root.revision does not match canonical models content")
-    return revision, tuple(entries)
+    return _model_catalog_revision(models), tuple(entries)
 
 
 def _load_catalog() -> tuple[str, tuple[CatalogueEntry, ...]]:

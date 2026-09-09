@@ -141,7 +141,7 @@ def _write_workspace_artifacts(
 ) -> None:
     root_sources = dict(root_additional_sources or {})
     if root_include_model_catalog:
-        root_sources["engine/ai/model_catalog.json"] = '{"revision":"test","models":[]}'
+        root_sources["engine/ai/model_catalog.json"] = '{"models":[]}'
     _write_wheel(
         tmp_path,
         distribution="dlightrag",

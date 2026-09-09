@@ -1,5 +1,4 @@
 {
-  "revision": "sha256:d602d91b22b4d049fab2c5ec45493dd480b0eff80b660e5c45e22f30d102cfb2",
   "models": [
     {
       "provider": "anthropic",
@@ -95,13 +94,13 @@
     },
     {
       "provider": "openai",
-      "model": "deepseek-v4-flash",
+      "model": "deepseek-v4.1-flash",
       "base_url": "https://api.deepseek.com",
       "profile": {
         "context_window_tokens": 1048576,
         "max_input_tokens": null,
         "max_output_tokens": 384000,
-        "supports_images": false,
+        "supports_images": true,
         "reasoning": {
           "format": "deepseek",
           "levels": {
@@ -118,13 +117,13 @@
     },
     {
       "provider": "openai",
-      "model": "deepseek/deepseek-v4-flash",
+      "model": "deepseek/deepseek-v4.1-flash",
       "base_url": "https://openrouter.ai/api/v1",
       "profile": {
         "context_window_tokens": 1048576,
         "max_input_tokens": null,
         "max_output_tokens": 384000,
-        "supports_images": false,
+        "supports_images": true,
         "reasoning": {
           "format": "openrouter",
           "levels": {
@@ -140,54 +139,8 @@
       }
     },
     {
-      "provider": "openai",
-      "model": "deepseek-v4-flash-vision-exp",
-      "base_url": "https://api.deepseek.com",
-      "profile": {
-        "context_window_tokens": 1048576,
-        "max_input_tokens": null,
-        "max_output_tokens": 384000,
-        "supports_images": true,
-        "reasoning": {
-          "format": "deepseek",
-          "levels": {
-            "off": "disabled",
-            "minimal": null,
-            "low": "low",
-            "medium": null,
-            "high": "high",
-            "xhigh": "high",
-            "max": "max"
-          }
-        }
-      }
-    },
-    {
-      "provider": "openai",
-      "model": "deepseek/deepseek-v4-flash-vision-exp",
-      "base_url": "https://openrouter.ai/api/v1",
-      "profile": {
-        "context_window_tokens": 1048576,
-        "max_input_tokens": null,
-        "max_output_tokens": 384000,
-        "supports_images": true,
-        "reasoning": {
-          "format": "openrouter",
-          "levels": {
-            "off": "disabled",
-            "minimal": null,
-            "low": "low",
-            "medium": null,
-            "high": "high",
-            "xhigh": "high",
-            "max": "max"
-          }
-        }
-      }
-    },
-    {
       "provider": "gemini",
-      "model": "gemini-3.7-flash",
+      "model": "gemini-3.8-flash",
       "base_url": null,
       "profile": {
         "context_window_tokens": 1048576,
@@ -210,7 +163,7 @@
     },
     {
       "provider": "openai",
-      "model": "google/gemini-3.7-flash",
+      "model": "google/gemini-3.8-flash",
       "base_url": "https://openrouter.ai/api/v1",
       "profile": {
         "context_window_tokens": 1048576,

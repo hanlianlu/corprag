@@ -1,7 +1,6 @@
 # Copyright 2025-2026 Hanlian Lu. SPDX-License-Identifier: Apache-2.0
 """Strict parsing and content-addressing tests for the packaged model catalog."""
 
-import hashlib
 import json
 import re
 from collections.abc import Sequence
@@ -99,17 +98,6 @@ _QWEN_ROUTER_LEVELS = {
 }
 
 
-def _canonical_revision(models: Sequence[object]) -> str:
-    canonical = json.dumps(
-        models,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-    return f"sha256:{hashlib.sha256(canonical).hexdigest()}"
-
-
 def _valid_model(
     *,
     provider: object = "openai",
@@ -142,11 +130,7 @@ def _valid_model(
 
 
 def _payload(models: Sequence[object] | None = None) -> dict[str, object]:
-    resolved_models = list(models) if models is not None else [_valid_model()]
-    return {
-        "revision": _canonical_revision(resolved_models),
-        "models": resolved_models,
-    }
+    return {"models": list(models) if models is not None else [_valid_model()]}
 
 
 def _load_text(
@@ -173,12 +157,12 @@ def _load_payload(
     )
 
 
-def test_packaged_catalog_revision_is_bound_to_canonical_models() -> None:
+def test_packaged_catalog_revision_is_derived_from_models() -> None:
     path = Path(catalog.__file__).with_name("model_catalog.json")
     payload = json.loads(path.read_text(encoding="utf-8"))
 
-    assert re.fullmatch(r"sha256:[0-9a-f]{64}", payload["revision"])
-    assert payload["revision"] == _canonical_revision(payload["models"])
+    assert set(payload) == {"models"}
+    assert re.fullmatch(r"sha256:[0-9a-f]{64}", catalog.MODEL_CATALOG_REVISION)
 
 
 @pytest.mark.parametrize(
@@ -245,7 +229,7 @@ def test_packaged_catalog_revision_is_bound_to_canonical_models() -> None:
         ),
         (
             "gemini",
-            "gemini-3.7-flash",
+            "gemini-3.8-flash",
             None,
             1_048_576,
             None,
@@ -312,22 +296,12 @@ def test_packaged_catalogue_contains_requested_endpoint_profiles(
     assert profile.reasoning.levels.as_dict() == reasoning_levels
 
 
-@pytest.mark.parametrize(
-    ("model", "supports_images"),
-    [
-        ("deepseek-v4-flash", False),
-        ("deepseek-v4-flash-vision-exp", True),
-    ],
-)
-def test_packaged_catalogue_contains_corrected_native_deepseek_profiles(
-    model: str,
-    supports_images: bool,
-) -> None:
+def test_packaged_catalogue_contains_native_multimodal_deepseek_profile() -> None:
     matches = [
         entry
         for entry in catalog._BUILTIN_MODEL_ENTRIES
         if (entry.provider, entry.model, entry.base_url)
-        == ("openai", model, "https://api.deepseek.com")
+        == ("openai", "deepseek-v4.1-flash", "https://api.deepseek.com")
     ]
 
     assert len(matches) == 1
@@ -335,7 +309,7 @@ def test_packaged_catalogue_contains_corrected_native_deepseek_profiles(
     assert profile.context_window_tokens == 1_048_576
     assert profile.max_input_tokens is None
     assert profile.max_output_tokens == 384_000
-    assert profile.supports_images is supports_images
+    assert profile.supports_images is True
     assert profile.reasoning is not None
     assert profile.reasoning.format == "deepseek"
     assert profile.reasoning.levels.as_dict() == _DEEPSEEK_CURRENT_LEVELS
@@ -361,23 +335,15 @@ def test_packaged_catalogue_contains_corrected_native_deepseek_profiles(
             _ANTHROPIC_LEVELS,
         ),
         (
-            "deepseek/deepseek-v4-flash",
-            1_048_576,
-            None,
-            384_000,
-            False,
-            _DEEPSEEK_ROUTER_LEVELS,
-        ),
-        (
-            "deepseek/deepseek-v4-flash-vision-exp",
+            "deepseek/deepseek-v4.1-flash",
             1_048_576,
             None,
             384_000,
             True,
-            _DEEPSEEK_CURRENT_LEVELS,
+            _DEEPSEEK_ROUTER_LEVELS,
         ),
         (
-            "google/gemini-3.7-flash",
+            "google/gemini-3.8-flash",
             1_048_576,
             None,
             65_536,
@@ -486,7 +452,7 @@ def test_catalog_rejects_malformed_json_without_leaking_source(
 ) -> None:
     with pytest.raises(RuntimeError, match="model catalog is not valid JSON") as exc_info:
         _load_text(
-            '{"revision":"should-not-leak",',
+            '{"models":["should-not-leak",',
             monkeypatch=monkeypatch,
             tmp_path=tmp_path,
         )
@@ -500,22 +466,24 @@ def test_catalog_rejects_nonstandard_json_constants(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    text = '{"revision":"sha256:' + "0" * 64 + f'","models":[{constant}]}}'
+    text = f'{{"models":[{constant}]}}'
 
     with pytest.raises(RuntimeError, match="model catalog is not valid JSON"):
         _load_text(text, monkeypatch=monkeypatch, tmp_path=tmp_path)
 
 
-def test_catalog_rejects_semantic_change_with_retained_revision(
+def test_catalog_revision_changes_with_semantic_content(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     payload = _payload()
+    original_revision, _ = _load_payload(payload, monkeypatch=monkeypatch, tmp_path=tmp_path)
     profile = payload["models"][0]["profile"]  # type: ignore[index]
     profile["max_output_tokens"] = 64  # type: ignore[index]
 
-    with pytest.raises(RuntimeError, match="revision"):
-        _load_payload(payload, monkeypatch=monkeypatch, tmp_path=tmp_path)
+    changed_revision, _ = _load_payload(payload, monkeypatch=monkeypatch, tmp_path=tmp_path)
+
+    assert changed_revision != original_revision
 
 
 @pytest.mark.parametrize(
@@ -591,7 +559,7 @@ def test_catalog_rejects_non_exact_profile_json_types(
     ("payload", "path"),
     [
         ([], "root"),
-        ({"revision": f"sha256:{'0' * 64}", "models": {}}, "root.models"),
+        ({"models": {}}, "root.models"),
         (_payload([None]), "models[0]"),
         (_payload([{"provider": "openai"}]), "models[0]"),
         (_payload([{**_valid_model(), "profile": []}]), "models[0].profile"),
@@ -610,7 +578,7 @@ def test_catalog_rejects_invalid_root_models_item_and_profile_shapes(
 @pytest.mark.parametrize(
     ("level", "key", "change"),
     [
-        ("root", "revision", "missing"),
+        ("root", "revision", "extra"),
         ("root", "models", "missing"),
         ("root", "unexpected", "extra"),
         ("model", "base_url", "missing"),
@@ -639,8 +607,6 @@ def test_catalog_rejects_missing_and_extra_keys(
         container.pop(key)
     else:
         container[key] = "unexpected"
-    if "revision" in payload:
-        payload["revision"] = _canonical_revision(payload.get("models", []))  # type: ignore[arg-type]
     path = {"root": "root", "model": "models[0]", "profile": "models[0].profile"}[level]
 
     with pytest.raises(RuntimeError, match=re.escape(f"{path}.{key}")):
@@ -733,27 +699,6 @@ def test_catalog_rejects_duplicate_json_members(
 
 
 @pytest.mark.parametrize(
-    ("revision", "message"),
-    [
-        ("2026-08-23", "form"),
-        (f"sha256:{'A' * 64}", "form"),
-        (f"sha256:{'0' * 64}", "does not match"),
-    ],
-)
-def test_catalog_rejects_invalid_revision_form_and_digest(
-    revision: str,
-    message: str,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    payload = _payload()
-    payload["revision"] = revision
-
-    with pytest.raises(RuntimeError, match=rf"root\.revision.*{message}"):
-        _load_payload(payload, monkeypatch=monkeypatch, tmp_path=tmp_path)
-
-
-@pytest.mark.parametrize(
     ("field", "value"),
     [
         ("context_window_tokens", 0),
@@ -786,7 +731,7 @@ def test_catalog_accepts_complete_profiles_with_null_and_valid_http_endpoints(
 
     revision, parsed = _load_payload(payload, monkeypatch=monkeypatch, tmp_path=tmp_path)
 
-    assert revision == _canonical_revision(models)
+    assert re.fullmatch(r"sha256:[0-9a-f]{64}", revision)
     assert isinstance(parsed, tuple)
     assert parsed[0].fingerprint == ModelFingerprint(
         provider="openai", model="default-endpoint", endpoint_fingerprint=None

@@ -275,7 +275,7 @@ models:
     roles:
       extract:
         provider: openai
-        model: deepseek-v4-flash
+        model: deepseek-v4.1-flash
         base_url: https://api.deepseek.com
 ```
 
@@ -342,8 +342,10 @@ models:
       reasoning: max
 ```
 
-Startup catalogue changes require restart. Runtime overlay operations and
-revision rules are in [Interfaces](interfaces.md#model-catalogue-and-profile-memory).
+Catalogue revisions are derived from canonical catalogue content and are never
+configured manually. Startup catalogue changes require restart. Runtime overlay
+operations and revision rules are in
+[Interfaces](interfaces.md#model-catalogue-and-profile-memory).
 
 `agentic_reasoning` inherits `reasoning`. When typed reasoning is configured,
 raw provider reasoning keys in `model_kwargs` are rejected to keep one owner for
@@ -362,7 +364,7 @@ models:
     roles:
       extract:
         provider: openai
-        model: deepseek-v4-flash
+        model: deepseek-v4.1-flash
         base_url: https://api.deepseek.com
         structured_output: json_object
 ```

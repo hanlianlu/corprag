@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx2
 import pytest
 
 from dlightrag.engine.ai.messages import ToolDefinition
@@ -14,6 +15,14 @@ from dlightrag.engine.ai.providers.openai_compatible import (
     OpenAICompatibleProvider,
     _openai_tool_messages,
 )
+
+
+def _openai_error_response(status_code: int) -> httpx2.Response:
+    """Build the HTTP response type used by the OpenAI SDK transport."""
+    return httpx2.Response(
+        status_code,
+        request=httpx2.Request("POST", "https://t/v1"),
+    )
 
 
 class TestCompletionProviderABC:
@@ -829,7 +838,6 @@ class TestOpenAICompatibleProvider:
 
     @pytest.mark.asyncio
     async def test_stream_falls_back_when_stream_options_unsupported(self):
-        import httpx
         from openai import BadRequestError
 
         p = get_provider("openai", api_key="test-key")
@@ -847,7 +855,7 @@ class TestOpenAICompatibleProvider:
             if "stream_options" in kwargs:
                 raise BadRequestError(
                     "stream_options unsupported",
-                    response=httpx.Response(400, request=httpx.Request("POST", "https://t/v1")),
+                    response=_openai_error_response(400),
                     body=None,
                 )
             return _fake_stream()
@@ -889,7 +897,6 @@ class TestOpenAICompatibleProvider:
         message: str,
         body: dict[str, Any] | None,
     ):
-        import httpx
         from openai import BadRequestError
 
         p = get_provider("openai", api_key="test-key")
@@ -906,10 +913,7 @@ class TestOpenAICompatibleProvider:
             if "stream_options" in kwargs:
                 raise BadRequestError(
                     message,
-                    response=httpx.Response(
-                        400,
-                        request=httpx.Request("POST", "https://t/v1"),
-                    ),
+                    response=_openai_error_response(400),
                     body=body,
                 )
             return _fake_stream()
@@ -929,7 +933,6 @@ class TestOpenAICompatibleProvider:
 
     @pytest.mark.asyncio
     async def test_stream_falls_back_for_422_stream_options_validation(self):
-        import httpx
         from openai import UnprocessableEntityError
 
         p = get_provider("openai", api_key="test-key")
@@ -946,10 +949,7 @@ class TestOpenAICompatibleProvider:
             if "stream_options" in kwargs:
                 raise UnprocessableEntityError(
                     "Request validation failed",
-                    response=httpx.Response(
-                        422,
-                        request=httpx.Request("POST", "https://t/v1"),
-                    ),
+                    response=_openai_error_response(422),
                     body={
                         "detail": [
                             {
@@ -976,7 +976,6 @@ class TestOpenAICompatibleProvider:
 
     @pytest.mark.asyncio
     async def test_stream_does_not_retry_provider_content_inspection_error(self):
-        import httpx
         from openai import BadRequestError
 
         p = get_provider("openai", api_key="test-key")
@@ -999,7 +998,7 @@ class TestOpenAICompatibleProvider:
             calls.append(kwargs)
             raise BadRequestError(
                 "Provider returned error",
-                response=httpx.Response(400, request=httpx.Request("POST", "https://t/v1")),
+                response=_openai_error_response(400),
                 body=error_body,
             )
 
@@ -1070,7 +1069,7 @@ class TestOpenAICompatibleProvider:
         mock_response.choices = [MagicMock(message=MagicMock(content="hi"))]
         with patch.object(p, "_get_client") as mock_client:
             mock_client.return_value.chat.completions.create = AsyncMock(return_value=mock_response)
-            result = await p.complete([{"role": "user", "content": "hi"}], "deepseek-v4-flash")
+            result = await p.complete([{"role": "user", "content": "hi"}], "deepseek-v4.1-flash")
         assert result.usage_details == {
             "prompt_tokens": 10,
             "completion_tokens": 5,

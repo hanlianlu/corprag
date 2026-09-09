@@ -590,7 +590,7 @@ def e2e_base_url(
         models={
             "chat": ModelRoleSettings(
                 default=ModelSettings(
-                    model="google/gemini-3.7-flash",
+                    model="google/gemini-3.8-flash",
                     base_url="https://openrouter.ai/api/v1",
                     api_key="test",
                 )

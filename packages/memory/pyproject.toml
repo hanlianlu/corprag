@@ -2,7 +2,7 @@
 
 [project]
 name = "dlightrag-memory"
-version = "2.0.6"
+version = "2.0.7"
 description = "Reusable cross-conversation profile memory for DlightRAG"
 requires-python = ">=3.14"
 license = "Apache-2.0"

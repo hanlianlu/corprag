@@ -15,28 +15,26 @@ models:
     roles:
       extract:
         provider: openai
-        model: deepseek-v4-flash
+        model: deepseek-v4.1-flash
         base_url: https://api.deepseek.com
-        structured_output: json_object
         temperature: 0.0
         reasoning: "off"
       keyword:
         provider: openai
-        model: deepseek-v4-flash
+        model: deepseek-v4.1-flash
         base_url: https://api.deepseek.com
-        structured_output: json_object
         temperature: 0.0
         reasoning: "off"
       query:
         provider: openai
-        model: deepseek-v4-flash-vision-exp
+        model: deepseek-v4.1-flash
         base_url: https://api.deepseek.com
         temperature: 0.7
         reasoning: "off"
         agentic_reasoning: high
       vlm:
         provider: openai
-        model: deepseek-v4-flash-vision-exp
+        model: deepseek-v4.1-flash
         base_url: https://api.deepseek.com
         temperature: 0.0
         reasoning: "off"

@@ -75,13 +75,13 @@ class ProviderSpec:
 PROVIDERS_LLM: dict[str, ProviderSpec] = {
     "OpenAI": ProviderSpec("openai", "https://api.openai.com/v1", default_model="gpt-5.6-terra"),
     "DeepSeek": ProviderSpec(
-        "openai", "https://api.deepseek.com", default_model="deepseek-v4-flash"
+        "openai", "https://api.deepseek.com", default_model="deepseek-v4.1-flash"
     ),
     "OpenRouter": ProviderSpec(
-        "openai", "https://openrouter.ai/api/v1", default_model="google/gemini-3.7-flash"
+        "openai", "https://openrouter.ai/api/v1", default_model="google/gemini-3.8-flash"
     ),
     "Anthropic": ProviderSpec("anthropic", None, default_model="claude-sonnet-5"),
-    "Gemini": ProviderSpec("gemini", None, default_model="gemini-3.7-flash"),
+    "Gemini": ProviderSpec("gemini", None, default_model="gemini-3.8-flash"),
     "Azure OpenAI": ProviderSpec("openai", None, requires_url=True),
     "Other (OpenAI-compatible)": ProviderSpec(
         "openai", None, requires_url=True, requires_key=False
