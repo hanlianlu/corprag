@@ -1,121 +1,114 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="920" viewBox="0 0 1500 920" role="img" aria-labelledby="title description">
-  <title id="title">DlightRAG Web frontend ownership</title>
-  <desc id="description">Inside the browser process, Vite document startup boots the dl-app Shell. The Shell composes light-DOM Lit Feature owners for conversation navigation, chat, Inspector, Artifact Canvas, and shared controls. The Shell coordinates source opening: desktop Side and Wide layouts persist, Fullscreen reduces to Wide, and compact Canvas closes for the Inspector drawer. Features receive an AppHandles store bag, use RunController, same-origin API clients, and the package-owned design system (Shadow primitives such as dl-split-layout). Artifact Canvas alone loads untrusted active HTML into an explicit-consent opaque-origin iframe. API clients call the FastAPI Web adapter over same-origin HTTP and server-sent events.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="820" viewBox="0 0 1500 820" role="img" aria-labelledby="frontend-title frontend-description">
+  <title id="frontend-title">DlightRAG Web frontend ownership</title>
+  <desc id="frontend-description">Vite startup and build concerns are an unconnected caption, not a runtime owner. Inside the browser, the main document contains the dl-app Shell and collective light-DOM Lit Feature owners. Features use focused shared state, a browser API boundary, and the package design system; Chat privately owns RunController and run following and replay. Artifact Canvas may load active HTML into an explicit-consent opaque-origin iframe. Same-origin API clients call the FastAPI Web Adapter over HTTP and server-sent events. Every solid arrow means browser-time composition or invocation.</desc>
   <defs>
-    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <marker id="frontend-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
       <path d="M 0 1.2 L 8 5 L 0 8.8 z" class="arrow-head"/>
     </marker>
     <style>
       :root { color-scheme: light dark; }
       .canvas { fill: #fafaf9; }
-      .browser { fill: #f5f5f4; stroke: #d6d3d1; stroke-width: 1; }
-      .document, .feature-group { fill: #fff; stroke: #d6d3d1; stroke-width: 1; }
-      .heading { fill: #1c1917; font: 600 25px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: -0.03em; }
-      .subtitle, .note { fill: #57534e; font: 400 14px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
-      .group-title { fill: #57534e; font: 600 11px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: 0.14em; }
-      .node-title { fill: #292524; font: 600 16px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: -0.01em; }
-      .small-title { fill: #292524; font: 600 14.5px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: -0.01em; }
-      .node-copy { fill: #57534e; font: 400 13.5px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
-      .edge-label { fill: #57534e; font: 500 12px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
-      .entry, .feature, .external { fill: #f5f5f4; stroke: #d6d3d1; stroke-width: 1; }
-      .shell, .state, .design-system { fill: #f7de9d; fill-opacity: 0.24; stroke: #d2b661; stroke-width: 1; }
-      .isolated { fill: #f7de9d; fill-opacity: 0.18; stroke: #d2b661; stroke-width: 1; stroke-dasharray: 5 4; }
-      .edge { fill: none; stroke: #78716c; stroke-width: 1.35; marker-end: url(#arrow); }
-      .arrow-head { fill: #78716c; }
+      .browser { fill: #f5f5f4; stroke: #d6d3d1; stroke-width: 1.2; }
+      .area { fill: none; stroke: #c7c2bd; stroke-width: 1.2; }
+      .node { fill: #fff; stroke: #d6d3d1; stroke-width: 1.2; }
+      .shell, .state { fill: #f7f2e5; stroke: #c6a85d; stroke-width: 1.2; }
+      .features { fill: #edf4ee; stroke: #86a38b; stroke-width: 1.3; }
+      .design { fill: #eef2f3; stroke: #8da4ad; stroke-width: 1.2; }
+      .isolated { fill: #fff; stroke: #8b827d; stroke-width: 1.2; stroke-dasharray: 7 5; }
+      .heading { fill: #1c1917; font: 600 27px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: -0.03em; }
+      .subtitle, .caption, .note, .edge-label { fill: #57534e; font: 400 15px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+      .group-title { fill: #57534e; font: 650 15px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: 0.1em; }
+      .node-title { fill: #292524; font: 600 18px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: -0.01em; }
+      .node-copy { fill: #57534e; font: 400 15px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+      .edge { fill: none; stroke: #69635f; stroke-width: 1.55; marker-end: url(#frontend-arrow); }
+      .arrow-head { fill: #69635f; }
       @media (prefers-color-scheme: dark) {
         .canvas { fill: #0c0a09; }
         .browser { fill: #1c1917; stroke: #292524; }
-        .document, .feature-group, .entry, .feature, .external { fill: #292524; stroke: #44403c; }
-        .heading, .node-title, .small-title { fill: #f5f5f4; }
-        .subtitle, .note, .edge-label { fill: #a8a29e; }
+        .area { stroke: #57534e; }
+        .node, .isolated { fill: #292524; stroke: #57534e; }
+        .shell, .state { fill: #342e1c; stroke: #8f783f; }
+        .features { fill: #19291d; stroke: #62806a; }
+        .design { fill: #17262b; stroke: #607c86; }
+        .heading, .node-title { fill: #f5f5f4; }
+        .subtitle, .caption, .note, .edge-label { fill: #a8a29e; }
         .group-title, .node-copy { fill: #d6d3d1; }
-        .shell, .state, .design-system { fill: #574a24; fill-opacity: 0.55; stroke: #7e6c37; }
-        .isolated { fill: #574a24; fill-opacity: 0.45; stroke: #7e6c37; }
-        .edge { stroke: #78716c; }
-        .arrow-head { fill: #78716c; }
+        .edge { stroke: #a8a29e; }
+        .arrow-head { fill: #a8a29e; }
       }
     </style>
   </defs>
 
-  <rect class="canvas" width="1500" height="920"/>
+  <rect class="canvas" width="1500" height="820"/>
   <text class="heading" x="750" y="42" text-anchor="middle">DlightRAG — Web Frontend Ownership</text>
-  <text class="subtitle" x="750" y="70" text-anchor="middle">Browser composition, focused state, shared design-system contracts, and the active-artifact trust boundary</text>
+  <text class="subtitle" x="750" y="72" text-anchor="middle">Main-document Feature hosts, browser modules, isolated iframe content, and the server boundary</text>
 
-  <rect class="browser" x="40" y="100" width="1120" height="780" rx="18"/>
-  <text class="group-title" x="70" y="134">BROWSER PROCESS</text>
+  <rect class="browser" x="40" y="100" width="1090" height="675" rx="18"/>
+  <text class="group-title" x="70" y="130">BROWSER PROCESS</text>
+  <text class="caption" x="585" y="160" text-anchor="middle">STARTUP / BUILD CONTEXT · Vite supplies the document entry, pre-paint theme, locale, and built assets</text>
 
-  <rect class="document" x="70" y="155" width="1060" height="610" rx="14"/>
-  <text class="group-title" x="95" y="185">MAIN DOCUMENT · LIGHT DOM</text>
+  <rect class="area" x="70" y="180" width="1030" height="305" rx="14"/>
+  <text class="group-title" x="95" y="208">MAIN DOCUMENT · LIGHT DOM</text>
 
-  <rect class="entry" x="100" y="210" width="430" height="95" rx="12"/>
-  <text class="node-title" x="315" y="247" text-anchor="middle">Vite document and entry</text>
-  <text class="node-copy" x="315" y="277" text-anchor="middle">index.html · theme-init · locale init · main.ts</text>
+  <rect class="shell" x="100" y="235" width="330" height="145" rx="12"/>
+  <text class="node-title" x="265" y="270" text-anchor="middle">dl-app Shell</text>
+  <text class="node-copy" x="265" y="300" text-anchor="middle">constructs browser handles + routes</text>
+  <text class="node-copy" x="265" y="328" text-anchor="middle">composes layout</text>
+  <text class="node-copy" x="265" y="356" text-anchor="middle">mediates source handoff</text>
 
-  <rect class="shell" x="650" y="210" width="440" height="95" rx="12"/>
-  <text class="node-title" x="870" y="247" text-anchor="middle">dl-app Shell</text>
-  <text class="node-copy" x="870" y="277" text-anchor="middle">route · layout · source handoff · accessibility</text>
+  <rect class="features" x="480" y="220" width="590" height="235" rx="14"/>
+  <text class="node-title" x="775" y="253" text-anchor="middle">Collective light-DOM Lit Feature owners</text>
+  <text class="node-copy" x="775" y="283" text-anchor="middle">Conversation · Chat · Inspector</text>
+  <text class="node-copy" x="775" y="309" text-anchor="middle">Artifact Canvas · shared UI</text>
+  <text class="node-copy" x="775" y="341" text-anchor="middle">typed properties in · typed events out</text>
+  <text class="node-copy" x="775" y="373" text-anchor="middle">Features own interaction and async lifecycle</text>
+  <text class="node-copy" x="775" y="405" text-anchor="middle">Chat privately owns RunController</text>
+  <text class="node-copy" x="775" y="431" text-anchor="middle">and run following / replay</text>
 
-  <rect class="feature-group" x="90" y="350" width="1020" height="215" rx="14"/>
-  <text class="group-title" x="115" y="380">LIGHT-DOM LIT FEATURE OWNERS</text>
+  <rect class="design" x="70" y="515" width="300" height="105" rx="12"/>
+  <text class="group-title" x="90" y="541">DESIGN SYSTEM</text>
+  <text class="node-title" x="220" y="568" text-anchor="middle">Open-Shadow primitives</text>
+  <text class="node-copy" x="220" y="592" text-anchor="middle">tokens · icons · foundations</text>
+  <text class="node-copy" x="220" y="613" text-anchor="middle">no product state</text>
 
-  <rect class="feature" x="110" y="405" width="176" height="130" rx="10"/>
-  <text class="small-title" x="198" y="438" text-anchor="middle">Conversation Sidebar</text>
-  <text class="node-copy" x="198" y="472" text-anchor="middle">route + drawer lifecycle</text>
-  <text class="node-copy" x="198" y="497" text-anchor="middle">Conversation List</text>
+  <rect class="isolated" x="70" y="635" width="300" height="115" rx="12"/>
+  <text class="group-title" x="90" y="661">ISOLATED CHILD DOCUMENT</text>
+  <text class="node-title" x="220" y="688" text-anchor="middle">Artifact iframe</text>
+  <text class="node-copy" x="220" y="714" text-anchor="middle">opaque srcdoc · explicit consent</text>
+  <text class="node-copy" x="220" y="738" text-anchor="middle">destroyed on close</text>
 
-  <rect class="feature" x="306" y="405" width="176" height="130" rx="10"/>
-  <text class="small-title" x="394" y="438" text-anchor="middle">Chat Feature</text>
-  <text class="node-copy" x="394" y="472" text-anchor="middle">Message List</text>
-  <text class="node-copy" x="394" y="497" text-anchor="middle">Composer</text>
+  <rect class="area" x="400" y="515" width="700" height="230" rx="14"/>
+  <text class="group-title" x="425" y="543">BROWSER MODULES · STATE AND API BOUNDARY</text>
 
-  <rect class="feature" x="502" y="405" width="176" height="130" rx="10"/>
-  <text class="small-title" x="590" y="438" text-anchor="middle">Inspector</text>
-  <text class="node-copy" x="590" y="472" text-anchor="middle">Sources · Files</text>
-  <text class="node-copy" x="590" y="497" text-anchor="middle">pane · compact drawer</text>
+  <rect class="state" x="425" y="560" width="310" height="165" rx="12"/>
+  <text class="node-title" x="580" y="592" text-anchor="middle">Focused shared state</text>
+  <text class="node-copy" x="580" y="621" text-anchor="middle">History routing · AppHandles stores</text>
+  <text class="node-copy" x="580" y="649" text-anchor="middle">conversations · workspaces · ingest</text>
+  <text class="node-copy" x="580" y="677" text-anchor="middle">attachments</text>
+  <text class="node-copy" x="580" y="705" text-anchor="middle">answer-event cursors</text>
 
-  <rect class="feature" x="698" y="405" width="176" height="130" rx="10"/>
-  <text class="small-title" x="786" y="438" text-anchor="middle">Artifact Canvas</text>
-  <text class="node-copy" x="786" y="472" text-anchor="middle">renderers · preview</text>
-  <text class="node-copy" x="786" y="497" text-anchor="middle">Side · Wide · Fullscreen</text>
+  <rect class="node" x="765" y="560" width="310" height="165" rx="12"/>
+  <text class="node-title" x="920" y="592" text-anchor="middle">Browser API boundary</text>
+  <text class="node-copy" x="920" y="621" text-anchor="middle">wire validation</text>
+  <text class="node-copy" x="920" y="649" text-anchor="middle">same-origin API clients</text>
+  <text class="node-copy" x="920" y="677" text-anchor="middle">/web/api/* commands + queries</text>
+  <text class="node-copy" x="920" y="705" text-anchor="middle">server-sent events</text>
 
-  <rect class="feature" x="894" y="405" width="176" height="130" rx="10"/>
-  <text class="small-title" x="982" y="438" text-anchor="middle">Shared UI owners</text>
-  <text class="node-copy" x="982" y="472" text-anchor="middle">Settings · Toast</text>
-  <text class="node-copy" x="982" y="497" text-anchor="middle">Lightbox · controls</text>
+  <rect class="node" x="1180" y="545" width="280" height="180" rx="14"/>
+  <text class="group-title" x="1205" y="574">SERVER PROCESS</text>
+  <text class="node-title" x="1320" y="611" text-anchor="middle">FastAPI Web Adapter</text>
+  <text class="node-copy" x="1320" y="642" text-anchor="middle">page + hashed assets</text>
+  <text class="node-copy" x="1320" y="670" text-anchor="middle">/web/api/* · SSE</text>
+  <text class="node-copy" x="1320" y="698" text-anchor="middle">authentication + CSRF boundary</text>
 
-  <rect class="design-system" x="100" y="620" width="430" height="110" rx="12"/>
-  <text class="node-title" x="315" y="655" text-anchor="middle">Package-owned design system</text>
-  <text class="node-copy" x="315" y="684" text-anchor="middle">foundations · semantic icons · Shadow primitives</text>
-  <text class="node-copy" x="315" y="707" text-anchor="middle">public index.ts / index.css · dl-split-layout</text>
+  <path class="edge" d="M 430 307.5 H 480"/>
+  <path class="edge" d="M 600 455 V 505 H 220 V 515"/>
+  <path class="edge" d="M 700 455 V 490 H 390 V 642.5 H 425"/>
+  <path class="edge" d="M 1070 350 H 1115 V 642.5 H 1075"/>
+  <path class="edge" d="M 480 410 H 385 V 692.5 H 370"/>
+  <text class="edge-label" x="430" y="397" text-anchor="middle">Canvas loads</text>
+  <path class="edge" d="M 1075 642.5 H 1180"/>
+  <text class="edge-label" x="1127" y="629" text-anchor="middle">HTTP · SSE</text>
 
-  <rect class="state" x="650" y="620" width="440" height="110" rx="12"/>
-  <text class="node-title" x="870" y="655" text-anchor="middle">Browser state and control</text>
-  <text class="node-copy" x="870" y="684" text-anchor="middle">History router · AppHandles · RunController</text>
-  <text class="node-copy" x="870" y="707" text-anchor="middle">same-origin API clients · SSE replay / resume</text>
-
-  <rect class="isolated" x="680" y="800" width="430" height="60" rx="12"/>
-  <text class="node-title" x="895" y="826" text-anchor="middle">Opaque-origin artifact iframe</text>
-  <text class="node-copy" x="895" y="849" text-anchor="middle">explicit consent · srcdoc · Escape-only parent signal</text>
-
-  <rect class="external" x="1200" y="570" width="260" height="180" rx="14"/>
-  <text class="group-title" x="1225" y="604">SERVER RUNTIME</text>
-  <text class="node-title" x="1330" y="642" text-anchor="middle">FastAPI Web adapter</text>
-  <text class="node-copy" x="1330" y="674" text-anchor="middle">page + hashed assets</text>
-  <text class="node-copy" x="1330" y="699" text-anchor="middle">/web/api/* · SSE</text>
-  <text class="node-copy" x="1330" y="724" text-anchor="middle">authentication + CSRF boundary</text>
-
-  <path class="edge" d="M 530 257.5 H 650"/>
-  <text class="edge-label" x="590" y="243" text-anchor="middle">boots</text>
-  <path class="edge" d="M 870 305 V 350"/>
-  <text class="edge-label" x="885" y="333">composes</text>
-  <path class="edge" d="M 400 565 V 590 H 315 V 620"/>
-  <text class="edge-label" x="335" y="605">renders with</text>
-  <path class="edge" d="M 800 565 V 590 H 870 V 620"/>
-  <text class="edge-label" x="850" y="605" text-anchor="end">uses</text>
-  <path class="edge" d="M 786 535 V 585 H 1110 V 800"/>
-  <text class="edge-label" x="1095" y="780" text-anchor="end">loads</text>
-  <path class="edge" d="M 1090 675 H 1200"/>
-  <text class="edge-label" x="1145" y="661" text-anchor="middle">HTTP · SSE</text>
-
-  <text class="note" x="750" y="902" text-anchor="middle">Source handoff: Side stays Side · Wide stays Wide · Fullscreen → Wide · compact Canvas closes for Inspector</text>
+  <text class="note" x="750" y="805" text-anchor="middle">Solid arrows mean browser-time composition or invocation; they do not describe source-directory hierarchy.</text>
 </svg>

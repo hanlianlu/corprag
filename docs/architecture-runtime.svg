@@ -1,180 +1,129 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1200" viewBox="0 0 1600 1200" role="img" aria-labelledby="title description">
-  <title id="title">DlightRAG runtime ownership</title>
-  <desc id="description">Inside one DlightRAG process, inbound HTTP and MCP adapters call the transport-neutral Application Access policy before protected calls and invoke Application services separately; public status calls reach the Application facade directly. The trusted embedded Python Application interface also calls the facade directly. Application owns lifecycle and service accessors. Web Conversations accepts runs through Answer Service. Answer and top-level Retrieval pin prepared input and schedule durable Query-lane work through Engine Runtime. Corpus Administration schedules ingest, replace, delete, retry, and reset through the same Runtime's Corpus Mutation lane. Runtime dispatches injected Retrieval and Corpus Mutation executors before those executors call Engine RAG; Answer-internal retrieval uses the raw Retrieval Stage directly without a nested Run. Engine Answer projects optimistic provider streams, while Agent owns durable Assistant Turns and atomic ToolResult plus Host-update settlements. Parent Research Artifact attachments become fenced terminal publications. Retrieval and Corpus Administration use Engine RAG. Memory is an Application capability over the independent Memory package. Model Catalogue publication invalidates Answer capability profiles. Engine Answer, Agent, and RAG call provider-neutral AI, and RAG reaches LightRAG.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1020" viewBox="0 0 1800 1020" role="img" aria-labelledby="runtime-title runtime-description">
+  <title id="runtime-title">DlightRAG runtime ownership</title>
+  <desc id="runtime-description">One DlightRAG process has three visible code zones: Adapters, Application, and Engine. Inbound HTTP and MCP Adapters invoke Application use cases; trusted embedded callers enter the Application facade directly. Application invokes contracts owned by Engine. Runtime, Answer, RAG, Agent, and AI are sibling owners inside one prominent Engine zone. Outbound PostgreSQL and observability Adapters implement narrow owner ports. Solid arrows mean runtime invocation through an owner contract and do not mean a concrete import. Dashed arrows mean the private composition root constructs and injects collaborators; composition is not part of the request path.</desc>
   <defs>
-    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <marker id="runtime-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
       <path d="M 0 1.2 L 8 5 L 0 8.8 z" class="arrow-head"/>
     </marker>
     <style>
       :root { color-scheme: light dark; }
       .canvas { fill: #fafaf9; }
-      .boundary, .service-group { fill: #f5f5f4; stroke: #d6d3d1; stroke-width: 1; }
-      .heading { fill: #1c1917; font: 600 25px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: -0.03em; }
-      .subtitle, .note { fill: #57534e; font: 400 14px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
-      .boundary-title { fill: #57534e; font: 600 11px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: 0.14em; }
-      .node-title { fill: #292524; font: 600 16px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: -0.01em; }
-      .small-title { fill: #292524; font: 600 14.5px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: -0.01em; }
-      .node-copy { fill: #57534e; font: 400 13.5px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
-      .edge-label { fill: #57534e; font: 500 12px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
-      .interface, .service, .module { fill: #fff; stroke: #d6d3d1; stroke-width: 1; }
-      .facade, .access, .policy { fill: #f7de9d; fill-opacity: 0.24; stroke: #d2b661; stroke-width: 1; }
-      .foundation, .external { fill: #f5f5f4; stroke: #d2b661; stroke-width: 1; }
-      .edge { fill: none; stroke: #78716c; stroke-width: 1.35; marker-end: url(#arrow); }
-      .arrow-head { fill: #78716c; }
+      .process { fill: #fff; stroke: #d6d3d1; stroke-width: 1.2; }
+      .adapters-zone { fill: #eef2f3; stroke: #8da4ad; stroke-width: 1.3; }
+      .application-zone { fill: #f7f2e5; stroke: #c6a85d; stroke-width: 1.3; }
+      .engine-zone { fill: #edf4ee; stroke: #86a38b; stroke-width: 1.5; }
+      .composition { fill: #f5f5f4; stroke: #a8a29e; stroke-width: 1.2; stroke-dasharray: 7 5; }
+      .node { fill: #fff; stroke: #d6d3d1; stroke-width: 1.1; }
+      .heading { fill: #1c1917; font: 600 28px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: -0.03em; }
+      .subtitle, .note, .legend, .edge-label { fill: #57534e; font: 400 17px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+      .zone-title { fill: #44403c; font: 650 17px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: 0.1em; }
+      .node-title { fill: #292524; font: 600 19px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: -0.01em; }
+      .zone-name { fill: #292524; font: 650 23px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: -0.02em; }
+      .node-copy { fill: #57534e; font: 400 17px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+      .edge { fill: none; stroke: #69635f; stroke-width: 1.55; marker-end: url(#runtime-arrow); }
+      .wire { fill: none; stroke: #8b827d; stroke-width: 1.45; stroke-dasharray: 7 5; marker-end: url(#runtime-arrow); }
+      .arrow-head { fill: #69635f; }
       @media (prefers-color-scheme: dark) {
         .canvas { fill: #0c0a09; }
-        .boundary, .service-group { fill: #1c1917; stroke: #292524; }
-        .heading, .node-title, .small-title { fill: #f5f5f4; }
-        .subtitle, .note, .edge-label { fill: #a8a29e; }
-        .boundary-title, .node-copy { fill: #d6d3d1; }
-        .interface, .service, .module { fill: #292524; stroke: #44403c; }
-        .facade, .access, .policy { fill: #574a24; fill-opacity: 0.55; stroke: #7e6c37; }
-        .foundation, .external { fill: #292524; stroke: #7e6c37; }
-        .edge { stroke: #78716c; }
-        .arrow-head { fill: #78716c; }
+        .process { fill: #0c0a09; stroke: #292524; }
+        .adapters-zone { fill: #17262b; stroke: #607c86; }
+        .application-zone { fill: #342e1c; stroke: #8f783f; }
+        .engine-zone { fill: #19291d; stroke: #62806a; }
+        .composition { fill: #1c1917; stroke: #57534e; }
+        .node { fill: #292524; stroke: #44403c; }
+        .heading, .node-title, .zone-name { fill: #f5f5f4; }
+        .subtitle, .note, .legend, .edge-label { fill: #a8a29e; }
+        .zone-title, .node-copy { fill: #d6d3d1; }
+        .edge { stroke: #a8a29e; }
+        .wire { stroke: #a8a29e; }
+        .arrow-head { fill: #a8a29e; }
       }
     </style>
   </defs>
 
-  <rect class="canvas" width="1600" height="1200"/>
-  <text class="heading" x="800" y="42" text-anchor="middle">DlightRAG — Runtime Ownership</text>
-  <text class="subtitle" x="800" y="70" text-anchor="middle">Union of distinct runtime paths, not one end-to-end call; import contracts are machine-enforced separately</text>
+  <rect class="canvas" width="1800" height="1020"/>
+  <text class="heading" x="900" y="42" text-anchor="middle">DlightRAG — Runtime Ownership</text>
+  <text class="subtitle" x="900" y="72" text-anchor="middle">Code zones and primary runtime dependencies; detailed Answer, Retrieval, and Mutation paths remain in prose</text>
 
-  <rect class="boundary" x="40" y="100" width="1520" height="1060" rx="18"/>
-  <text class="boundary-title" x="75" y="134">DLIGHTRAG APPLICATION PROCESS</text>
+  <rect class="process" x="40" y="92" width="1720" height="823" rx="18"/>
+  <text class="zone-title" x="70" y="121">ONE DLIGHTRAG APPLICATION PROCESS</text>
 
-  <rect class="interface" x="90" y="175" width="580" height="95" rx="12"/>
-  <text class="node-title" x="380" y="212" text-anchor="middle">Inbound adapters</text>
-  <text class="node-copy" x="380" y="242" text-anchor="middle">adapters.http · adapters.mcp</text>
+  <rect class="composition" x="190" y="140" width="1420" height="72" rx="12"/>
+  <text class="node-title" x="900" y="169" text-anchor="middle">Private composition root</text>
+  <text class="node-copy" x="900" y="196" text-anchor="middle">constructs Application; injects concrete Adapters, owner ports, and operation executors; never joins the request path</text>
 
-  <rect class="interface" x="930" y="175" width="580" height="95" rx="12"/>
-  <text class="node-title" x="1220" y="212" text-anchor="middle">Embedded interface</text>
-  <text class="node-copy" x="1220" y="242" text-anchor="middle">trusted Python Application interface</text>
+  <rect class="adapters-zone" x="70" y="270" width="1660" height="145" rx="15"/>
+  <text class="zone-title" x="95" y="296">ADAPTERS</text>
 
-  <rect class="access" x="90" y="325" width="400" height="105" rx="12"/>
-  <text class="node-title" x="290" y="363" text-anchor="middle">application.access</text>
-  <text class="node-copy" x="290" y="393" text-anchor="middle">authentication · principal and owner scope</text>
-  <text class="node-copy" x="290" y="416" text-anchor="middle">Workspace + Action policy</text>
+  <rect class="node" x="110" y="305" width="600" height="95" rx="11"/>
+  <text class="node-title" x="410" y="334" text-anchor="middle">Inbound Adapters</text>
+  <text class="node-copy" x="410" y="362" text-anchor="middle">HTTP · MCP invoke Application use cases</text>
+  <text class="node-copy" x="410" y="386" text-anchor="middle">and consume only transport-neutral contracts</text>
 
-  <rect class="facade" x="650" y="325" width="860" height="105" rx="12"/>
-  <text class="node-title" x="1080" y="363" text-anchor="middle">Application facade and lifecycle</text>
-  <text class="node-copy" x="1080" y="393" text-anchor="middle">config · startup / shutdown · health · service accessors</text>
-  <text class="node-copy" x="1080" y="416" text-anchor="middle">public create_application · private composition</text>
+  <rect class="node" x="1090" y="305" width="600" height="95" rx="11"/>
+  <text class="node-title" x="1390" y="334" text-anchor="middle">Outbound Adapters</text>
+  <text class="node-copy" x="1390" y="362" text-anchor="middle">PostgreSQL · observability implement narrow ports</text>
+  <text class="node-copy" x="1390" y="386" text-anchor="middle">owned by Application or Engine</text>
 
-  <rect class="service-group" x="80" y="485" width="1440" height="270" rx="16"/>
-  <text class="boundary-title" x="110" y="517">COMPOSED APPLICATION SERVICES AND POLICY COLLABORATORS</text>
+  <rect class="application-zone" x="70" y="455" width="1660" height="155" rx="15"/>
+  <text class="zone-title" x="95" y="481">APPLICATION</text>
+  <text class="zone-name" x="900" y="515" text-anchor="middle">Public facade and product use cases</text>
+  <text class="node-copy" x="900" y="545" text-anchor="middle">Access · configuration · lifecycle · health · service projections</text>
+  <text class="node-copy" x="900" y="572" text-anchor="middle">Answer, Retrieval, and Corpus Mutation acceptance · Memory capability over the independent dlightrag-memory package</text>
+  <text class="note" x="1650" y="598" text-anchor="end">trusted embedded callers enter here</text>
 
-  <rect class="service" x="100" y="540" width="220" height="130" rx="10"/>
-  <text class="small-title" x="210" y="577" text-anchor="middle">Answer Service</text>
-  <text class="node-copy" x="210" y="607" text-anchor="middle">accept · steer · follow-up</text>
-  <text class="node-copy" x="210" y="630" text-anchor="middle">pin prepared input</text>
+  <rect class="engine-zone" x="70" y="655" width="1660" height="230" rx="15"/>
+  <text class="zone-title" x="95" y="682">ENGINE · FIVE SIBLING OWNERS IN ONE CODE ZONE — CARD POSITION DOES NOT DENOTE A TIER</text>
 
-  <rect class="service" x="340" y="540" width="220" height="130" rx="10"/>
-  <text class="small-title" x="450" y="577" text-anchor="middle">Web Conversations</text>
-  <text class="node-copy" x="450" y="607" text-anchor="middle">owner history + routes</text>
-  <text class="node-copy" x="450" y="630" text-anchor="middle">atomic turn linking</text>
+  <rect class="node" x="95" y="710" width="300" height="135" rx="11"/>
+  <text class="node-title" x="245" y="742" text-anchor="middle">Runtime</text>
+  <text class="node-copy" x="245" y="770" text-anchor="middle">durable Runs · lanes · fencing</text>
+  <text class="node-copy" x="245" y="795" text-anchor="middle">may use Agent contracts</text>
+  <text class="node-copy" x="245" y="820" text-anchor="middle">imports neither Answer nor RAG</text>
 
-  <rect class="service" x="580" y="540" width="270" height="130" rx="10"/>
-  <text class="small-title" x="715" y="577" text-anchor="middle">Retrieval + Corpus Admin</text>
-  <text class="node-copy" x="715" y="607" text-anchor="middle">durable retrieve · ingest · metadata</text>
-  <text class="node-copy" x="715" y="630" text-anchor="middle">pin input · workspace lifecycle</text>
+  <rect class="node" x="422" y="710" width="300" height="135" rx="11"/>
+  <text class="node-title" x="572" y="742" text-anchor="middle">Answer</text>
+  <text class="node-copy" x="572" y="770" text-anchor="middle">Fast + Research execution</text>
+  <text class="node-copy" x="572" y="795" text-anchor="middle">citations · streams · artifacts</text>
+  <text class="node-copy" x="572" y="820" text-anchor="middle">uses Runtime · RAG · Agent · AI</text>
 
-  <rect class="service" x="870" y="540" width="200" height="130" rx="10"/>
-  <text class="small-title" x="970" y="577" text-anchor="middle">Memory Service</text>
-  <text class="node-copy" x="970" y="607" text-anchor="middle">product gate</text>
-  <text class="node-copy" x="970" y="630" text-anchor="middle">owner operations</text>
+  <rect class="node" x="749" y="710" width="300" height="135" rx="11"/>
+  <text class="node-title" x="899" y="742" text-anchor="middle">RAG</text>
+  <text class="node-copy" x="899" y="770" text-anchor="middle">retrieval + corpus semantics</text>
+  <text class="node-copy" x="899" y="795" text-anchor="middle">owns the LightRAG integration</text>
+  <text class="node-copy" x="899" y="820" text-anchor="middle">uses AI</text>
 
-  <rect class="policy" x="1090" y="540" width="190" height="130" rx="10"/>
-  <text class="small-title" x="1185" y="577" text-anchor="middle">Model Catalogue</text>
-  <text class="node-copy" x="1185" y="607" text-anchor="middle">validate · publish</text>
-  <text class="node-copy" x="1185" y="630" text-anchor="middle">reload overlay</text>
+  <rect class="node" x="1076" y="710" width="300" height="135" rx="11"/>
+  <text class="node-title" x="1226" y="742" text-anchor="middle">Agent</text>
+  <text class="node-copy" x="1226" y="770" text-anchor="middle">product-neutral Sessions</text>
+  <text class="node-copy" x="1226" y="795" text-anchor="middle">turn + effect settlement</text>
+  <text class="node-copy" x="1226" y="820" text-anchor="middle">uses AI</text>
 
-  <rect class="policy" x="1300" y="540" width="200" height="130" rx="10"/>
-  <text class="small-title" x="1400" y="570" text-anchor="middle">engine.answer</text>
-  <text class="small-title" x="1400" y="590" text-anchor="middle">Capability policy</text>
-  <text class="node-copy" x="1400" y="618" text-anchor="middle">profiles · image probes</text>
-  <text class="node-copy" x="1400" y="641" text-anchor="middle">mode admission</text>
+  <rect class="node" x="1403" y="710" width="300" height="135" rx="11"/>
+  <text class="node-title" x="1553" y="742" text-anchor="middle">AI</text>
+  <text class="node-copy" x="1553" y="770" text-anchor="middle">provider-neutral model runtime</text>
+  <text class="node-copy" x="1553" y="795" text-anchor="middle">native provider streams</text>
+  <text class="node-copy" x="1553" y="820" text-anchor="middle">Engine leaf owner</text>
 
-  <rect class="service" x="610" y="760" width="360" height="50" rx="10"/>
-  <text class="small-title" x="790" y="781" text-anchor="middle">Injected operation executors</text>
-  <text class="node-copy" x="790" y="801" text-anchor="middle">RetrievalExecutor · CorpusMutationExecutor</text>
+  <path class="wire" d="M 410 212 V 305"/>
+  <path class="wire" d="M 900 212 V 455"/>
+  <path class="wire" d="M 1390 212 V 305"/>
+  <path class="wire" d="M 190 176 H 55 V 775 H 70"/>
 
-  <rect class="module" x="110" y="820" width="260" height="115" rx="12"/>
-  <text class="node-title" x="240" y="860" text-anchor="middle">engine.runtime</text>
-  <text class="node-copy" x="240" y="890" text-anchor="middle">Query + Corpus Mutation dispatch · leases</text>
-  <text class="node-copy" x="240" y="913" text-anchor="middle">local worker bounds · admission · fencing · events</text>
+  <path class="edge" d="M 410 400 V 430 H 650 V 455"/>
+  <text class="edge-label" x="530" y="423" text-anchor="middle">calls use cases</text>
+  <path class="edge" d="M 900 610 V 655"/>
+  <text class="edge-label" x="915" y="638">invokes Engine contracts</text>
 
-  <rect class="module" x="430" y="820" width="280" height="115" rx="12"/>
-  <text class="node-title" x="570" y="860" text-anchor="middle">engine.answer</text>
-  <text class="node-copy" x="570" y="890" text-anchor="middle">AnswerExecutor · Fast / Research</text>
-  <text class="node-copy" x="570" y="913" text-anchor="middle">stream · citations · publication</text>
+  <path class="edge" d="M 1530 455 V 435 H 1390 V 400"/>
+  <text class="edge-label" x="1455" y="416" text-anchor="middle">Application-owned port call</text>
+  <path class="edge" d="M 1730 775 H 1747 V 430 H 1580 V 400"/>
+  <text class="edge-label" x="1728" y="640" text-anchor="end">Engine-owned port call</text>
 
-  <rect class="module" x="770" y="820" width="280" height="115" rx="12"/>
-  <text class="node-title" x="910" y="860" text-anchor="middle">engine.rag</text>
-  <text class="node-copy" x="910" y="890" text-anchor="middle">WorkspacePool · WorkspaceRag</text>
-  <text class="node-copy" x="910" y="913" text-anchor="middle">LightRAG integration</text>
-
-  <rect class="external" x="1110" y="820" width="280" height="115" rx="12"/>
-  <text class="node-title" x="1250" y="860" text-anchor="middle">dlightrag-memory</text>
-  <text class="node-copy" x="1250" y="890" text-anchor="middle">independent Memory package</text>
-  <text class="node-copy" x="1250" y="913" text-anchor="middle">Application owns the product gate</text>
-
-  <rect class="foundation" x="330" y="1020" width="250" height="90" rx="12"/>
-  <text class="node-title" x="455" y="1052" text-anchor="middle">engine.agent</text>
-  <text class="node-copy" x="455" y="1077" text-anchor="middle">AgentSessionRuntime · durable Session</text>
-  <text class="node-copy" x="455" y="1098" text-anchor="middle">turns · effect/Host settlement</text>
-
-  <rect class="foundation" x="675" y="1020" width="260" height="90" rx="12"/>
-  <text class="node-title" x="805" y="1056" text-anchor="middle">engine.ai</text>
-  <text class="node-copy" x="805" y="1086" text-anchor="middle">Models · native provider streams</text>
-
-  <rect class="external" x="1030" y="1020" width="250" height="90" rx="12"/>
-  <text class="node-title" x="1155" y="1056" text-anchor="middle">LightRAG</text>
-  <text class="node-copy" x="1155" y="1086" text-anchor="middle">external RAG package</text>
-
-  <path class="edge" d="M 380 270 V 295 H 290 V 325"/>
-  <text class="edge-label" x="305" y="309">checks</text>
-  <path class="edge" d="M 560 270 V 300 H 760 V 325"/>
-  <text class="edge-label" x="650" y="289" text-anchor="middle">calls services</text>
-  <path class="edge" d="M 1220 270 V 325"/>
-  <text class="edge-label" x="1235" y="305">trusted call</text>
-  <path class="edge" d="M 1080 430 V 485"/>
-  <text class="edge-label" x="1095" y="466">exposes</text>
-
-  <path class="edge" d="M 450 540 V 525 H 210 V 540"/>
-  <path class="edge" d="M 1185 540 V 520 H 1400 V 540"/>
-  <text class="edge-label" x="1292.5" y="512" text-anchor="middle">publish invalidates profiles</text>
-  <path class="edge" d="M 210 670 V 715 H 1400 V 670"/>
-  <text class="edge-label" x="805" y="707" text-anchor="middle">resolve profiles · probe</text>
-
-  <path class="edge" d="M 210 670 V 780 H 240 V 820"/>
-  <text class="edge-label" x="255" y="798">accept / schedule</text>
-  <path class="edge" d="M 650 670 V 745 H 300 V 820"/>
-  <text class="edge-label" x="475" y="738" text-anchor="middle">accept Retrieval / Mutation</text>
-  <path class="edge" d="M 715 670 V 780 H 910 V 820"/>
-  <text class="edge-label" x="815" y="773" text-anchor="middle">metadata / workspace lifecycle</text>
-  <path class="edge" d="M 970 670 V 780 H 1250 V 820"/>
-  <text class="edge-label" x="1110" y="773" text-anchor="middle">owner operations</text>
-
-  <path class="edge" d="M 370 877.5 H 430"/>
-  <text class="edge-label" x="400" y="863" text-anchor="middle">dispatch Answer</text>
-  <path class="edge" d="M 300 820 V 777 H 610"/>
-  <text class="edge-label" x="455" y="767" text-anchor="middle">dispatch injected executor</text>
-  <path class="edge" d="M 900 805 V 820"/>
-  <text class="edge-label" x="915" y="814">calls RAG</text>
-  <path class="edge" d="M 710 877.5 H 770"/>
-  <text class="edge-label" x="740" y="863" text-anchor="middle">retrieve</text>
-
-  <path class="edge" d="M 500 935 V 980 H 455 V 1020"/>
-  <text class="edge-label" x="470" y="999">hosts Session</text>
-  <path class="edge" d="M 570 935 V 990 H 805 V 1020"/>
-  <text class="edge-label" x="685" y="982" text-anchor="middle">provider stream</text>
-  <path class="edge" d="M 910 935 V 970 H 805 V 1020"/>
-  <text class="edge-label" x="870" y="962">model calls</text>
-  <path class="edge" d="M 960 935 V 990 H 1155 V 1020"/>
-  <text class="edge-label" x="1060" y="982" text-anchor="middle">uses</text>
-  <path class="edge" d="M 580 1065 H 675"/>
-  <text class="edge-label" x="627.5" y="1051" text-anchor="middle">turn contract</text>
-
-  <text class="note" x="800" y="1140" text-anchor="middle">This diagram is a union of distinct paths. Access precedes protected remote calls; public status reaches the facade directly; the embedded interface has no transport ACL.</text>
+  <path class="edge" d="M 250 943 H 305"/>
+  <text class="legend" x="318" y="949">runtime invocation through an owner contract — not a concrete import</text>
+  <path class="wire" d="M 1025 943 H 1080"/>
+  <text class="legend" x="1093" y="949">composition injection / wiring</text>
+  <text class="note" x="900" y="981" text-anchor="middle">The private root supplies implementations, then leaves the runtime path. Application and Engine never import concrete Adapters.</text>
+  <text class="note" x="900" y="1006" text-anchor="middle">Solid edges summarize primary invocation only; operation-specific scheduling, retrieval, mutation, and Answer flows are documented below.</text>
 </svg>

@@ -1,101 +1,138 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="820" viewBox="0 0 1400 820" role="img" aria-labelledby="title description">
-  <title id="title">DlightRAG deployment and storage topology</title>
-  <desc id="description">Writer and reader DlightRAG processes share one PostgreSQL 18 primary, the same corpus artifact working directory, and, when local Agent execution is enabled, a separate shared Agent Workspace root. Both process roles execute durable answers and write operational state; only the writer mutates corpus state and owns migrations. External AI, parser, and optional tool endpoints are separate runtimes.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="950" viewBox="0 0 1600 950" role="img" aria-labelledby="deployment-title deployment-description">
+  <title id="deployment-title">DlightRAG deployment and storage topology</title>
+  <desc id="deployment-description">Writer and optional Reader role archetypes each run DlightRAG with an embedded LightRAG runtime. Both roles use one PostgreSQL 18 primary and may call AI providers; only Writer calls the configured MinerU or Docling parser and claims corpus mutation work. Serving roles mount the same corpus root. Processes executing local Research also mount a separate shared Agent Workspace root and may call optional Research integrations. Plain lines are database or mount connections, directed arrows are outbound runtime calls, and dashed connections are conditional.</desc>
   <defs>
-    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <marker id="deployment-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
       <path d="M 0 1.2 L 8 5 L 0 8.8 z" class="arrow-head"/>
     </marker>
     <style>
       :root { color-scheme: light dark; }
       .canvas { fill: #fafaf9; }
-      .heading { fill: #1c1917; font: 600 25px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: -0.03em; }
-      .subtitle, .note { fill: #57534e; font: 400 14px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
-      .group-title { fill: #57534e; font: 600 11px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: 0.14em; }
-      .node-title { fill: #292524; font: 600 16px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: -0.01em; }
-      .node-copy { fill: #57534e; font: 400 13.5px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
-      .edge-label { fill: #57534e; font: 500 12px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
-      .process-group { fill: #f5f5f4; stroke: #d6d3d1; stroke-width: 1; }
-      .process, .external { fill: #fff; stroke: #d6d3d1; stroke-width: 1; }
-      .store { fill: #f7de9d; fill-opacity: 0.24; stroke: #d2b661; stroke-width: 1; }
-      .divider { stroke: #d2b661; stroke-width: 1; }
-      .external-divider { stroke: #d6d3d1; stroke-width: 1; }
-      .edge { fill: none; stroke: #78716c; stroke-width: 1.35; marker-end: url(#arrow); }
-      .arrow-head { fill: #78716c; }
+      .group { fill: #f5f5f4; stroke: #d6d3d1; stroke-width: 1.2; }
+      .process { fill: #fff; stroke: #d6d3d1; stroke-width: 1.2; }
+      .store { fill: #f7f2e5; stroke: #c6a85d; stroke-width: 1.2; }
+      .external { fill: #eef2f3; stroke: #8da4ad; stroke-width: 1.2; }
+      .heading { fill: #1c1917; font: 600 28px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: -0.03em; }
+      .subtitle, .note, .legend, .edge-label { fill: #57534e; font: 400 17px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+      .group-title { fill: #57534e; font: 650 17px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: 0.1em; }
+      .node-title { fill: #292524; font: 600 19px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: -0.01em; }
+      .node-copy { fill: #57534e; font: 400 17px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+      .connection { fill: none; stroke: #78716c; stroke-width: 1.5; }
+      .conditional-connection { fill: none; stroke: #78716c; stroke-width: 1.5; stroke-dasharray: 7 5; }
+      .call { fill: none; stroke: #69635f; stroke-width: 1.55; marker-end: url(#deployment-arrow); }
+      .optional-call { fill: none; stroke: #69635f; stroke-width: 1.55; stroke-dasharray: 7 5; marker-end: url(#deployment-arrow); }
+      .bridge { fill: none; stroke: #fafaf9; stroke-width: 6; }
+      .arrow-head { fill: #69635f; }
       @media (prefers-color-scheme: dark) {
         .canvas { fill: #0c0a09; }
+        .group { fill: #1c1917; stroke: #292524; }
+        .process { fill: #292524; stroke: #44403c; }
+        .store { fill: #342e1c; stroke: #8f783f; }
+        .external { fill: #17262b; stroke: #607c86; }
         .heading, .node-title { fill: #f5f5f4; }
-        .subtitle, .note, .edge-label { fill: #a8a29e; }
+        .subtitle, .note, .legend, .edge-label { fill: #a8a29e; }
         .group-title, .node-copy { fill: #d6d3d1; }
-        .process-group { fill: #1c1917; stroke: #292524; }
-        .process, .external { fill: #292524; stroke: #44403c; }
-        .store { fill: #574a24; fill-opacity: 0.55; stroke: #7e6c37; }
-        .divider { stroke: #7e6c37; }
-        .external-divider { stroke: #44403c; }
-        .edge { stroke: #78716c; }
-        .arrow-head { fill: #78716c; }
+        .connection, .conditional-connection { stroke: #a8a29e; }
+        .call, .optional-call { stroke: #a8a29e; }
+        .bridge { stroke: #0c0a09; }
+        .arrow-head { fill: #a8a29e; }
       }
     </style>
   </defs>
 
-  <rect class="canvas" width="1400" height="820"/>
-  <text class="heading" x="700" y="42" text-anchor="middle">DlightRAG — Deployment and Storage</text>
-  <text class="subtitle" x="700" y="70" text-anchor="middle">Process roles, shared state, separate filesystem roots, and external runtimes</text>
+  <rect class="canvas" width="1600" height="950"/>
+  <text class="heading" x="800" y="42" text-anchor="middle">DlightRAG — Deployment and Storage</text>
+  <text class="subtitle" x="800" y="70" text-anchor="middle">Process-role archetypes, external runtime connections, and the corpus and run-workspace storage roots</text>
 
-  <rect class="process-group" x="60" y="120" width="820" height="300" rx="16"/>
-  <text class="group-title" x="90" y="154">DLIGHTRAG SERVICE PROCESSES</text>
+  <rect class="group" x="40" y="120" width="920" height="335" rx="16"/>
+  <text class="group-title" x="70" y="151">DLIGHTRAG SERVICE PROCESSES</text>
 
-  <rect class="process" x="100" y="185" width="340" height="175" rx="12"/>
-  <text class="node-title" x="270" y="225" text-anchor="middle">Writer role</text>
-  <text class="node-copy" x="270" y="260" text-anchor="middle">Answers and operational writes</text>
-  <text class="node-copy" x="270" y="286" text-anchor="middle">Corpus mutation and ingestion</text>
-  <text class="node-copy" x="270" y="312" text-anchor="middle">Schema migration owner</text>
+  <rect class="process" x="80" y="175" width="420" height="225" rx="12"/>
+  <text class="node-title" x="290" y="210" text-anchor="middle">Writer role (1..n)</text>
+  <text class="node-copy" x="290" y="240" text-anchor="middle">DlightRAG + embedded LightRAG</text>
+  <text class="node-copy" x="290" y="270" text-anchor="middle">Query + Corpus Mutation workers</text>
+  <text class="node-copy" x="290" y="300" text-anchor="middle">operational RW · corpus RW / DDL</text>
+  <text class="node-copy" x="290" y="330" text-anchor="middle">normal LightRAG initialization</text>
+  <text class="node-copy" x="290" y="360" text-anchor="middle">migration owner</text>
 
-  <rect class="process" x="500" y="185" width="340" height="175" rx="12"/>
-  <text class="node-title" x="670" y="225" text-anchor="middle">Reader role</text>
-  <text class="node-copy" x="670" y="260" text-anchor="middle">Answers and operational writes</text>
-  <text class="node-copy" x="670" y="286" text-anchor="middle">Corpus reads only</text>
-  <text class="node-copy" x="670" y="312" text-anchor="middle">No corpus administration</text>
+  <rect class="process" x="540" y="175" width="380" height="225" rx="12"/>
+  <text class="node-title" x="730" y="207" text-anchor="middle">Optional Reader role (0..n)</text>
+  <text class="node-copy" x="730" y="235" text-anchor="middle">DlightRAG + embedded LightRAG</text>
+  <text class="node-copy" x="730" y="261" text-anchor="middle">Query workers · operational RW</text>
+  <text class="node-copy" x="730" y="287" text-anchor="middle">may enqueue authorized Mutation Runs</text>
+  <text class="node-copy" x="730" y="313" text-anchor="middle">never claims or executes mutation work</text>
+  <text class="node-copy" x="730" y="339" text-anchor="middle">read-only LightRAG attach</text>
+  <text class="node-copy" x="730" y="365" text-anchor="middle">schema validation only · no DDL</text>
 
-  <rect class="external" x="930" y="120" width="410" height="300" rx="16"/>
-  <text class="group-title" x="960" y="154">EXTERNAL RUNTIMES</text>
-  <text class="node-title" x="1135" y="214" text-anchor="middle">AI provider endpoints</text>
-  <text class="node-copy" x="1135" y="243" text-anchor="middle">Chat · VLM · embedding · rerank</text>
-  <line class="external-divider" x1="980" y1="270" x2="1290" y2="270"/>
-  <text class="node-title" x="1135" y="312" text-anchor="middle">Parser sidecars</text>
-  <text class="node-copy" x="1135" y="341" text-anchor="middle">MinerU · Docling</text>
-  <text class="node-copy" x="1135" y="376" text-anchor="middle">Optional Exa/Tavily and outbound MCP</text>
+  <rect class="group" x="1010" y="120" width="550" height="335" rx="16"/>
+  <text class="group-title" x="1040" y="151">EXTERNAL RUNTIMES</text>
 
-  <rect class="store" x="60" y="500" width="820" height="200" rx="16"/>
-  <text class="node-title" x="470" y="536" text-anchor="middle">PostgreSQL 18 primary</text>
-  <line class="divider" x1="333" y1="553" x2="333" y2="680"/>
-  <line class="divider" x1="607" y1="553" x2="607" y2="680"/>
-  <text class="node-title" x="196" y="590" text-anchor="middle">Operational state</text>
-  <text class="node-copy" x="196" y="620" text-anchor="middle">runs · events · attachments</text>
-  <text class="node-copy" x="196" y="645" text-anchor="middle">Web · both roles write</text>
-  <text class="node-title" x="470" y="590" text-anchor="middle">Corpus state</text>
-  <text class="node-copy" x="470" y="620" text-anchor="middle">graph · vector · BM25</text>
-  <text class="node-copy" x="470" y="645" text-anchor="middle">writer mutates</text>
-  <text class="node-title" x="744" y="590" text-anchor="middle">Memory schema</text>
-  <text class="node-copy" x="744" y="620" text-anchor="middle">owner records</text>
-  <text class="node-copy" x="744" y="645" text-anchor="middle">package-owned migration</text>
+  <rect class="external" x="1040" y="165" width="490" height="75" rx="11"/>
+  <text class="node-title" x="1285" y="194" text-anchor="middle">One parser endpoint</text>
+  <text class="node-copy" x="1285" y="220" text-anchor="middle">MinerU or Docling · Writer ingestion only</text>
 
-  <rect class="store" x="930" y="500" width="410" height="200" rx="16"/>
-  <text class="node-title" x="1135" y="536" text-anchor="middle">Shared filesystem roots</text>
-  <text class="node-title" x="1135" y="578" text-anchor="middle">Corpus artifacts</text>
-  <text class="node-copy" x="1135" y="605" text-anchor="middle">deployment.working_dir · same absolute path</text>
-  <line class="divider" x1="980" y1="625" x2="1290" y2="625"/>
-  <text class="node-title" x="1135" y="655" text-anchor="middle">Agent Workspaces</text>
-  <text class="node-copy" x="1135" y="682" text-anchor="middle">separate shared RWX root for trust / sandbox</text>
+  <rect class="external" x="1040" y="260" width="490" height="75" rx="11"/>
+  <text class="node-title" x="1285" y="289" text-anchor="middle">AI provider endpoints</text>
+  <text class="node-copy" x="1285" y="315" text-anchor="middle">chat · VLM · embedding · rerank · both roles</text>
 
-  <path class="edge" d="M 270 360 V 500"/>
-  <text class="edge-label" x="285" y="462">SQL · leases</text>
-  <path class="edge" d="M 670 360 V 500"/>
-  <text class="edge-label" x="655" y="462" text-anchor="end">SQL · leases</text>
-  <path class="edge" d="M 760 420 V 460 H 1135 V 500"/>
-  <text class="edge-label" x="945" y="449" text-anchor="middle">shared filesystems</text>
-  <path class="edge" d="M 880 270 H 930"/>
-  <text class="edge-label" x="905" y="256" text-anchor="middle">calls</text>
+  <rect class="external" x="1040" y="355" width="490" height="75" rx="11"/>
+  <text class="node-title" x="1285" y="384" text-anchor="middle">Optional Research integrations</text>
+  <text class="node-copy" x="1285" y="410" text-anchor="middle">Exa/Tavily · outbound MCP · Research only</text>
 
-  <text class="note" x="700" y="758" text-anchor="middle">Reader means corpus-read-only, not process-read-only; both roles use the same primary endpoint.</text>
-  <text class="note" x="700" y="782" text-anchor="middle">Ingress and identity topology are intentionally shown only in System Context and Security.</text>
+  <path class="call" d="M 290 175 V 100 H 1285 V 165"/>
+  <text class="edge-label" x="790" y="96" text-anchor="middle">Writer-only parser call</text>
+  <path class="call" d="M 960 297.5 H 1040"/>
+  <text class="edge-label" x="1000" y="284" text-anchor="middle">both roles</text>
+  <path class="optional-call" d="M 960 392.5 H 1040"/>
+  <text class="edge-label" x="1000" y="379" text-anchor="middle">Research</text>
+
+  <rect class="group" x="40" y="545" width="1520" height="260" rx="16"/>
+  <text class="group-title" x="70" y="576">SHARED STATE AND MOUNTS</text>
+
+  <rect class="store" x="70" y="600" width="620" height="165" rx="12"/>
+  <text class="node-title" x="380" y="633" text-anchor="middle">PostgreSQL 18 primary</text>
+  <text class="node-copy" x="380" y="663" text-anchor="middle">DlightRAG operational + Memory: both roles RW</text>
+  <text class="node-copy" x="380" y="690" text-anchor="middle">Corpus state: Writer RW / DDL · Reader RO / no DDL</text>
+  <text class="node-copy" x="380" y="717" text-anchor="middle">graph · KV · doc status · BM25 · pgvector (default)</text>
+  <text class="node-copy" x="380" y="744" text-anchor="middle">one primary endpoint; migrations run before Readers start</text>
+
+  <rect class="store" x="730" y="600" width="380" height="165" rx="12"/>
+  <text class="node-title" x="920" y="633" text-anchor="middle">Shared POSIX corpus root</text>
+  <text class="node-copy" x="920" y="663" text-anchor="middle">deployment.working_dir</text>
+  <text class="node-copy" x="920" y="690" text-anchor="middle">same absolute path on serving processes</text>
+  <text class="node-copy" x="920" y="717" text-anchor="middle">Writer mutates · serving roles read</text>
+  <text class="node-copy" x="920" y="744" text-anchor="middle">corpus images + downloads</text>
+
+  <rect class="store" x="1150" y="600" width="380" height="165" rx="12"/>
+  <text class="node-title" x="1340" y="633" text-anchor="middle">Agent Workspace root</text>
+  <text class="node-copy" x="1340" y="663" text-anchor="middle">answer.agent.workspace_root</text>
+  <text class="node-copy" x="1340" y="690" text-anchor="middle">separate and non-overlapping</text>
+  <text class="node-copy" x="1340" y="717" text-anchor="middle">shared RWX for local Research</text>
+  <text class="node-copy" x="1340" y="744" text-anchor="middle">mounted only where Research executes</text>
+
+  <path class="connection" d="M 150 400 V 600"/>
+  <text class="edge-label" x="164" y="520">Writer SQL</text>
+  <path class="connection" d="M 600 400 V 600"/>
+  <text class="edge-label" x="614" y="520">Reader SQL</text>
+
+  <path class="connection" d="M 450 400 V 500 H 800 V 600"/>
+  <path class="bridge" d="M 450 400 V 500 H 800 V 600"/>
+  <path class="connection" d="M 450 400 V 500 H 800 V 600"/>
+  <text class="edge-label" x="665" y="492" text-anchor="middle">Writer mount</text>
+  <path class="connection" d="M 820 400 V 480 H 990 V 600"/>
+  <text class="edge-label" x="905" y="472" text-anchor="middle">Reader mount</text>
+
+  <path class="conditional-connection" d="M 950 455 V 520 H 1340 V 600"/>
+  <text class="edge-label" x="1160" y="512" text-anchor="middle">mount only where local Research executes</text>
+
+  <path class="connection" d="M 65 842 H 120"/>
+  <text class="legend" x="132" y="847">database or mount</text>
+  <path class="call" d="M 310 842 H 365"/>
+  <text class="legend" x="377" y="847">outbound runtime call</text>
+  <path class="optional-call" d="M 590 842 H 645"/>
+  <text class="legend" x="657" y="847">conditional / optional</text>
+
+  <text class="note" x="800" y="880" text-anchor="middle">Bundled Compose runs its API and MCP services as Writer-role processes; these cards describe supported role archetypes, not instance counts.</text>
+  <text class="note" x="800" y="906" text-anchor="middle">Milvus or Zilliz may replace only pgvector in writer-only deployments; Reader role is then unavailable.</text>
+  <text class="note" x="800" y="932" text-anchor="middle">Only corpus and run-workspace roots are shown; Skills mounts remain deployment configuration.</text>
 </svg>

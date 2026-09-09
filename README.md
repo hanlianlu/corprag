@@ -20,7 +20,7 @@ processes currently remain PostgreSQL-vector-only.
 ## Architecture
 
 <p align="center">
-  <img src="docs/architecture.svg" alt="DlightRAG system context showing browser, REST, MCP, and embedded callers; optional enterprise identity and Web edge boundaries; external integrations; PostgreSQL; and corpus artifacts" width="1180" />
+  <img src="docs/architecture.svg" alt="DlightRAG system context shown as one black box between browser users, REST and MCP clients, trusted embedding applications, an optional Web identity boundary, external AI, parser, corpus source and Research systems, PostgreSQL, and a shared corpus artifact root" width="1180" />
 </p>
 
 LightRAG supplies graph and vector retrieval. DlightRAG owns product policy,

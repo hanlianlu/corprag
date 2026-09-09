@@ -9,13 +9,16 @@ boundaries, and [Retrieval and Answer](retrieval-answer.md) for query behavior.
 ## System Context
 
 <p align="center">
-  <img src="architecture.svg" alt="DlightRAG system context showing browser, REST, MCP, and embedded callers; optional enterprise identity and Web edge boundaries; external integrations; PostgreSQL; and corpus artifacts" width="1180" />
+  <img src="architecture.svg" alt="DlightRAG system context shown as one black box between browser users, REST and MCP clients, trusted embedding applications, an optional Web identity boundary, external AI, parser, corpus source and Research systems, PostgreSQL, and a shared corpus artifact root" width="1180" />
 </p>
+<p align="center"><em>What surrounds DlightRAG? Arrows show system interactions; dashed paths are optional.</em></p>
 
-Browsers, REST clients, MCP agents, and trusted embedded callers use the same
-Application services. External dependencies are PostgreSQL, configured model
-providers, one parser sidecar, optional Exa/Tavily Web sources, and optional outbound
-MCP endpoints.
+This view keeps DlightRAG as one black box. Browser users, REST applications,
+MCP agents, and trusted embedding applications are its callers. Surrounding
+systems are an optional trusted Web edge and identity provider, configured AI
+providers, exactly one parser endpoint, corpus source systems, optional
+Exa/Tavily and outbound MCP Research integrations, PostgreSQL, and the shared
+corpus artifact root.
 
 Browser identity may terminate at a trusted Cloudflare/Azure/AWS edge or at
 DlightRAG's bearer verifier. REST and MCP authenticate on their transports. The
@@ -23,24 +26,33 @@ in-process Application is trusted and has no transport authentication layer.
 Verified identities flow through one Access policy; owner isolation remains a
 separate durable-data boundary.
 
-| View | Question | Arrow meaning |
+| View | Question | Connector meaning |
 |---|---|---|
-| [System context](#system-context) | What surrounds DlightRAG? | System interaction |
-| [Runtime ownership](#runtime-ownership) | Which process owner provides behavior? | Runtime dependency |
-| [Web frontend](#web-frontend-ownership) | Which browser owner composes UI? | Browser invocation |
-| [Deployment](#deployment-and-storage) | Where do processes and state live? | Runtime/storage connection |
+| [System context](#system-context) | What actors and systems surround DlightRAG? | Arrow: system interaction; dashed: optional path |
+| [Runtime ownership](#runtime-ownership) | Which code zone owns each primary runtime responsibility? | Solid arrow: runtime invocation through an owner contract; dashed arrow: composition injection; neither means a concrete import |
+| [Web frontend](#web-frontend-ownership) | Which browser owner composes or invokes the next owner? | Arrow: browser-time composition or invocation |
+| [Deployment](#deployment-and-storage) | Where do process roles, state, mounts, and external runtime connections live? | Plain line: database or mount; arrow: outbound call; dashed: conditional |
 
 ## Runtime Ownership
 
 <p align="center">
-  <img src="architecture-runtime.svg" alt="DlightRAG runtime ownership showing inbound adapters calling Access and the Application facade, the trusted embedded interface calling the facade directly, and Application services invoking Engine Runtime, Answer, RAG, Memory, Agent, AI, and LightRAG" width="1280" />
+  <img src="architecture-runtime.svg" alt="DlightRAG runtime ownership with Adapters, Application, and Engine as the three visible code zones; inbound and outbound Adapters at opposite ports; a private composition root shown as wiring; and Runtime, Answer, RAG, Agent, and AI as sibling owners inside one Engine zone" width="1280" />
 </p>
+<p align="center"><em>Which code zone owns each primary runtime responsibility? Solid arrows show invocation through owner contracts; dashed arrows show composition injection, not request flow.</em></p>
 
-`create_application` enters the private composition root. `Application` owns
-configuration, lifecycle, health, and service accessors. HTTP and MCP lifespans
-bind one started instance; importing a transport or tool module never composes a
-fallback service. Adapters invoke transport-neutral Access policy, then
-Application services. Embedded callers invoke the facade directly.
+The view is an ownership map, not a request sequence. Adapters, Application, and
+Engine are the three visible code zones. Inbound HTTP and MCP Adapters invoke
+Application use cases; trusted embedded callers enter the public facade
+directly. Outbound PostgreSQL and observability Adapters implement narrow ports
+owned by Application or Engine. A solid call through such a port does not mean
+the caller imports its concrete Adapter.
+
+`create_application` enters the private composition root. That root constructs
+one `Application` and injects concrete Adapters and operation executors, then
+leaves the runtime path. `Application` owns Access, configuration, lifecycle,
+health, product use cases, and service projections. HTTP and MCP lifespans bind
+one started instance; importing a transport or tool module never composes a
+fallback service.
 
 Application Configuration has one non-secret YAML owner. Credentials arrive
 from a secret source; Deployment Bindings adapt service discovery, listeners,
@@ -48,15 +60,17 @@ and mounts without restating product policy. The deployment contract lives in
 [Configuration](configuration.md#configuration-ownership) and
 [ADR 0006](adr/0006-configuration-ownership-and-deployment-bindings.md).
 
-Answer Service, Retrieval Service, and Corpus Mutation Service validate and
-accept top-level work through Engine Runtime. One `RunRuntime` owns shared
-lifecycle, fencing, events, capacity, and dispatch across the Query and Corpus
-Mutation lanes. Engine Answer uses Agent, RAG, Runtime, and provider-neutral AI;
+Runtime, Answer, RAG, Agent, and AI are sibling owners inside one Engine zone;
+their card positions do not define tiers. Answer depends on Runtime, RAG, Agent,
+and provider-neutral AI; RAG and Agent depend on AI; Runtime may consume Agent
+contracts while importing neither Answer nor RAG. Answer Service, Retrieval
+Service, and Corpus Mutation Service validate and accept top-level work through
+Engine Runtime. One `RunRuntime` owns shared lifecycle, fencing, events,
+capacity, and dispatch across the Query and Corpus Mutation lanes. Injected
 Retrieval and Corpus Mutation executors use Engine RAG. Answer-internal
 retrieval calls the same raw Retrieval Stage directly rather than creating a
 nested Run. Memory is an independent package exposed through an Application
-capability. Concrete PostgreSQL adapters are injected by the composition root
-and remain outside Engine.
+capability, while Engine RAG alone owns the direct LightRAG dependency.
 
 ### LightRAG Versus DlightRAG
 
@@ -243,22 +257,28 @@ centralized in [RunRuntime and durable execution](durable-answer-runs.md).
 ## Web Frontend Ownership
 
 <p align="center">
-  <img src="architecture-frontend.svg" alt="DlightRAG browser ownership from Vite startup and the dl-app Shell through Lit Feature owners, focused state, the package-owned design system, same-origin FastAPI APIs, and the opaque-origin artifact iframe" width="1220" />
+  <img src="architecture-frontend.svg" alt="DlightRAG Web frontend ownership with Vite startup and build concerns as a caption; the main-document dl-app Shell composing collective light-DOM Lit Feature owners; separate focused-state, browser API, and design-system modules; Artifact Canvas loading an isolated iframe; and API clients calling FastAPI" width="1220" />
 </p>
+<p align="center"><em>Which browser owner composes or invokes the next owner? Every arrow shows browser-time composition or invocation at one ownership level.</em></p>
 
-Vite owns the static entry, pre-paint theme, and built assets. Light-DOM Lit
-Features own typed presentation and interaction. FastAPI serves page/static
-assets plus same-origin `/web/api/*` commands, queries, and SSE. There is no
+Vite supplies the static entry, pre-paint theme, locale, and built assets; these
+startup and build concerns appear as an unconnected caption rather than a
+runtime owner. In the main document, the Shell creates browser handles and
+composes the collective light-DOM Lit Feature owners; the view intentionally
+does not expand each Feature's private implementation. FastAPI serves
+page/static assets plus same-origin `/web/api/*` commands, queries, and SSE.
+There is no
 Jinja or HTMX UI path. Light DOM is composition (the document is the Feature
 interface). Open Shadow DOM is reserved for design-system primitives with no
 domain state. See [ADR 0003](adr/0003-light-composition-shadow-primitives.md).
 
 State is divided by lifetime: the History API owns active conversation routing;
-focused stores own conversations, workspaces, attachments, ingest, and answer
-runs. The Shell constructs those stores once and passes an `AppHandles` bag.
-Feature components receive properties and raise typed events. The Shell may
-query sibling Feature custom elements, not their internals, and does not use
-module-global notification channels.
+focused stores own conversations, workspaces, attachments, ingest, and
+answer-event cursors. The Shell constructs those stores once and passes an
+`AppHandles` bag. Chat privately owns answer-run intent, following, and replay
+through its `RunController`. Feature components receive properties and raise
+typed events. The Shell may query sibling Feature custom elements, not their
+internals, and does not use module-global notification channels.
 
 The package design system owns tokens, icons, Shadow primitives, and split
 layout. The Shell mediates Artifact-to-Inspector source opening: on desktop,
@@ -293,15 +313,19 @@ them. See [Interfaces](interfaces.md#web) for browser contracts.
 ## Deployment And Storage
 
 <p align="center">
-  <img src="architecture-deployment.svg" alt="DlightRAG deployment showing writer and reader process roles sharing one PostgreSQL primary, one corpus artifact root, and a separate Agent Workspace root when local execution is enabled" width="1180" />
+  <img src="architecture-deployment.svg" alt="DlightRAG deployment with Writer and optional Reader role archetypes running embedded LightRAG, sharing one PostgreSQL primary and corpus root, conditionally mounting a separate Agent Workspace root, and calling role-appropriate external AI, parser, and Research runtimes" width="1180" />
 </p>
+<p align="center"><em>Where do process roles, state, mounts, and external runtime connections live? Plain lines are database or mount connections; arrows are outbound calls; dashed connectors are conditional.</em></p>
 
-All service processes use the same PostgreSQL 18 primary. The default `writer`
-owns migrations, corpus mutations, and every interface. A `reader` is
+All service processes use the same PostgreSQL 18 primary and embed LightRAG;
+LightRAG is not a separate deployment node. The default `writer` owns
+migrations, claims corpus mutations, and serves every interface. A `reader` is
 **corpus-read-only**, not process-read-only: it may write operational state for
 answers, events, Root Artifact Attachments, Published Artifacts, and Web
-conversations while rejecting ingestion, workspace changes, metadata mutation,
-retry, and file deletion.
+conversations. It may enqueue an authorized Corpus Mutation Run for a writer to
+claim, but never claims or executes that work itself. Reader startup validates
+the migrated schemas and uses LightRAG's read-only attach path without issuing
+DDL.
 
 | Component | Backend |
 |---|---|
@@ -316,12 +340,16 @@ Every process that serves corpus images/downloads must mount one shared POSIX
 `deployment.working_dir` at the same absolute path. Every process executing
 trusted/sandboxed Research must also mount one shared RWX
 `answer.agent.workspace_root`; it must not overlap the corpus working directory.
-Writer migrations must run before readers start. Readers currently require the
-default PostgreSQL vector leg because the supported LightRAG version has no
-public nonmutating external-vector reader attach. Milvus changes only vector
-storage: PostgreSQL text chunks remain the BM25/chunk metadata source, and
-Milvus retrieval uses bounded metadata post-filtering rather than PostgreSQL
-vector pushdown. See [PostgreSQL](postgresql.md) for deployment details.
+The deployment view intentionally omits the separately configured global and
+per-owner Skills mounts. Writer migrations must run before readers start.
+Readers currently require the default PostgreSQL vector leg because the
+supported LightRAG version has no public nonmutating external-vector reader
+attach. Milvus or Zilliz changes only vector storage and is writer-only:
+PostgreSQL text chunks remain the BM25/chunk metadata source, and external-vector
+retrieval uses bounded metadata post-filtering rather than PostgreSQL vector
+pushdown. The bundled Compose API and MCP services both use the Writer role; the
+diagram cards are supported role archetypes rather than an instance map. See
+[PostgreSQL](postgresql.md) for deployment details.
 
 ## Code Layering
 

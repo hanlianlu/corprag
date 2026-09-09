@@ -1,127 +1,124 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="900" viewBox="0 0 1500 900" role="img" aria-labelledby="title description">
-  <title id="title">DlightRAG system context</title>
-  <desc id="description">Browser users call DlightRAG directly with Web credentials or through an optional trusted Web edge backed by an external identity provider. Client systems call REST and inbound MCP; trusted embedding applications call the in-process Python Application. DlightRAG calls AI providers, optional tools, source systems, and parser sidecars, and persists state in PostgreSQL and a shared corpus artifact root.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="820" viewBox="0 0 1500 820" role="img" aria-labelledby="context-title context-description">
+  <title id="context-title">DlightRAG system context</title>
+  <desc id="context-description">DlightRAG is one black-box system used by browser users, REST and MCP clients, and trusted embedding applications. It may sit behind an external Web identity boundary. It interacts with AI providers, one configured parser endpoint, corpus source systems, optional Research integrations, PostgreSQL, and a shared corpus artifact root. Solid arrows are system interactions; dashed arrows are optional paths.</desc>
   <defs>
-    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <marker id="context-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
       <path d="M 0 1.2 L 8 5 L 0 8.8 z" class="arrow-head"/>
     </marker>
     <style>
       :root { color-scheme: light dark; }
       .canvas { fill: #fafaf9; }
-      .heading { fill: #1c1917; font: 600 25px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: -0.03em; }
-      .subtitle { fill: #57534e; font: 400 14px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
-      .node-title { fill: #292524; font: 600 16px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: -0.01em; }
-      .node-copy { fill: #57534e; font: 400 13.5px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
-      .system-title { fill: #fafaf9; font: 600 24px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: -0.03em; }
-      .system-copy { fill: #d6d3d1; font: 400 15px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
-      .edge-label { fill: #57534e; font: 500 12px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
-      .actor { fill: #fff; stroke: #d6d3d1; stroke-width: 1; }
-      .system { fill: #292524; stroke: #292524; stroke-width: 1; }
+      .heading { fill: #1c1917; font: 600 27px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: -0.03em; }
+      .subtitle, .legend, .edge-label { fill: #57534e; font: 400 16px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+      .node-title { fill: #292524; font: 600 18px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: -0.01em; }
+      .node-copy { fill: #57534e; font: 400 16px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+      .system-title { fill: #fafaf9; font: 650 27px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: -0.03em; }
+      .system-copy { fill: #e7e5e4; font: 400 17px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+      .actor { fill: #fff; stroke: #d6d3d1; stroke-width: 1.2; }
+      .external { fill: #f5f5f4; stroke: #d6d3d1; stroke-width: 1.2; }
+      .store { fill: #f7f2e5; stroke: #c6a85d; stroke-width: 1.2; }
+      .system { fill: #292524; stroke: #292524; stroke-width: 1.2; }
       .system-divider { stroke: #57534e; stroke-width: 1; }
-      .external { fill: #f5f5f4; stroke: #d6d3d1; stroke-width: 1; }
-      .store { fill: #f7de9d; fill-opacity: 0.24; stroke: #d2b661; stroke-width: 1; }
-      .optional { stroke-dasharray: 5 4; }
-      .edge { fill: none; stroke: #78716c; stroke-width: 1.35; marker-end: url(#arrow); }
-      .alternative { stroke-dasharray: 5 4; }
+      .edge { fill: none; stroke: #78716c; stroke-width: 1.5; marker-end: url(#context-arrow); }
+      .optional { stroke-dasharray: 7 5; }
       .arrow-head { fill: #78716c; }
       @media (prefers-color-scheme: dark) {
         .canvas { fill: #0c0a09; }
         .heading, .node-title { fill: #f5f5f4; }
-        .subtitle, .edge-label { fill: #a8a29e; }
+        .subtitle, .legend, .edge-label { fill: #a8a29e; }
         .node-copy { fill: #d6d3d1; }
         .actor, .external { fill: #1c1917; stroke: #44403c; }
-        .system { fill: #292524; stroke: #292524; }
+        .store { fill: #342e1c; stroke: #8f783f; }
+        .system { fill: #292524; stroke: #57534e; }
         .system-title { fill: #fafaf9; }
         .system-copy { fill: #d6d3d1; }
         .system-divider { stroke: #57534e; }
-        .store { fill: #574a24; fill-opacity: 0.55; stroke: #7e6c37; }
-        .edge { stroke: #78716c; }
-        .arrow-head { fill: #78716c; }
+        .edge { stroke: #a8a29e; }
+        .arrow-head { fill: #a8a29e; }
       }
     </style>
   </defs>
 
-  <rect class="canvas" width="1500" height="900"/>
+  <rect class="canvas" width="1500" height="820"/>
   <text class="heading" x="750" y="42" text-anchor="middle">DlightRAG — System Context</text>
-  <text class="subtitle" x="750" y="70" text-anchor="middle">People, identity boundaries, calling systems, external integrations, and persistent infrastructure</text>
+  <text class="subtitle" x="750" y="70" text-anchor="middle">The system as a black box: people, calling systems, external services, and persistent infrastructure</text>
 
-  <rect class="external optional" x="310" y="95" width="210" height="90" rx="12"/>
-  <text class="node-title" x="415" y="130" text-anchor="middle">Identity provider</text>
-  <text class="node-copy" x="415" y="160" text-anchor="middle">OIDC JWT claims · JWKS</text>
+  <rect class="actor" x="35" y="135" width="250" height="95" rx="12"/>
+  <text class="node-title" x="160" y="173" text-anchor="middle">Browser users</text>
+  <text class="node-copy" x="160" y="202" text-anchor="middle">Web answers and administration</text>
 
-  <rect class="actor" x="30" y="210" width="240" height="110" rx="12"/>
-  <text class="node-title" x="150" y="250" text-anchor="middle">Browser users</text>
-  <text class="node-copy" x="150" y="280" text-anchor="middle">Answers · sources · administration</text>
+  <rect class="external" x="330" y="120" width="210" height="125" rx="12"/>
+  <text class="node-title" x="435" y="155" text-anchor="middle">Optional Web boundary</text>
+  <text class="node-copy" x="435" y="184" text-anchor="middle">trusted edge</text>
+  <text class="node-copy" x="435" y="207" text-anchor="middle">+ enterprise identity provider</text>
 
-  <rect class="external optional" x="310" y="210" width="210" height="110" rx="12"/>
-  <text class="node-title" x="415" y="250" text-anchor="middle">Trusted Web edge</text>
-  <text class="node-copy" x="415" y="280" text-anchor="middle">Cloudflare · Azure · AWS</text>
-  <text class="node-copy" x="415" y="303" text-anchor="middle">optional SSO boundary</text>
+  <rect class="actor" x="35" y="330" width="250" height="100" rx="12"/>
+  <text class="node-title" x="160" y="369" text-anchor="middle">Client systems</text>
+  <text class="node-copy" x="160" y="399" text-anchor="middle">REST applications · MCP agents</text>
 
-  <rect class="actor" x="30" y="410" width="240" height="110" rx="12"/>
-  <text class="node-title" x="150" y="450" text-anchor="middle">Client systems</text>
-  <text class="node-copy" x="150" y="480" text-anchor="middle">Apps and agents via REST</text>
-  <text class="node-copy" x="150" y="503" text-anchor="middle">and inbound MCP</text>
+  <rect class="actor" x="35" y="525" width="250" height="100" rx="12"/>
+  <text class="node-title" x="160" y="564" text-anchor="middle">Embedding applications</text>
+  <text class="node-copy" x="160" y="594" text-anchor="middle">trusted in-process Python callers</text>
 
-  <rect class="actor" x="30" y="590" width="240" height="110" rx="12"/>
-  <text class="node-title" x="150" y="630" text-anchor="middle">Embedding applications</text>
-  <text class="node-copy" x="150" y="660" text-anchor="middle">Trusted in-process Python</text>
-  <text class="node-copy" x="150" y="683" text-anchor="middle">Application interface</text>
+  <rect class="system" x="590" y="150" width="360" height="475" rx="18"/>
+  <text class="system-title" x="770" y="220" text-anchor="middle">DlightRAG</text>
+  <text class="system-copy" x="770" y="254" text-anchor="middle">system under design</text>
+  <line class="system-divider" x1="650" y1="292" x2="890" y2="292"/>
+  <text class="system-copy" x="770" y="355" text-anchor="middle">Multimodal retrieval</text>
+  <text class="system-copy" x="770" y="395" text-anchor="middle">Durable Fast and Research answers</text>
+  <text class="system-copy" x="770" y="435" text-anchor="middle">Corpus and workspace governance</text>
+  <text class="system-copy" x="770" y="522" text-anchor="middle">Web · REST · MCP · Python</text>
 
-  <rect class="system" x="570" y="135" width="600" height="560" rx="18"/>
-  <text class="system-title" x="870" y="198" text-anchor="middle">DlightRAG</text>
-  <text class="system-copy" x="870" y="232" text-anchor="middle">Multimodal RAG and durable answer system</text>
-  <line class="system-divider" x1="630" y1="266" x2="1110" y2="266"/>
-  <text class="system-copy" x="870" y="316" text-anchor="middle">Grounded retrieval, citations, and highlights</text>
-  <text class="system-copy" x="870" y="366" text-anchor="middle">Durable Fast and Research answers</text>
-  <text class="system-copy" x="870" y="416" text-anchor="middle">Corpus ingestion and workspace governance</text>
-  <text class="system-copy" x="870" y="466" text-anchor="middle">Authentication, owner isolation, and Access policy</text>
-  <text class="system-copy" x="870" y="516" text-anchor="middle">Web conversations and artifact presentation</text>
-  <text class="system-copy" x="870" y="598" text-anchor="middle">LightRAG-backed · server or embedded</text>
+  <rect class="external" x="1040" y="105" width="420" height="90" rx="12"/>
+  <text class="node-title" x="1250" y="141" text-anchor="middle">AI provider endpoints</text>
+  <text class="node-copy" x="1250" y="170" text-anchor="middle">chat · VLM · embedding · rerank</text>
 
-  <rect class="external" x="1230" y="175" width="240" height="110" rx="12"/>
-  <text class="node-title" x="1350" y="217" text-anchor="middle">AI providers</text>
-  <text class="node-copy" x="1350" y="247" text-anchor="middle">Chat · VLM · embedding · rerank</text>
+  <rect class="external" x="1040" y="235" width="420" height="90" rx="12"/>
+  <text class="node-title" x="1250" y="271" text-anchor="middle">One configured parser endpoint</text>
+  <text class="node-copy" x="1250" y="300" text-anchor="middle">MinerU or Docling</text>
 
-  <rect class="external optional" x="1230" y="345" width="240" height="110" rx="12"/>
-  <text class="node-title" x="1350" y="387" text-anchor="middle">Optional tools</text>
-  <text class="node-copy" x="1350" y="417" text-anchor="middle">Exa/Tavily · outbound MCP servers</text>
+  <rect class="external" x="1040" y="365" width="420" height="90" rx="12"/>
+  <text class="node-title" x="1250" y="401" text-anchor="middle">Corpus source systems</text>
+  <text class="node-copy" x="1250" y="430" text-anchor="middle">files · HTTPS · S3-compatible · Azure Blob</text>
 
-  <rect class="external optional" x="1230" y="515" width="240" height="130" rx="12"/>
-  <text class="node-title" x="1350" y="554" text-anchor="middle">Sources and parsers</text>
-  <text class="node-copy" x="1350" y="584" text-anchor="middle">Files · HTTPS · object storage</text>
-  <text class="node-copy" x="1350" y="607" text-anchor="middle">MinerU · Docling sidecars</text>
+  <rect class="external" x="1040" y="495" width="420" height="90" rx="12"/>
+  <text class="node-title" x="1250" y="531" text-anchor="middle">Optional Research integrations</text>
+  <text class="node-copy" x="1250" y="560" text-anchor="middle">Exa/Tavily · allowlisted outbound MCP</text>
 
-  <rect class="store" x="590" y="760" width="260" height="90" rx="12"/>
-  <text class="node-title" x="720" y="797" text-anchor="middle">PostgreSQL 18</text>
-  <text class="node-copy" x="720" y="827" text-anchor="middle">Operational · corpus · Memory</text>
+  <rect class="store" x="500" y="685" width="330" height="85" rx="12"/>
+  <text class="node-title" x="665" y="719" text-anchor="middle">PostgreSQL 18</text>
+  <text class="node-copy" x="665" y="748" text-anchor="middle">operational · corpus · Memory state</text>
 
-  <rect class="store" x="890" y="760" width="260" height="90" rx="12"/>
-  <text class="node-title" x="1020" y="797" text-anchor="middle">Corpus artifacts</text>
-  <text class="node-copy" x="1020" y="827" text-anchor="middle">Shared deployment.working_dir</text>
+  <rect class="store" x="870" y="685" width="330" height="85" rx="12"/>
+  <text class="node-title" x="1035" y="719" text-anchor="middle">Shared corpus artifact root</text>
+  <text class="node-copy" x="1035" y="748" text-anchor="middle">deployment.working_dir</text>
 
-  <path class="edge" d="M 270 250 H 310"/>
-  <text class="edge-label" x="290" y="236" text-anchor="middle">Web</text>
-  <path class="edge" d="M 415 185 V 210"/>
-  <text class="edge-label" x="430" y="202">sign-in</text>
-  <path class="edge" d="M 520 250 H 570"/>
-  <text class="edge-label" x="545" y="236" text-anchor="middle">edge JWT</text>
-  <path class="edge alternative" d="M 270 285 H 290 V 350 H 570 V 320"/>
-  <text class="edge-label" x="430" y="340" text-anchor="middle">direct Web bearer</text>
-  <path class="edge" d="M 270 465 H 570"/>
-  <text class="edge-label" x="420" y="451" text-anchor="middle">REST · MCP</text>
-  <path class="edge" d="M 270 645 H 570"/>
-  <text class="edge-label" x="420" y="631" text-anchor="middle">trusted in-process call</text>
+  <path class="edge optional" d="M 285 182.5 H 330"/>
+  <path class="edge optional" d="M 540 182.5 H 590"/>
+  <text class="edge-label" x="565" y="169" text-anchor="middle">Web</text>
+  <path class="edge optional" d="M 285 212 V 275 H 565 V 245 H 590"/>
+  <text class="edge-label" x="425" y="266" text-anchor="middle">direct Web bearer</text>
+  <path class="edge" d="M 285 380 H 590"/>
+  <text class="edge-label" x="437" y="366" text-anchor="middle">REST · inbound MCP</text>
+  <path class="edge" d="M 285 575 H 590"/>
+  <text class="edge-label" x="437" y="561" text-anchor="middle">in-process call</text>
 
-  <path class="edge" d="M 1170 230 H 1230"/>
-  <text class="edge-label" x="1200" y="216" text-anchor="middle">model calls</text>
-  <path class="edge" d="M 1170 400 H 1230"/>
-  <text class="edge-label" x="1200" y="386" text-anchor="middle">tool calls</text>
-  <path class="edge" d="M 1170 580 H 1230"/>
-  <text class="edge-label" x="1200" y="566" text-anchor="middle">ingestion</text>
+  <path class="edge" d="M 950 235 H 995 V 150 H 1040"/>
+  <text class="edge-label" x="980" y="221">model calls</text>
+  <path class="edge" d="M 950 320 H 1040"/>
+  <text class="edge-label" x="995" y="306" text-anchor="middle">parse</text>
+  <path class="edge" d="M 950 410 H 1040"/>
+  <text class="edge-label" x="995" y="396" text-anchor="middle">fetch</text>
+  <path class="edge optional" d="M 950 535 H 1040"/>
+  <text class="edge-label" x="995" y="521" text-anchor="middle">tools</text>
 
-  <path class="edge" d="M 720 695 V 760"/>
-  <text class="edge-label" x="705" y="735" text-anchor="end">persist</text>
-  <path class="edge" d="M 1020 695 V 760"/>
-  <text class="edge-label" x="1035" y="735">read / write</text>
+  <path class="edge" d="M 690 625 V 685"/>
+  <text class="edge-label" x="676" y="661" text-anchor="end">persist</text>
+  <path class="edge" d="M 850 625 V 655 H 1035 V 685"/>
+  <text class="edge-label" x="945" y="646" text-anchor="middle">read / write</text>
+
+  <path class="edge" d="M 1050 790 H 1100"/>
+  <text class="legend" x="1115" y="795">interaction</text>
+  <path class="edge optional" d="M 1250 790 H 1300"/>
+  <text class="legend" x="1315" y="795">optional</text>
 </svg>
