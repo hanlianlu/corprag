@@ -104,6 +104,8 @@ def test_mineru_template_defaults_to_cross_platform_core() -> None:
     template = (_ROOT / ".env.mineru.example").read_text(encoding="utf-8")
     active = [line for line in template.splitlines() if line.startswith("MINERU_INSTALL_EXTRAS=")]
     assert active == ["MINERU_INSTALL_EXTRAS=core"]
+    assert "# MINERU_TITLE_AIDED_MODEL=deepseek-flash" in template
+    assert "# MINERU_TITLE_AIDED_MODEL=deepseek-v4.1-flash" not in template
 
 
 def test_local_ci_installs_playwright_chromium() -> None:
@@ -133,10 +135,10 @@ def test_validation_reads_the_written_repo_config_from_any_cwd(
 
 # --- Task 2: provider registry / resolvers --------------------------------
 def test_llm_openai_compatible_mapping(wiz):
-    block, env_key = wiz.resolve_llm_choice("DeepSeek", model="deepseek-v4.1-flash", base_url=None)
+    block, env_key = wiz.resolve_llm_choice("DeepSeek", model="deepseek-flash", base_url=None)
     assert block["provider"] == "openai"
     assert block["base_url"] == "https://api.deepseek.com"
-    assert block["model"] == "deepseek-v4.1-flash"
+    assert block["model"] == "deepseek-flash"
     assert env_key == "DLIGHTRAG_MODELS__CHAT__DEFAULT__API_KEY"
 
 
@@ -165,6 +167,21 @@ def test_known_llm_resolves_capacity_from_shared_catalog(wiz):
 
     assert profile["context_window_tokens"] == 1_048_576
     assert profile["max_output_tokens"] == 65_536
+
+
+def test_deepseek_default_resolves_capacity_from_shared_catalog(wiz):
+    spec = wiz.PROVIDERS_LLM["DeepSeek"]
+    block, _ = wiz.resolve_llm_choice(
+        "DeepSeek",
+        model=spec.default_model,
+        base_url=None,
+    )
+
+    profile = wiz.catalog_model_profile(block)
+
+    assert block["model"] == "deepseek-flash"
+    assert profile["context_window_tokens"] == 1_048_576
+    assert profile["max_output_tokens"] == 384_000
 
 
 def test_malformed_endpoint_is_unknown_instead_of_crashing_catalog_resolution(wiz):
@@ -247,7 +264,7 @@ def test_ask_model_accepts_provider_default_model_and_url(wiz):
 
     assert wiz._ask_model(prompter, wiz.PROVIDERS_LLM, "LLM") == (
         "DeepSeek",
-        "deepseek-v4.1-flash",
+        "deepseek-flash",
         "https://api.deepseek.com",
         "sk-valid",
     )
@@ -331,7 +348,7 @@ def test_write_config_preserves_comments_and_updates(wiz, tmp_path):
         src,
         llm_default={
             "provider": "openai",
-            "model": "deepseek-v4.1-flash",
+            "model": "deepseek-flash",
             "base_url": "https://api.deepseek.com",
         },
         embedding={
@@ -344,7 +361,7 @@ def test_write_config_preserves_comments_and_updates(wiz, tmp_path):
     text = src.read_text(encoding="utf-8")
     assert "# curated header comment" in text
     assert "# inline note" in text
-    assert "deepseek-v4.1-flash" in text
+    assert "deepseek-flash" in text
     assert "old-model" not in text
     data = wiz._yaml().load(text)
     assert data["answer"]["agent"] == {
@@ -663,7 +680,7 @@ def test_models_step_writes_config_and_env(wiz, tmp_path, monkeypatch):
         [
             "Minimum · one LLM + one embedding",
             "DeepSeek",
-            "deepseek-v4.1-flash",
+            "deepseek-flash",
             "",
             "sk-llm",  # LLM: provider, model, base_url(default), key
             "Voyage",
@@ -674,7 +691,7 @@ def test_models_step_writes_config_and_env(wiz, tmp_path, monkeypatch):
     )
     wiz.run_models_step(prompter)
     text = cfg.read_text(encoding="utf-8")
-    assert "deepseek-v4.1-flash" in text
+    assert "deepseek-flash" in text
     assert "api.deepseek.com" in text
     assert "chat_llm_reranker" in text
     assert "stale-rerank" not in text
@@ -725,7 +742,7 @@ def test_models_step_marks_embedding_dimension_change_for_required_reset(
         [
             wiz.MODEL_MODE_MINIMUM,
             "DeepSeek",
-            "deepseek-v4.1-flash",
+            "deepseek-flash",
             "",
             "sk-llm",
             "Voyage",
@@ -772,11 +789,11 @@ def test_models_step_custom_replaces_roles_and_writes_role_env(wiz, tmp_path, mo
             "",
             "sk-llm",
             "DeepSeek",
-            "deepseek-v4.1-flash",
+            "deepseek-flash",
             "",
             "sk-extract",
             "DeepSeek",
-            "deepseek-v4.1-flash",
+            "deepseek-flash",
             "",
             "sk-keyword",
             "Voyage",
@@ -906,13 +923,13 @@ def test_configure_mineru_local_env_writes_extras_and_title_aided(wiz, tmp_path,
         title_aided={
             "api_key": "sk",
             "base_url": "https://api.deepseek.com",
-            "model": "deepseek-v4.1-flash",
+            "model": "deepseek-flash",
         },
     )
     text = mineru_env.read_text(encoding="utf-8")
     assert "MINERU_INSTALL_EXTRAS=core,mlx" in text
     assert "MINERU_TITLE_AIDED_ENABLE=true" in text
-    assert "MINERU_TITLE_AIDED_MODEL=deepseek-v4.1-flash" in text
+    assert "MINERU_TITLE_AIDED_MODEL=deepseek-flash" in text
     assert "api_mode: local" in cfg.read_text(encoding="utf-8")
 
 
@@ -1119,7 +1136,7 @@ def test_models_step_returns_llm_creds(wiz, tmp_path, monkeypatch):
         [
             "Minimum · one LLM + one embedding",
             "DeepSeek",
-            "deepseek-v4.1-flash",
+            "deepseek-flash",
             "",
             "sk-llm",
             "Voyage",
@@ -1133,7 +1150,7 @@ def test_models_step_returns_llm_creds(wiz, tmp_path, monkeypatch):
     assert result["llm"] == {
         "api_key": "sk-llm",
         "base_url": "https://api.deepseek.com",
-        "model": "deepseek-v4.1-flash",
+        "model": "deepseek-flash",
     }
 
 
@@ -1197,13 +1214,13 @@ def test_run_parser_step_mineru_local_title_aided(wiz, tmp_path, monkeypatch):
     creds = {
         "api_key": "sk",
         "base_url": "https://api.deepseek.com",
-        "model": "deepseek-v4.1-flash",
+        "model": "deepseek-flash",
     }
     wiz.run_parser_step(
         prompter, info, has_gpu=False, llm_title_aided=creds, runner=lambda cmd: ran.append(cmd)
     )
     assert ["make", "mineru-title-aided"] in ran
-    assert "MINERU_TITLE_AIDED_MODEL=deepseek-v4.1-flash" in (tmp_path / ".env.mineru").read_text(
+    assert "MINERU_TITLE_AIDED_MODEL=deepseek-flash" in (tmp_path / ".env.mineru").read_text(
         encoding="utf-8"
     )
 
@@ -1870,7 +1887,7 @@ def test_change_models_declined_makes_no_change(wiz, monkeypatch):
 _MODELS_ANSWERS = [
     "Minimum · one LLM + one embedding",
     "DeepSeek",
-    "deepseek-v4.1-flash",
+    "deepseek-flash",
     "",
     "sk-llm",
     "Voyage",
@@ -1912,7 +1929,7 @@ def test_models_step_confirm_accepted_writes(wiz, tmp_path, monkeypatch):
     monkeypatch.setattr(wiz, "ENV_EXAMPLE_PATH", tmp_path / "missing")
     prompter = _ScriptedPrompter([*_MODELS_ANSWERS, True])  # accept the overwrite
     assert wiz.run_models_step(prompter, require_confirm=True) is not None
-    assert "deepseek-v4.1-flash" in cfg.read_text(encoding="utf-8")
+    assert "deepseek-flash" in cfg.read_text(encoding="utf-8")
     assert list(cfg.parent.glob(f"{cfg.name}.bak-*"))
 
 

@@ -74,9 +74,7 @@ class ProviderSpec:
 # Azure and "Other" get no default model: the name is the caller's own deployment.
 PROVIDERS_LLM: dict[str, ProviderSpec] = {
     "OpenAI": ProviderSpec("openai", "https://api.openai.com/v1", default_model="gpt-5.6-terra"),
-    "DeepSeek": ProviderSpec(
-        "openai", "https://api.deepseek.com", default_model="deepseek-v4.1-flash"
-    ),
+    "DeepSeek": ProviderSpec("openai", "https://api.deepseek.com", default_model="deepseek-flash"),
     "OpenRouter": ProviderSpec(
         "openai", "https://openrouter.ai/api/v1", default_model="google/gemini-3.8-flash"
     ),

@@ -261,7 +261,9 @@ before changing an existing workspace's vector space.
 | `gemini` | Google GenAI SDK | Gemini |
 
 Select OpenAI-compatible vendors with `base_url`; unknown provider names are
-rejected.
+rejected. Model IDs are endpoint-specific: DeepSeek-V4.1-Flash uses
+`deepseek-flash` on `api.deepseek.com`, while OpenRouter uses the distinct
+`deepseek/deepseek-v4.1-flash` slug.
 
 ### Role Configuration
 
@@ -275,7 +277,7 @@ models:
     roles:
       extract:
         provider: openai
-        model: deepseek-v4.1-flash
+        model: deepseek-flash
         base_url: https://api.deepseek.com
 ```
 
@@ -364,7 +366,7 @@ models:
     roles:
       extract:
         provider: openai
-        model: deepseek-v4.1-flash
+        model: deepseek-flash
         base_url: https://api.deepseek.com
         structured_output: json_object
 ```

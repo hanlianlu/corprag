@@ -158,6 +158,8 @@ def test_shipped_config_and_env_example_use_canonical_sections() -> None:
     assert "models:\n" in config_text
     assert "  embedding:\n" in config_text
     assert "    input_modality: auto\n" in config_text
+    assert config_text.count("model: deepseek-flash\n") == 4
+    assert "model: deepseek-v4.1-flash\n" not in config_text
     assert "DLIGHTRAG_ANSWER__WEB_SOURCES__EXA__API_KEY" in env_text
     assert "DLIGHTRAG_ANSWER__WEB_SOURCES__TAVILY__API_KEY" in env_text
     assert "DLIGHTRAG_ANSWER__WEB_SEARCH__API_KEY" not in env_text

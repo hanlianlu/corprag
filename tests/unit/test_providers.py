@@ -1069,7 +1069,7 @@ class TestOpenAICompatibleProvider:
         mock_response.choices = [MagicMock(message=MagicMock(content="hi"))]
         with patch.object(p, "_get_client") as mock_client:
             mock_client.return_value.chat.completions.create = AsyncMock(return_value=mock_response)
-            result = await p.complete([{"role": "user", "content": "hi"}], "deepseek-v4.1-flash")
+            result = await p.complete([{"role": "user", "content": "hi"}], "deepseek-flash")
         assert result.usage_details == {
             "prompt_tokens": 10,
             "completion_tokens": 5,

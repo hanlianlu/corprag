@@ -301,7 +301,7 @@ def test_packaged_catalogue_contains_native_multimodal_deepseek_profile() -> Non
         entry
         for entry in catalog._BUILTIN_MODEL_ENTRIES
         if (entry.provider, entry.model, entry.base_url)
-        == ("openai", "deepseek-v4.1-flash", "https://api.deepseek.com")
+        == ("openai", "deepseek-flash", "https://api.deepseek.com")
     ]
 
     assert len(matches) == 1

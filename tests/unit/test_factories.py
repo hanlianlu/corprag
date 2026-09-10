@@ -117,7 +117,7 @@ def test_root_resolves_model_profiles_independently_per_role() -> None:
                 ),
                 roles=ModelRoleOverrides(
                     extract=ModelSettings(
-                        model="deepseek-v4.1-flash",
+                        model="deepseek-flash",
                         base_url="https://api.deepseek.com",
                         api_key=None,
                     ),
@@ -360,7 +360,7 @@ async def test_structured_output_auto_prefers_json_schema_for_compatible_endpoin
     model = CompletionModel(
         ModelSettings(
             provider="openai",
-            model="deepseek-v4.1-flash",
+            model="deepseek-flash",
             api_key="sk-test",
             base_url="https://api.deepseek.com",
         ),

@@ -94,7 +94,7 @@
     },
     {
       "provider": "openai",
-      "model": "deepseek-v4.1-flash",
+      "model": "deepseek-flash",
       "base_url": "https://api.deepseek.com",
       "profile": {
         "context_window_tokens": 1048576,
