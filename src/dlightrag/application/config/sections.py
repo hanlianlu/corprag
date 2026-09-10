@@ -33,6 +33,7 @@ from pydantic import (
 )
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from dlightrag.application.config.yaml_source import Yaml12ConfigSettingsSource
 from dlightrag.engine.ai.settings import (
     FrozenSettings,
     ModelsSettings,
@@ -864,11 +865,9 @@ class DlightragConfig(BaseSettings):
     def settings_customise_sources(
         cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings
     ):
-        from pydantic_settings import YamlConfigSettingsSource
-
         sources = [init_settings, env_settings, dotenv_settings]
         if (yaml_path := _find_yaml_config()) is not None:
-            sources.append(YamlConfigSettingsSource(settings_cls, yaml_file=yaml_path))
+            sources.append(Yaml12ConfigSettingsSource(settings_cls, yaml_file=yaml_path))
         sources.append(file_secret_settings)
         return tuple(sources)
 

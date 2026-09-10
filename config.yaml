@@ -18,26 +18,26 @@ models:
         model: deepseek-flash
         base_url: https://api.deepseek.com
         temperature: 0.0
-        reasoning: "off"
+        reasoning: off
       keyword:
         provider: openai
         model: deepseek-flash
         base_url: https://api.deepseek.com
         temperature: 0.0
-        reasoning: "off"
+        reasoning: off
       query:
         provider: openai
         model: deepseek-flash
         base_url: https://api.deepseek.com
         temperature: 0.7
-        reasoning: "off"
+        reasoning: off
         agentic_reasoning: max
       vlm:
         provider: openai
         model: deepseek-flash
         base_url: https://api.deepseek.com
         temperature: 0.0
-        reasoning: "off"
+        reasoning: off
   embedding:
     provider: voyage
     model: voyage-multimodal-3.5

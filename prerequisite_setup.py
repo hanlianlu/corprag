@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.14"
-# dependencies = ["dlightrag", "dlightrag-memory", "questionary>=2", "rich>=13", "ruamel.yaml>=0.18"]
+# dependencies = ["dlightrag", "dlightrag-memory", "questionary>=2", "rich>=13", "ruamel.yaml>=0.19.1"]
 # [tool.uv.sources]
 # dlightrag = { path = ".", editable = true }
 # dlightrag-memory = { path = "packages/memory", editable = true }
@@ -266,9 +266,22 @@ def _yaml():
     from ruamel.yaml import YAML  # lazy: PEP 723 runtime dep / dev-test dep
 
     y = YAML()  # round-trip mode by default: preserves comments
+    y.allow_duplicate_keys = False
     y.preserve_quotes = True
     y.indent(mapping=2, sequence=4, offset=2)
     return y
+
+
+def _load_yaml12(yaml, path: Path):
+    """Load one round-trip document and reject an explicit legacy directive."""
+    data = yaml.load(path)
+    document_version = yaml.doc_infos[0].doc_version if yaml.doc_infos else None
+    if document_version is not None and (
+        document_version.major,
+        document_version.minor,
+    ) != (1, 2):
+        raise ValueError(f"{path.name} must use YAML 1.2")
+    return data
 
 
 def _apply_model_block(node, block: dict) -> None:
@@ -283,7 +296,8 @@ def _configured_embedding_dim(path: Path, env_path: Path) -> int | None:
     try:
         return int(_load_effective_config(path, env_path).models.embedding.dim)
     except OSError, TypeError, ValueError:
-        data = _yaml().load(path) or {}
+        yaml = _yaml()
+        data = _load_yaml12(yaml, path) or {}
         value = ((data.get("models") or {}).get("embedding") or {}).get("dim")
         return int(value) if value is not None else 1024
 
@@ -302,7 +316,7 @@ def write_config_yaml(
     web_sources: dict | None = None,
 ) -> None:
     yaml = _yaml()
-    data = yaml.load(path)
+    data = _load_yaml12(yaml, path)
     canonical_sections = {
         "deployment",
         "storage",
@@ -912,7 +926,8 @@ def legacy_web_settings_present(
         return True
     if not config_path.exists():
         return False
-    data = _yaml().load(config_path) or {}
+    yaml = _yaml()
+    data = _load_yaml12(yaml, config_path) or {}
     answer = data.get("answer") or {}
     return isinstance(answer, dict) and "web_search" in answer
 
@@ -927,7 +942,7 @@ def migrate_legacy_web_settings(
     new_env = "DLIGHTRAG_ANSWER__WEB_SOURCES__EXA__API_KEY"
     old_value = _dotenv_value(env_path, old_env)
     yaml = _yaml()
-    data = yaml.load(config_path) if config_path.exists() else {}
+    data = _load_yaml12(yaml, config_path) if config_path.exists() else {}
     data = data or {}
     answer = data.get("answer") or {}
     had_legacy = isinstance(answer, dict) and "web_search" in answer

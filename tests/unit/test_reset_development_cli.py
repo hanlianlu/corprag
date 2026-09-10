@@ -280,6 +280,13 @@ class TestSettingsResolution:
         with pytest.raises(ValueError, match="must be an absolute path"):
             _reset._workspace_root(tmp_path, {}, config)
 
+    def test_read_config_uses_yaml_1_2_scalar_resolution(self, tmp_path: Path) -> None:
+        (tmp_path / "config.yaml").write_text("deployment:\n  workspace: off\n")
+
+        config = _reset._read_config(tmp_path)
+
+        assert config["deployment"] == {"workspace": "off"}
+
     def test_working_dir_root_falls_back_to_repo_default(self, tmp_path: Path) -> None:
         (tmp_path / "config.yaml").write_text("answer:\n  max_images: 4\n")
         root = _reset._working_dir_root(tmp_path, {})

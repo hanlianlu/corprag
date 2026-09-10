@@ -31,8 +31,8 @@ Safety:
       partial reset scope. Product workspace reset stays a separate capability
       in scripts/reset_workspace.py; neither command imports the other.
 
-The tool imports no product code: it owns target validation, confirmation,
-orchestration, and result verification with stdlib plus asyncpg only.
+The tool imports no application modules: it owns target validation, confirmation,
+orchestration, and result verification with its host-tool dependencies.
 """
 
 from __future__ import annotations
@@ -47,7 +47,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import asyncpg
-import yaml
+from ruamel.yaml import YAML
+from ruamel.yaml.error import YAMLError
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _COMPOSE_FILE = "docker-compose.yml"
@@ -112,11 +113,21 @@ def _read_env(repo_root: Path) -> dict[str, str]:
 
 
 def _read_config(repo_root: Path) -> dict[str, object]:
-    """Read the canonical YAML without importing the application being reset."""
+    """Read the canonical YAML 1.2 without importing the application being reset."""
     config_file = repo_root / "config.yaml"
     if not config_file.is_file():
         return {}
-    loaded = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    parser = YAML(typ="safe")
+    parser.version = (1, 2)
+    parser.allow_duplicate_keys = False
+    with config_file.open(encoding="utf-8") as stream:
+        loaded = parser.load(stream)
+    document_version = parser.doc_infos[0].doc_version if parser.doc_infos else None
+    if document_version is not None and (
+        document_version.major,
+        document_version.minor,
+    ) != (1, 2):
+        raise ValueError("config.yaml must use YAML 1.2")
     if loaded is None:
         return {}
     if not isinstance(loaded, dict):
@@ -743,7 +754,7 @@ async def main(argv: list[str] | None = None) -> int:
         target = resolve_postgres_target(env, config)
         working_dir = _working_dir_root(repo_root, env, config)
         workspace_root = _workspace_root(repo_root, env, config)
-    except (OSError, TypeError, ValueError, yaml.YAMLError) as exc:
+    except (OSError, TypeError, ValueError, YAMLError) as exc:
         report.fail("configuration", str(exc))
         _print_report(report, verbose=True)
         return 1

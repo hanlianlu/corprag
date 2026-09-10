@@ -4,6 +4,7 @@
 from pathlib import Path
 
 import pytest
+from ruamel.yaml.constructor import DuplicateKeyError
 
 from dlightrag.application.config import DlightragConfig, LaneRuntimeConfig, _find_yaml_config
 
@@ -37,6 +38,61 @@ corpus:
     assert config.storage.postgres.host == "yaml-db"
     assert config.models.embedding.dim == 768
     assert config.corpus.retrieval.top_k == 43
+
+
+def test_yaml_1_2_keeps_plain_reasoning_levels_as_strings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "config.yaml").write_text(
+        """
+deployment:
+  workspace: no
+models:
+  chat:
+    default:
+      model: reasoning-model
+      reasoning: off
+      agentic_reasoning: max
+  rerank:
+    enabled: false
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setitem(DlightragConfig.model_config, "env_file", None)
+
+    config = DlightragConfig()
+
+    assert config.deployment.workspace == "no"
+    assert config.models.chat.default.reasoning == "off"
+    assert config.models.chat.default.agentic_reasoning == "max"
+    assert config.models.rerank.enabled is False
+
+
+def test_yaml_1_1_directive_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "config.yaml").write_text(
+        "%YAML 1.1\n---\ndeployment:\n  workspace: test\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setitem(DlightragConfig.model_config, "env_file", None)
+
+    with pytest.raises(ValueError, match="must use YAML 1.2"):
+        DlightragConfig()
+
+
+def test_yaml_1_2_rejects_duplicate_mapping_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "config.yaml").write_text(
+        "deployment:\n  workspace: first\n  workspace: second\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setitem(DlightragConfig.model_config, "env_file", None)
+
+    with pytest.raises(DuplicateKeyError, match="duplicate key"):
+        DlightragConfig()
 
 
 def test_incomplete_yaml_role_falls_back_but_explicit_null_is_keyless(
@@ -160,6 +216,8 @@ def test_shipped_config_and_env_example_use_canonical_sections() -> None:
     assert "    input_modality: auto\n" in config_text
     assert config_text.count("model: deepseek-flash\n") == 4
     assert "model: deepseek-v4.1-flash\n" not in config_text
+    assert config_text.count("reasoning: off\n") == 4
+    assert 'reasoning: "off"\n' not in config_text
     assert "DLIGHTRAG_ANSWER__WEB_SOURCES__EXA__API_KEY" in env_text
     assert "DLIGHTRAG_ANSWER__WEB_SOURCES__TAVILY__API_KEY" in env_text
     assert "DLIGHTRAG_ANSWER__WEB_SEARCH__API_KEY" not in env_text

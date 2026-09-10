@@ -14,6 +14,10 @@ second catalogue of normal application settings.
 constructor args > environment variables > .env > config.yaml > code defaults
 ```
 
+`config.yaml` uses YAML 1.2 semantics from the current YAML 1.2.2 specification.
+Only `true` and `false` are implicit booleans; plain `on`, `off`, `yes`, and `no`
+remain strings. An explicit YAML 1.1 document directive is rejected.
+
 Precedence determines the effective value; it does not assign ownership. Within
 one deployment, configure a setting in one place rather than relying on a
 higher-precedence source to mask a duplicate lower-precedence value. Nested

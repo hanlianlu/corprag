@@ -70,6 +70,13 @@ def test_root_is_batteries_included_and_depends_only_on_standalone_memory() -> N
     ]
 
 
+def test_runtime_uses_the_current_yaml_1_2_parser() -> None:
+    dependencies = _dependencies()
+
+    assert "ruamel.yaml>=0.19.1" in dependencies
+    assert not any(dependency.startswith("pyyaml") for dependency in dependencies)
+
+
 def test_root_has_no_server_template_runtime_dependency() -> None:
     names = {
         re.split(r"[<>=!~\[]", dependency.lower(), maxsplit=1)[0] for dependency in _dependencies()

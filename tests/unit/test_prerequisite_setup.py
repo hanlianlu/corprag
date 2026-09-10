@@ -328,6 +328,14 @@ def test_write_config_rejects_legacy_schema_with_actionable_message(wiz, tmp_pat
         wiz.write_config_yaml(src, llm_default={"model": "new"})
 
 
+def test_write_config_rejects_explicit_yaml_1_1(wiz, tmp_path):
+    src = tmp_path / "config.yaml"
+    src.write_text("%YAML 1.1\n---\nmodels: {}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must use YAML 1.2"):
+        wiz.write_config_yaml(src, llm_default={"model": "new"})
+
+
 def test_write_config_preserves_comments_and_updates(wiz, tmp_path):
     src = tmp_path / "config.yaml"
     src.write_text(
