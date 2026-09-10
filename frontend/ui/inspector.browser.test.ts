@@ -108,6 +108,80 @@ it('owns Sources state, selection, commands, and focus restoration through its p
   expect(customElements.get('source-panel-view')).to.equal(undefined);
 });
 
+async function scrollableSources(): Promise<{
+  inspector: DlInspector;
+  content: HTMLElement;
+  answer: AnswerPresentation;
+}> {
+  window.matchMedia = media(false);
+  const inspector = document.createElement('dl-inspector');
+  const style = document.createElement('style');
+  style.textContent = `
+    #panel-content { height: 160px; overflow-y: auto; overflow-anchor: none; }
+    dl-inspector-sources { display: block; }
+    [data-source-header] { height: 48px; }
+    [data-chunk] { height: 240px; }
+  `;
+  document.body.append(style, inspector);
+  const answer: AnswerPresentation = {
+    ...presentation,
+    sources: Array.from({length: 12}, (_, index) => ({
+      ...presentation.sources[0], id: String(index + 1),
+    })),
+  };
+  await inspector.openSources(answer);
+  await inspector.querySelector('dl-inspector-sources')!.updateComplete;
+  const content = inspector.querySelector<HTMLElement>('#panel-content')!;
+  expect(content.scrollHeight).to.be.greaterThan(content.clientHeight);
+  return {inspector, content, answer};
+}
+
+for (const chunkId of [undefined, '1']) {
+  it(`reveals ${chunkId ? 'a chunk citation' : 'a Reference'} after rendering, including repeated selection`, async () => {
+    const {inspector, content, answer} = await scrollableSources();
+    const sources = inspector.querySelector('dl-inspector-sources')!;
+    const selector = chunkId
+      ? '[data-ref="12"][data-chunk="1"]'
+      : '[data-ref="12"] > [data-source-header]';
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      content.scrollTop = 0;
+      await inspector.openSources(answer, '12', chunkId);
+      await sources.updateComplete;
+
+      expect(sources.querySelector('[data-ref="12"][data-expanded]')).not.to.equal(null);
+      if (chunkId) expect(sources.activeChunk).to.equal(chunkId);
+      const target = sources.querySelector<HTMLElement>(selector)!;
+      const viewport = content.getBoundingClientRect();
+      const bounds = target.getBoundingClientRect();
+      expect(content.scrollTop).to.be.greaterThan(0);
+      expect(bounds.top).to.be.at.least(viewport.top - 1);
+      expect(bounds.top).to.be.lessThan(viewport.bottom);
+    }
+
+    content.scrollTop = 0;
+    sources.requestUpdate();
+    await sources.updateComplete;
+    expect(content.scrollTop).to.equal(0);
+  });
+}
+
+it('reveals only the latest selection and ignores a missing reference', async () => {
+  const {inspector, content, answer} = await scrollableSources();
+  const sources = inspector.querySelector('dl-inspector-sources')!;
+  await Promise.all([
+    inspector.openSources(answer, '12', '1'),
+    inspector.openSources(answer, '1'),
+  ]);
+  await sources.updateComplete;
+  expect(sources.expandedRef).to.equal('1');
+  expect(content.scrollTop).to.equal(0);
+
+  await inspector.openSources(answer, 'missing');
+  await sources.updateComplete;
+  expect(content.scrollTop).to.equal(0);
+});
+
 it('does not restore stale focus when close is immediately followed by reopen', async () => {
   window.matchMedia = media(true);
   const firstTrigger = document.createElement('button');

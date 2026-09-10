@@ -34,6 +34,8 @@ export class DlInspectorSources extends LightElement {
   declare activeChunk: string | null;
   declare showAll: boolean;
 
+  #pendingReveal: string | null = null;
+
   constructor() {
     super();
     updateWhenLocaleChanges(this);
@@ -51,15 +53,24 @@ export class DlInspectorSources extends LightElement {
     this.onlyChunk = chunk || null;
     this.activeRef = ref && chunk ? ref : null;
     this.activeChunk = ref && chunk ? chunk : null;
+    this.#pendingReveal = ref
+      ? `[data-ref="${CSS.escape(ref)}"]${chunk
+        ? `[data-chunk="${CSS.escape(chunk)}"]`
+        : ' > [data-source-header]'}`
+      : null;
+    // Navigation is an intent, even when the selected values have not changed.
+    this.requestUpdate();
   }
 
   expandAll(): void {
+    this.#pendingReveal = null;
     this.showAll = true;
     this.expandedRef = null;
     this.onlyChunk = null;
   }
 
   collapseAll(): void {
+    this.#pendingReveal = null;
     this.showAll = false;
     this.expandedRef = null;
     this.onlyChunk = null;
@@ -86,6 +97,14 @@ export class DlInspectorSources extends LightElement {
         if (element.closest('[data-expanded]')) typesetRichContent(element);
       });
     }
+    const reveal = this.#pendingReveal;
+    this.#pendingReveal = null;
+    if (reveal) {
+      const target = this.querySelector<HTMLElement>(reveal);
+      if (target?.getClientRects().length) {
+        target.scrollIntoView({behavior: 'auto', block: 'nearest', inline: 'nearest'});
+      }
+    }
     this.dispatchEvent(new CustomEvent<InspectorSourcesStateDetail>(
       'dl-inspector-sources-state-change',
       {
@@ -104,6 +123,7 @@ export class DlInspectorSources extends LightElement {
   }
 
   #toggle(sourceId: string): void {
+    this.#pendingReveal = null;
     if (!this.showAll && this.expandedRef === sourceId) {
       this.expandedRef = null;
       this.onlyChunk = null;
